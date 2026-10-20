@@ -122,10 +122,11 @@ typedef struct KThread {
 } KThread;
 
 KThread *kthread_current(void);
-/* Make the main thread (not started). kthread_run_main() then runs it and returns when
- * the process exits. */
+/* Make the main thread (not started), start it (0 on success), and wait up to timeout_ms
+ * for it to exit (returns whether it has). */
 KThread *kthread_create_main(uint64_t entry, uint64_t stack_top, int priority, int core);
-void kthread_run_main(KThread *t);
+int kthread_start_main(KThread *t);
+int kthread_wait_main(KThread *t, int timeout_ms);
 
 /* Events (svcCreateEvent): one object, a "writable" and a "readable" handle to it */
 typedef struct { int signaled; char name[64]; } KEvent;   /* name: for debugging */
@@ -175,9 +176,11 @@ typedef struct {
 extern KProcess kproc;
 
 /* Read main.npdm, set up the memory map for the loaded modules, create the main thread.
- * Then kernel_run_main() calls the first module's entry point (rtld) like the real kernel. */
+ * Then kernel_start_main() runs the first module's entry point (rtld) like the real kernel,
+ * on a new thread; kernel_wait_main() waits up to timeout_ms, returns 1 once the game ended. */
 int kernel_init(const char *exefs_dir, const GameImage *img);
-void kernel_run_main(void);
+int kernel_start_main(void);
+int kernel_wait_main(int timeout_ms);
 void kernel_dump_state(void);       /* registers + host backtrace, for crash reports */
 
 /* Log of SVCs as they happen, when the LAA_TRACE_SVC environment variable is set */

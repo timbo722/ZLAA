@@ -1,0 +1,200 @@
+/*
+ * vk.c - Vulkan setup: instance, GPU, device, queue, window surface and swapchain.
+ *
+ * Steps, as Vulkan requires them:
+ *   1. instance: the connection to the Vulkan loader, with the extensions SDL needs for windows
+ *   2. physical device: pick a GPU (on WSL there is only "llvmpipe", a CPU renderer)
+ *   3. surface: the window, as Vulkan sees it (SDL makes it)
+ *   4. device + queue: our handle to the GPU, and the queue we submit work to
+ *   5. swapchain: the images that are shown in the window, one after another
+ */
+#include "vk.h"
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define VK_DEFINE(name) PFN_##name name;
+VK_GLOBAL_FUNCTIONS(VK_DEFINE)
+VK_INSTANCE_FUNCTIONS(VK_DEFINE)
+VK_DEVICE_FUNCTIONS(VK_DEFINE)
+
+Vk vk;
+
+const char *vk_result_name(VkResult r) {
+    switch (r) {
+    case VK_SUCCESS: return "VK_SUCCESS";
+    case VK_NOT_READY: return "VK_NOT_READY";
+    case VK_TIMEOUT: return "VK_TIMEOUT";
+    case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
+    case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+    default: return "(other VkResult)";
+    }
+}
+
+void vk_fail(const char *what, VkResult r) {
+    fprintf(stderr, "vulkan: %s failed: %s (%d)\n", what, vk_result_name(r), (int)r);
+    exit(1);
+}
+
+uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
+    for (uint32_t i = 0; i < vk.memory_props.memoryTypeCount; i++)
+        if ((type_bits & (1u << i)) && (vk.memory_props.memoryTypes[i].propertyFlags & want) == want) return i;
+    fprintf(stderr, "vulkan: no memory type with flags %#x\n", want);
+    exit(1);
+}
+
+static int create_instance(void) {
+    PFN_vkGetInstanceProcAddr get = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
+    if (!get) { fprintf(stderr, "vulkan: no Vulkan loader (%s)\n", SDL_GetError()); return -1; }
+#define VK_LOAD_GLOBAL(name) name = (PFN_##name)get(NULL, #name);
+    VK_GLOBAL_FUNCTIONS(VK_LOAD_GLOBAL)
+
+    Uint32 n = 0;
+    const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n);
+    const char *layers[1];
+    uint32_t nlayers = 0;
+    if (getenv("LAA_VK_VALIDATION")) layers[nlayers++] = "VK_LAYER_KHRONOS_validation";
+    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LAARecomp",
+                              .apiVersion = VK_API_VERSION_1_3 };
+    VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+                                .enabledExtensionCount = n, .ppEnabledExtensionNames = sdl_ext,
+                                .enabledLayerCount = nlayers, .ppEnabledLayerNames = layers };
+    VK_CHECK(vkCreateInstance(&ci, NULL, &vk.instance));
+#define VK_LOAD_INSTANCE(name) name = (PFN_##name)get(vk.instance, #name);
+    VK_INSTANCE_FUNCTIONS(VK_LOAD_INSTANCE)
+    return 0;
+}
+
+/* Prefer a real GPU over a CPU renderer; it must have a queue that draws and presents. */
+static int pick_gpu(void) {
+    VkPhysicalDevice gpus[16];
+    uint32_t n = 16;
+    VK_CHECK(vkEnumeratePhysicalDevices(vk.instance, &n, gpus));
+    int best = -1, best_score = -1;
+    uint32_t best_family = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(gpus[i], &p);
+        VkQueueFamilyProperties fam[16];
+        uint32_t nf = 16;
+        vkGetPhysicalDeviceQueueFamilyProperties(gpus[i], &nf, fam);
+        for (uint32_t f = 0; f < nf; f++) {
+            VkBool32 present = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(gpus[i], f, vk.surface, &present);
+            if (!(fam[f].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !present) continue;
+            int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3
+                      : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
+            if (score > best_score) { best = (int)i; best_score = score; best_family = f; }
+            break;
+        }
+    }
+    if (best < 0) { fprintf(stderr, "vulkan: no GPU can draw to this window\n"); return -1; }
+    vk.gpu = gpus[best];
+    vk.queue_family = best_family;
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(vk.gpu, &p);
+    vkGetPhysicalDeviceMemoryProperties(vk.gpu, &vk.memory_props);
+    fprintf(stderr, "vulkan: using %s (Vulkan %u.%u)\n", p.deviceName,
+            VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion));
+    return 0;
+}
+
+static int has_extension(const char *name) {
+    static VkExtensionProperties ext[512];
+    static uint32_t n;
+    if (!n) { n = 512; vkEnumerateDeviceExtensionProperties(vk.gpu, NULL, &n, ext); }
+    for (uint32_t i = 0; i < n; i++) if (strcmp(ext[i].extensionName, name) == 0) return 1;
+    return 0;
+}
+
+static int create_device(void) {
+    if (getenv("LAA_VK_INFO")) {
+        uint32_t n = 512;
+        VkExtensionProperties ext[512];
+        vkEnumerateDeviceExtensionProperties(vk.gpu, NULL, &n, ext);
+        for (uint32_t i = 0; i < n; i++) fprintf(stderr, "vulkan: extension %s\n", ext[i].extensionName);
+    }
+    (void)has_extension;
+    float priority = 1.0f;
+    VkDeviceQueueCreateInfo q = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                  .queueFamilyIndex = vk.queue_family, .queueCount = 1,
+                                  .pQueuePriorities = &priority };
+    const char *ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    /* Vulkan 1.3 features we rely on: rendering without render pass objects */
+    VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+                                             .dynamicRendering = VK_TRUE };
+    VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v13 };
+    VkPhysicalDeviceFeatures supported;
+    vkGetPhysicalDeviceFeatures(vk.gpu, &supported);
+    features.features.textureCompressionBC = supported.textureCompressionBC;
+    features.features.textureCompressionASTC_LDR = supported.textureCompressionASTC_LDR;
+    VkDeviceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
+                              .queueCreateInfoCount = 1, .pQueueCreateInfos = &q,
+                              .enabledExtensionCount = 1, .ppEnabledExtensionNames = ext };
+    VK_CHECK(vkCreateDevice(vk.gpu, &ci, NULL, &vk.device));
+#define VK_LOAD_DEVICE(name) name = (PFN_##name)vkGetDeviceProcAddr(vk.device, #name);
+    VK_DEVICE_FUNCTIONS(VK_LOAD_DEVICE)
+    vkGetDeviceQueue(vk.device, vk.queue_family, 0, &vk.queue);
+    VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                    .queueFamilyIndex = vk.queue_family };
+    VK_CHECK(vkCreateCommandPool(vk.device, &pci, NULL, &vk.pool));
+    return 0;
+}
+
+int vk_create_swapchain(uint32_t width, uint32_t height) {
+    VkSurfaceCapabilitiesKHR caps;
+    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.gpu, vk.surface, &caps));
+    VkSurfaceFormatKHR formats[32];
+    uint32_t nf = 32;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(vk.gpu, vk.surface, &nf, formats);
+    /* The game renders sRGB-encoded pixels (format RGBA8 sRGB); an sRGB swapchain shows them right. */
+    VkSurfaceFormatKHR chosen = formats[0];
+    for (uint32_t i = 0; i < nf; i++)
+        if (formats[i].format == VK_FORMAT_B8G8R8A8_SRGB || formats[i].format == VK_FORMAT_R8G8B8A8_SRGB) {
+            chosen = formats[i];
+            break;
+        }
+    vk.extent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){ width, height };
+    uint32_t count = caps.minImageCount + 1;
+    if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
+    VkSwapchainCreateInfoKHR ci = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk.surface, .minImageCount = count,
+        .imageFormat = chosen.format, .imageColorSpace = chosen.colorSpace, .imageExtent = vk.extent,
+        .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = VK_PRESENT_MODE_FIFO_KHR,               /* wait for the display: always available */
+        .clipped = VK_TRUE, .oldSwapchain = vk.swapchain,
+    };
+    VkSwapchainKHR old = vk.swapchain;
+    VK_CHECK(vkCreateSwapchainKHR(vk.device, &ci, NULL, &vk.swapchain));
+    if (old) vkDestroySwapchainKHR(vk.device, old, NULL);
+    vk.swapchain_format = chosen.format;
+    vk.image_count = 8;
+    VK_CHECK(vkGetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.image_count, vk.images));
+    return 0;
+}
+
+int vk_init(void *sdl_window) {
+    SDL_Window *window = sdl_window;
+    if (create_instance() != 0) return -1;
+    if (!SDL_Vulkan_CreateSurface(window, vk.instance, NULL, &vk.surface)) {
+        fprintf(stderr, "vulkan: no window surface (%s)\n", SDL_GetError());
+        return -1;
+    }
+    if (pick_gpu() != 0 || create_device() != 0) return -1;
+    int w, h;
+    SDL_GetWindowSizeInPixels(window, &w, &h);
+    return vk_create_swapchain((uint32_t)w, (uint32_t)h);
+}

@@ -7,9 +7,18 @@
  * drawing commands.
  */
 #include "nvn.h"
+#ifdef LAA_HAVE_SDL
+#include "render/render.h"
+#endif
+#include "render/png.h"
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <time.h>
+
+/* One GPU: submissions and presents from different game threads take turns. */
+static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void run_list(uint64_t at, int depth) {
     if (depth > 8) { fprintf(stderr, "nvn: command lists call each other too deeply\n"); return; }
@@ -58,6 +67,9 @@ static void run_list(uint64_t at, int depth) {
             memcpy(gptr(r->a[0] + r->a[2]), r->extra, r->a[3]);
             break;
         default:
+#ifdef LAA_HAVE_SDL
+            if (render_active()) render_command(r);
+#endif
             break;
         }
         at += r->size;
@@ -66,7 +78,12 @@ static void run_list(uint64_t at, int depth) {
 
 void nvn_execute(uint64_t handle) {
     if (nvn_trace > 1) fprintf(stderr, "nvn: submit %#" PRIx64 "\n", handle);
+    pthread_mutex_lock(&gpu_lock);
     run_list(handle, 0);
+#ifdef LAA_HAVE_SDL
+    if (render_active()) render_submitted();
+#endif
+    pthread_mutex_unlock(&gpu_lock);
 }
 
 /* ---- present: wait for the next vblank (60 Hz), or the interval-th one ---- */
@@ -74,7 +91,50 @@ void nvn_execute(uint64_t handle) {
 static struct timespec next_vblank;
 static uint64_t frames;
 
+/* LAA_SCREENSHOT=dir: save every 300th frame (LAA_SCREENSHOT_EVERY=n) as dir/frame_NNNNNN.png.
+ * The picture comes from the texture's guest memory. */
+static void screenshot(uint64_t texture) {
+    static const char *dir;
+    static uint64_t every;
+    if (!dir) {
+        dir = getenv("LAA_SCREENSHOT") ? getenv("LAA_SCREENSHOT") : "";
+        every = getenv("LAA_SCREENSHOT_EVERY") ? strtoull(getenv("LAA_SCREENSHOT_EVERY"), NULL, 0) : 300;
+    }
+    if (!*dir || !texture || !every || frames % every) return;
+    const Texture *t = gptr(texture);
+    TexShape s;
+    tex_shape(&t->d, &s);
+    if (s.fmt->bytes != 4 || s.fmt->bw != 1 || (t->d.flags & TEXTURE_FLAG_LINEAR)) return;
+    LevelShape l = tex_level(&s, 0);
+    uint8_t *rgba = malloc((size_t)s.width * s.height * 4);
+    if (!rgba) return;
+    uint32_t region[6] = { 0, 0, 0, l.wb, l.hb, 1 };
+    int from_gpu = 0;
+#ifdef LAA_HAVE_SDL
+    pthread_mutex_lock(&gpu_lock);
+    from_gpu = render_read_back(texture, rgba) == 0;
+    pthread_mutex_unlock(&gpu_lock);
+#endif
+    if (!from_gpu) tex_copy_level(gptr(t->address), rgba, &s, &l, region, (uint64_t)s.width * 4, 0, 1);
+    for (size_t i = 3; i < (size_t)s.width * s.height * 4; i += 4) rgba[i] = 255;   /* opaque */
+    char path[4096];
+    snprintf(path, sizeof path, "%s/frame_%06" PRIu64 ".png", dir, frames);
+    if (png_write(path, rgba, s.width, s.height, s.width * 4) == 0) fprintf(stderr, "nvn: wrote %s\n", path);
+    free(rgba);
+}
+
 void nvn_present(const Window *w, uint64_t texture) {
+    frames++;
+    if (frames == 1 || frames % 300 == 0) fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
+    screenshot(texture);
+#ifdef LAA_HAVE_SDL
+    if (render_active()) {                           /* the display's vsync paces us */
+        pthread_mutex_lock(&gpu_lock);
+        render_present(texture);
+        pthread_mutex_unlock(&gpu_lock);
+        return;
+    }
+#endif
     (void)texture;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -88,6 +148,4 @@ void nvn_present(const Window *w, uint64_t texture) {
     double behind = (double)(now.tv_sec - next_vblank.tv_sec) + (now.tv_nsec - next_vblank.tv_nsec) / 1e9;
     if (behind > 0.1) next_vblank = now;
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_vblank, NULL);
-    frames++;
-    if (frames == 1 || frames % 300 == 0) fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
 }

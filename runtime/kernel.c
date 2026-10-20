@@ -348,8 +348,10 @@ int kernel_init(const char *exefs_dir, const GameImage *img) {
     return 0;
 }
 
-void kernel_run_main(void) {
+int kernel_start_main(void) {
     printf("kernel: starting %s at 0x%" PRIx64 "\n", kproc.image.mods[0].name, main_thread->entry);
     fflush(stdout);
-    kthread_run_main(main_thread);
+    return kthread_start_main(main_thread);
 }
+
+int kernel_wait_main(int timeout_ms) { return kthread_wait_main(main_thread, timeout_ms); }

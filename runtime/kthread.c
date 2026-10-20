@@ -166,19 +166,28 @@ KThread *kthread_create_main(uint64_t entry, uint64_t stack_top, int priority, i
     return t;
 }
 
-void kthread_run_main(KThread *t) {
-    /* Run it on a thread with a big stack too, then wait: the process ends with
-     * svcExitProcess (which exits the program) or when the main thread exits. */
+int kthread_start_main(KThread *t) {
+    /* It runs on its own thread with a big stack, like every guest thread; the process ends
+     * with svcExitProcess (which exits the program) or when the main thread exits. */
     klock();
     t->started = 1;
-    if (start_host_thread(t) != 0) {
-        kunlock();
-        fprintf(stderr, "kernel: could not start the main thread\n");
-        return;
-    }
-    while (!t->exited) pthread_cond_wait(&thread_exited, &kernel_lock);
+    int r = start_host_thread(t);
     kunlock();
-    printf("kernel: main thread exited\n");
+    if (r != 0) fprintf(stderr, "kernel: could not start the main thread\n");
+    return r;
+}
+
+int kthread_wait_main(KThread *t, int timeout_ms) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += (long)timeout_ms * 1000000;
+    until.tv_sec += until.tv_nsec / 1000000000;
+    until.tv_nsec %= 1000000000;
+    klock();
+    while (!t->exited && pthread_cond_timedwait(&thread_exited, &kernel_lock, &until) == 0) {}
+    int exited = t->exited;
+    kunlock();
+    return exited;
 }
 
 /* 0x08 CreateThread(-, entry, arg, stack_top, priority, core) -> handle */

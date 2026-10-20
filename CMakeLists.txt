@@ -52,9 +52,27 @@ add_library(recomp_runtime STATIC runtime/recomp_runtime.c runtime/recomp_crypto
             runtime/services/hid.c runtime/services/vi.c
             runtime/services/pl.c runtime/services/audio.c
             runtime/hle.c runtime/nvn/nvn.c runtime/nvn/device.c runtime/nvn/memory.c
-            runtime/nvn/layout.c runtime/nvn/texture.c runtime/nvn/state.c runtime/nvn/cmdbuf.c runtime/nvn/exec.c
+            runtime/nvn/layout.c runtime/nvn/texture.c runtime/nvn/state.c runtime/nvn/cmdbuf.c runtime/nvn/exec.c runtime/render/png.c
             runtime/movie/movie.c)
 target_include_directories(recomp_runtime PUBLIC runtime)
+
+# Window, input and sound: SDL3 (also finds the Vulkan loader for us). Without it the game
+# still runs, with no window. LAA_DEPS_ROOT: a folder with unpacked SDL3 + Vulkan headers
+# (and the libraries SDL3 needs), for systems where they can't be installed.
+if(LAA_DEPS_ROOT)
+    list(APPEND CMAKE_PREFIX_PATH "${LAA_DEPS_ROOT}/usr")
+    file(GLOB _dep_lib_dirs LIST_DIRECTORIES true "${LAA_DEPS_ROOT}/usr/lib/*-linux-gnu" "${LAA_DEPS_ROOT}/usr/lib/*-linux-gnu/pulseaudio")
+    set(CMAKE_BUILD_RPATH ${_dep_lib_dirs})
+    add_link_options(-Wl,--disable-new-dtags)     # RPATH, which the libraries' own dependencies also use
+endif()
+find_package(SDL3 CONFIG)
+if(SDL3_FOUND)
+    target_sources(recomp_runtime PRIVATE runtime/render/vk.c runtime/render/render.c runtime/render/image.c
+                                          runtime/render/submit.c runtime/render/draw.c)
+    # PRIVATE: the game's generated code needn't see SDL (its compile flags stay the same)
+    target_link_libraries(recomp_runtime PRIVATE SDL3::SDL3)
+    target_compile_definitions(recomp_runtime PRIVATE LAA_HAVE_SDL=1)
+endif()
 target_compile_options(recomp_runtime PRIVATE ${RECOMP_FLAGS} -Wall -Wextra)
 
 # The game: ~290 generated chunks. Warnings are off (generated labels go unused, etc.)
@@ -70,5 +88,9 @@ set_property(TARGET game_code PROPERTY JOB_POOL_COMPILE game_pool)
 # ENABLE_EXPORTS (-rdynamic) keeps function names, so crash backtraces show f_<guest address>.
 add_executable(laa_host host/main.c)
 target_link_libraries(laa_host PRIVATE game_code m)
+if(SDL3_FOUND)
+    target_link_libraries(laa_host PRIVATE SDL3::SDL3)
+    target_compile_definitions(laa_host PRIVATE LAA_HAVE_SDL=1)
+endif()
 target_compile_options(laa_host PRIVATE -Wall)
 set_property(TARGET laa_host PROPERTY ENABLE_EXPORTS ON)

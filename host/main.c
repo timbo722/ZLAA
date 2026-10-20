@@ -1,10 +1,11 @@
 /*
  * host/main.c - desktop (Linux) host program.
  *
- *   laa_host <exefs dir> [--romfs DIR] [--dump-image FILE]
+ *   laa_host <exefs dir> [--romfs DIR] [--headless] [--dump-image FILE]
  *
- * Reserves guest memory, loads the game's modules from the player's own dump, then
- * starts the game the way the Switch kernel would (phase 3d: SVCs are being added).
+ * Reserves guest memory, loads the game's modules from the player's own dump, opens a window
+ * (SDL3 + Vulkan; --headless: none), then starts the game the way the Switch kernel would.
+ * The game runs on its own threads; this thread handles the window's events.
  * Set LAA_TRACE_SVC=1 to log every SVC, LAA_TRACE_IPC=1 to log every service command.
  *
  * The RomFS is the extracted folder, by default "romfs" next to the ExeFS folder.
@@ -20,8 +21,13 @@
 #include "nvn/nvn.h"
 #include "movie/movie.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#ifdef LAA_HAVE_SDL
+#include <SDL3/SDL.h>
+#include "render/render.h"
+#endif
 
 #define LOAD_BASE 0x8000000ull   /* must match recomp.py --base (same as yuzu/Ryujinx) */
 
@@ -41,14 +47,16 @@ static int dump_image(const GameImage *img, const char *path) {
 
 int main(int argc, char **argv) {
     const char *exefs = NULL, *romfs = NULL, *dump = NULL;
+    int headless = 0;
     for (int k = 1; k < argc; k++) {
         if (strcmp(argv[k], "--romfs") == 0 && k + 1 < argc) romfs = argv[++k];
+        else if (strcmp(argv[k], "--headless") == 0) headless = 1;
         else if (strcmp(argv[k], "--dump-image") == 0 && k + 1 < argc) dump = argv[++k];
         else if (!exefs && argv[k][0] != '-') exefs = argv[k];
         else exefs = NULL, k = argc;   /* anything else: show usage */
     }
     if (!exefs) {
-        fprintf(stderr, "usage: %s <exefs dir> [--romfs DIR] [--dump-image FILE]\n", argv[0]);
+        fprintf(stderr, "usage: %s <exefs dir> [--romfs DIR] [--headless] [--dump-image FILE]\n", argv[0]);
         return 2;
     }
     if (gmem_reserve() != 0) return 1;
@@ -75,6 +83,34 @@ int main(int argc, char **argv) {
     hle_init(&kproc.image);
     nvn_init();
     movie_init(&kproc.image);             /* the game's graphics calls now come to runtime/nvn */
-    kernel_run_main();
+
+    void *window = NULL;
+#ifdef LAA_HAVE_SDL
+    if (!headless) {
+        if (!SDL_Init(SDL_INIT_VIDEO)) {
+            fprintf(stderr, "No window: %s\n", SDL_GetError());
+        } else {
+            window = SDL_CreateWindow("LAARecomp", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+            if (!window) fprintf(stderr, "No window: %s\n", SDL_GetError());
+            else if (render_init(window) != 0) { SDL_DestroyWindow(window); window = NULL; }
+        }
+    }
+#else
+    (void)headless;
+#endif
+    if (!window) printf("Running without a window\n");
+    if (kernel_start_main() != 0) return 1;
+
+    for (;;) {
+#ifdef LAA_HAVE_SDL
+        SDL_Event e;
+        while (window && SDL_PollEvent(&e)) {
+            if (e.type == SDL_EVENT_QUIT) exit(0);
+            if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) render_resized();
+        }
+#endif
+        if (kernel_wait_main(window ? 10 : 1000)) break;   /* the game ended */
+    }
+    printf("kernel: main thread exited\n");
     return 0;
 }

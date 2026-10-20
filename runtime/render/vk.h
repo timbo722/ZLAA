@@ -1,0 +1,78 @@
+/*
+ * vk.h - the Vulkan renderer's shared state and the Vulkan functions it uses.
+ *
+ * We don't link against libvulkan: SDL finds the Vulkan loader at run time (on Android it is
+ * part of the system) and gives us vkGetInstanceProcAddr, from which we look up every other
+ * function. Each function we use is listed once in VK_FUNCTIONS, and the X-macro trick turns
+ * that list into function-pointer variables and the code that loads them.
+ */
+#ifndef VK_H
+#define VK_H
+
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
+#include <stdint.h>
+
+/* X(name): loaded with vkGetInstanceProcAddr(NULL, ...), before an instance exists */
+#define VK_GLOBAL_FUNCTIONS(X) \
+    X(vkCreateInstance) X(vkEnumerateInstanceExtensionProperties) X(vkEnumerateInstanceLayerProperties)
+
+/* loaded with vkGetInstanceProcAddr(instance, ...) */
+#define VK_INSTANCE_FUNCTIONS(X) \
+    X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties) \
+    X(vkGetPhysicalDeviceQueueFamilyProperties) X(vkGetPhysicalDeviceMemoryProperties) \
+    X(vkGetPhysicalDeviceFormatProperties) X(vkGetPhysicalDeviceFeatures) \
+    X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) \
+    X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
+    X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
+    X(vkDestroySurfaceKHR)
+
+/* loaded with vkGetDeviceProcAddr(device, ...) */
+#define VK_DEVICE_FUNCTIONS(X) \
+    X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) X(vkQueueSubmit) X(vkQueueWaitIdle) \
+    X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) \
+    X(vkQueuePresentKHR) \
+    X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkFreeCommandBuffers) \
+    X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) \
+    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) \
+    X(vkCreateSemaphore) X(vkDestroySemaphore) \
+    X(vkCreateImage) X(vkDestroyImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) \
+    X(vkCreateImageView) X(vkDestroyImageView) \
+    X(vkCreateBuffer) X(vkDestroyBuffer) X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) \
+    X(vkAllocateMemory) X(vkFreeMemory) X(vkMapMemory) X(vkUnmapMemory) \
+    X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) X(vkCmdBlitImage) \
+    X(vkCmdCopyImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) \
+    X(vkCmdBeginRendering) X(vkCmdEndRendering)
+
+#define VK_DECLARE(name) extern PFN_##name name;
+VK_GLOBAL_FUNCTIONS(VK_DECLARE)
+VK_INSTANCE_FUNCTIONS(VK_DECLARE)
+VK_DEVICE_FUNCTIONS(VK_DECLARE)
+
+/* everything about our Vulkan setup, in one place */
+typedef struct {
+    VkInstance instance;
+    VkPhysicalDevice gpu;
+    VkPhysicalDeviceMemoryProperties memory_props;
+    VkDevice device;
+    uint32_t queue_family;
+    VkQueue queue;
+    VkSurfaceKHR surface;
+    VkSwapchainKHR swapchain;
+    VkFormat swapchain_format;
+    VkExtent2D extent;
+    uint32_t image_count;
+    VkImage images[8];
+    VkCommandPool pool;
+} Vk;
+extern Vk vk;
+
+/* vk.c */
+int vk_init(void *sdl_window);               /* 0 on success */
+int vk_create_swapchain(uint32_t width, uint32_t height);
+uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);
+const char *vk_result_name(VkResult r);
+#define VK_CHECK(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) vk_fail(#call, r_); } while (0)
+void vk_fail(const char *what, VkResult r);   /* prints and exits */
+
+#endif
