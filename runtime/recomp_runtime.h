@@ -66,6 +66,9 @@ extern const RecompModuleInfo recomp_modules[];
 extern const uint64_t recomp_module_count;
 
 /* Provided by recomp_runtime.c */
+/* If set, asked first for every indirect call: returns a replacement for the guest function
+ * at addr (high-level emulation, runtime/hle.c), or NULL to run the recompiled one. */
+extern RecompFunc (*recomp_override)(uint64_t addr);
 void recomp_call_addr(CPU *c, uint64_t addr);       /* indirect call (BLR, tail calls) */
 RecompFunc recomp_lookup(uint64_t addr);
 void recomp_unimplemented(CPU *c, uint64_t pc, uint32_t insn);

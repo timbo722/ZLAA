@@ -16,6 +16,9 @@
 #include "nso_loader.h"
 #include "kernel.h"
 #include "romfs.h"
+#include "hle.h"
+#include "nvn/nvn.h"
+#include "movie/movie.h"
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
@@ -69,6 +72,9 @@ int main(int argc, char **argv) {
     }
     if (romfs_open_dir(romfs) != 0) return 1;
     if (kernel_init(exefs, &img) != 0) return 1;
+    hle_init(&kproc.image);
+    nvn_init();
+    movie_init(&kproc.image);             /* the game's graphics calls now come to runtime/nvn */
     kernel_run_main();
     return 0;
 }

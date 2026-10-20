@@ -20,6 +20,7 @@ typedef struct {
     uint64_t ro_off, ro_size;
     uint64_t data_off, data_size, bss_size;
     uint8_t  build_id[32];
+    uint32_t dynsym_off, dynsym_size, dynstr_off;   /* symbol table, relative to .rodata */
 } GameModule;
 
 typedef struct {
@@ -30,5 +31,8 @@ typedef struct {
 /* Loads every module found in exefs_dir starting at `base`. Checks that they are the
  * same files the code was generated from. Needs gmem_reserve() first. 0 on success. */
 int nso_load_exefs(const char *exefs_dir, uint64_t base, GameImage *out);
+
+/* Guest address of an exported symbol (a function or variable a module defines), or 0. */
+uint64_t nso_find_symbol(const GameImage *img, const char *name);
 
 #endif

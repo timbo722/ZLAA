@@ -19,8 +19,11 @@ RecompFunc recomp_lookup(uint64_t addr) {
     return NULL;
 }
 
+RecompFunc (*recomp_override)(uint64_t addr);
+
 void recomp_call_addr(CPU *c, uint64_t addr) {
-    RecompFunc fn = recomp_lookup(addr);
+    RecompFunc fn = recomp_override ? recomp_override(addr) : NULL;
+    if (!fn) fn = recomp_lookup(addr);
     if (!fn) {
         fprintf(stderr, "recomp: indirect call to unknown address 0x%" PRIx64 "\n", addr);
         abort();

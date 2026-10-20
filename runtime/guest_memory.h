@@ -11,6 +11,7 @@
 #define GUEST_MEMORY_H
 
 #include <stdint.h>
+#include <string.h>
 
 /* 64 GiB of guest address space. Everything the game gets lives below this, because
  * we choose every address the "kernel" hands out. */
@@ -33,5 +34,11 @@ int gmem_decommit(uint64_t addr, uint64_t size);   /* give the RAM back; reads 0
 int gmem_map_fd(uint64_t addr, uint64_t size, int fd, int writable);
 /* Move the pages at src to dst (contents included); src is left reserved with no access. */
 int gmem_move(uint64_t dst, uint64_t src, uint64_t size);
+
+/* Reading and writing guest memory from host code (memcpy: guest data needn't be aligned) */
+static inline uint32_t g_ld32(uint64_t a) { uint32_t v; memcpy(&v, guest_mem + a, 4); return v; }
+static inline uint64_t g_ld64(uint64_t a) { uint64_t v; memcpy(&v, guest_mem + a, 8); return v; }
+static inline void g_st32(uint64_t a, uint32_t v) { memcpy(guest_mem + a, &v, 4); }
+static inline void g_st64(uint64_t a, uint64_t v) { memcpy(guest_mem + a, &v, 8); }
 
 #endif

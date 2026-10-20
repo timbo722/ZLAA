@@ -94,6 +94,9 @@ int nso_load_exefs(const char *exefs_dir, uint64_t base, GameImage *out) {
         }
         m->bss_size = rd32(file + 0x3C);
         memcpy(m->build_id, file + 0x40, 32);
+        m->dynstr_off = rd32(file + 0x90);
+        m->dynsym_off = rd32(file + 0x98);
+        m->dynsym_size = rd32(file + 0x9C);
         m->base = addr;
         m->size = (m->data_off + m->data_size + m->bss_size + GUEST_PAGE - 1) & ~(GUEST_PAGE - 1);
         if (m->ro_off < m->text_off + m->text_size || m->data_off < m->ro_off + m->ro_size)
@@ -146,4 +149,24 @@ int nso_load_exefs(const char *exefs_dir, uint64_t base, GameImage *out) {
 fail:
     free(file);
     return -1;
+}
+
+/* Elf64_Sym (24 bytes): name offset (4), info (1), other (1), section (2), value (8), size (8).
+ * Section 0 means "not defined here" (an import). */
+uint64_t nso_find_symbol(const GameImage *img, const char *name) {
+    size_t len = strlen(name);
+    for (int k = 0; k < img->count; k++) {
+        const GameModule *m = &img->mods[k];
+        uint64_t sym = m->base + m->ro_off + m->dynsym_off, str = m->base + m->ro_off + m->dynstr_off;
+        for (uint64_t i = 0; i < m->dynsym_size / 24; i++) {
+            const uint8_t *e = guest_mem + sym + 24 * i;
+            uint16_t shndx;
+            uint64_t value;
+            memcpy(&shndx, e + 6, 2);
+            memcpy(&value, e + 8, 8);
+            const char *s = (const char *)guest_mem + str + rd32(e);
+            if (shndx != 0 && strncmp(s, name, len + 1) == 0) return m->base + value;
+        }
+    }
+    return 0;
 }

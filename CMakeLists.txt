@@ -50,7 +50,10 @@ add_library(recomp_runtime STATIC runtime/recomp_runtime.c runtime/recomp_crypto
             runtime/services/time.c runtime/services/fs.c runtime/romfs.c
             runtime/services/acc.c runtime/services/set.c
             runtime/services/hid.c runtime/services/vi.c
-            runtime/services/pl.c runtime/services/audio.c)
+            runtime/services/pl.c runtime/services/audio.c
+            runtime/hle.c runtime/nvn/nvn.c runtime/nvn/device.c runtime/nvn/memory.c
+            runtime/nvn/layout.c runtime/nvn/texture.c runtime/nvn/state.c runtime/nvn/cmdbuf.c runtime/nvn/exec.c
+            runtime/movie/movie.c)
 target_include_directories(recomp_runtime PUBLIC runtime)
 target_compile_options(recomp_runtime PRIVATE ${RECOMP_FLAGS} -Wall -Wextra)
 
