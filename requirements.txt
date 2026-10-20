@@ -1,0 +1,5 @@
+pyelftools>=0.29
+capstone>=5.0
+ziglang>=0.13
+lz4>=4.0
+unicorn>=2.0

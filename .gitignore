@@ -1,0 +1,21 @@
+# Build output
+build/
+__pycache__/
+*.pyc
+
+# ---- NEVER COMMIT GAME FILES OR KEYS ----
+*.keys
+prod.keys
+title.keys
+*.nsp
+*.xci
+*.nca
+*.nso
+*.nro
+*.npdm
+*.romfs
+exefs/
+romfs/
+dump/
+dumps/
+game/
