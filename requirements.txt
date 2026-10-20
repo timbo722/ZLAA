@@ -3,3 +3,5 @@ capstone>=5.0
 ziglang>=0.13
 lz4>=4.0
 unicorn>=2.0
+cmake>=3.20
+ninja>=1.11

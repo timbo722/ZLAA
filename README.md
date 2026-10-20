@@ -18,7 +18,7 @@ interpreted while the game runs.
 |---|---|---|
 | 1 | Load the game's executable (NSO), find all functions | **done** (148k functions, 8.77M instructions) |
 | 2 | **Recompiler: ARM64 → C** | **done: 99.99% of the game's instructions, fuzz-verified** |
-| 3 | Boot: implement Horizon OS services until the main loop runs | not started |
+| 3 | Boot: implement Horizon OS services until the main loop runs | started: whole game compiles and links (CMake/Ninja) |
 | 4 | Graphics: Switch GPU commands + shaders → Vulkan | not started |
 | 5 | Input, audio, Android packaging, polish | not started |
 
@@ -46,6 +46,18 @@ The report lists each module and its build ID, how many functions were found and
 and every instruction the translator can't handle yet, sorted by how often it appears.
 That list decides what gets implemented next.
 
+## Building the whole game
+
+```
+python recompiler/recomp.py <path-to>/exefs -o ~/laar-build/gen --no-comments
+cmake -S . -B ~/laar-build/host -G Ninja -DGAME_GEN_DIR=$HOME/laar-build/gen
+cmake --build ~/laar-build/host
+```
+
+The generated C (531 MB, 290 files) is derived from your dump, so keep it outside this repo.
+On WSL keep it on the Linux side (`~/...`), not under `/mnt/c`. A full build takes ~9 minutes
+on 22 threads; after that only changed chunks recompile.
+
 ## Layout
 
 ```
@@ -59,6 +71,8 @@ recompiler/
 runtime/
   recomp_runtime.h CPU struct (registers, flags, memory) + helpers the generated C uses
   recomp_runtime.c indirect calls, error reporting (later: OS services)
+host/main.c        desktop host program (for now: proves the whole game links)
+CMakeLists.txt     builds runtime + generated game code + host program
 tests/
   programs/*.c     test programs; every test_* function is checked
   support/         memset/memcpy for the ARM64 side, plus nso.ld / nso_crt0.s / elf2nso.py

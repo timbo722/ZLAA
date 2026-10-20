@@ -26,11 +26,11 @@ if(CMAKE_C_FLAGS MATCHES "fast-math" OR CMAKE_C_FLAGS_RELEASE MATCHES "fast-math
 endif()
 set(RECOMP_FLAGS -fwrapv -ffp-contract=off -fno-math-errno)
 
-# Each compile of a chunk needs up to ~1.5 GB of RAM. Running one job per core could run the
-# machine out of memory, so game chunks get their own Ninja pool sized by RAM.
+# Each chunk compile needs ~0.7 GB of RAM (16 jobs peaked at 11 GB). One job per core could
+# run the machine out of memory, so game chunks get their own Ninja pool sized by RAM.
 cmake_host_system_information(RESULT ram_mb QUERY TOTAL_PHYSICAL_MEMORY)
 cmake_host_system_information(RESULT cores QUERY NUMBER_OF_LOGICAL_CORES)
-math(EXPR jobs_by_ram "${ram_mb} / 1500")
+math(EXPR jobs_by_ram "${ram_mb} / 1000")
 if(jobs_by_ram GREATER cores)
     set(jobs_by_ram ${cores})
 endif()
