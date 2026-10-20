@@ -42,18 +42,30 @@ set_property(GLOBAL APPEND PROPERTY JOB_POOLS game_pool=${GAME_JOBS})
 message(STATUS "Game chunks: ${GAME_JOBS} parallel jobs (${ram_mb} MB RAM, ${cores} cores)")
 
 # Runtime: hand-written support code
-add_library(recomp_runtime STATIC runtime/recomp_runtime.c runtime/recomp_crypto.c)
+add_library(recomp_runtime STATIC runtime/recomp_runtime.c runtime/recomp_crypto.c
+            runtime/guest_memory.c runtime/nso_loader.c runtime/kernel.c runtime/kthread.c runtime/svc.c
+            runtime/ipc.c runtime/services/sm.c runtime/services/lm.c
+            runtime/services/applet.c runtime/services/apm.c
+            runtime/services/misc.c runtime/services/nvdrv.c runtime/gpu/gpu.c
+            runtime/services/time.c runtime/services/fs.c runtime/romfs.c
+            runtime/services/acc.c runtime/services/set.c
+            runtime/services/hid.c runtime/services/vi.c
+            runtime/services/pl.c runtime/services/audio.c)
 target_include_directories(recomp_runtime PUBLIC runtime)
-target_compile_options(recomp_runtime PRIVATE ${RECOMP_FLAGS} -Wall)
+target_compile_options(recomp_runtime PRIVATE ${RECOMP_FLAGS} -Wall -Wextra)
 
 # The game: ~290 generated chunks. Warnings are off (generated labels go unused, etc.)
 add_library(game_code STATIC ${GAME_SOURCES})
 target_include_directories(game_code PRIVATE "${GAME_GEN_DIR}")
 target_link_libraries(game_code PUBLIC recomp_runtime)
+find_package(Threads REQUIRED)
+target_link_libraries(recomp_runtime PUBLIC Threads::Threads)
 target_compile_options(game_code PRIVATE ${RECOMP_FLAGS} -w)
 set_property(TARGET game_code PROPERTY JOB_POOL_COMPILE game_pool)
 
-# Desktop host program. For now it only proves that everything links.
+# Desktop host program: loads the player's ExeFS and runs the game.
+# ENABLE_EXPORTS (-rdynamic) keeps function names, so crash backtraces show f_<guest address>.
 add_executable(laa_host host/main.c)
 target_link_libraries(laa_host PRIVATE game_code m)
 target_compile_options(laa_host PRIVATE -Wall)
+set_property(TARGET laa_host PROPERTY ENABLE_EXPORTS ON)

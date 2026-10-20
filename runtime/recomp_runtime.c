@@ -1,7 +1,6 @@
 /*
  * recomp_runtime.c - support code shared by all recompiled programs.
- * Right now this is just indirect-call lookup and error reporting. Later,
- * this is where Horizon OS services (SVCs) get implemented.
+ * Indirect-call lookup and error reporting. SVCs (OS calls) are in svc.c.
  */
 #include "recomp_runtime.h"
 #include <stdio.h>
@@ -38,12 +37,6 @@ void recomp_unimplemented(CPU *c, uint64_t pc, uint32_t insn) {
 void recomp_bad_jump(CPU *c, uint64_t pc, uint64_t target) {
     (void)c;
     fprintf(stderr, "recomp: jump from 0x%" PRIx64 " to 0x%" PRIx64 " has no known destination\n", pc, target);
-    abort();
-}
-
-void recomp_svc(CPU *c, uint64_t pc, uint32_t imm) {
-    (void)c;
-    fprintf(stderr, "recomp: SVC 0x%" PRIx32 " at 0x%" PRIx64 " (OS services not implemented yet)\n", imm, pc);
     abort();
 }
 
