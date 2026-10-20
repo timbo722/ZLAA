@@ -22,7 +22,7 @@ import time
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from arm64 import Translator, Unsupported, branch_info, hx  # noqa: E402
+from arm64 import Translator, Unsupported, bl_over_literal, branch_info, hx  # noqa: E402
 from discover import discover  # noqa: E402
 
 try:
@@ -122,6 +122,8 @@ def recompile_function(img, funcs, start, name, size, stats, comments=True):
             stats.unsupported_why[str(e)] += 1
             func_bad = True
             stmts = [f"recomp_unimplemented(c, {hx(pc)}, 0x{insn:08x}u); /* {e} */"]
+        if insn == 0x94000002 and bl_over_literal(img.word, pc) is not None:
+            stmts.append("return;  /* the next word is data: the callee returned past it */")
         stats.instructions += 1
         stats.bad_jumps += sum(s.count("recomp_bad_jump") for s in stmts)
         if comments:
@@ -300,6 +302,13 @@ def main():
         table += [f"    {{ {hx(a)}, {cname(a)} }},  /* {n} */\n" for a, (n, _) in funcs.items()]
         table.append("};\n")
         table.append(f"const uint64_t recomp_func_count = {len(funcs)};\n")
+        if chunked:
+            table.append("const RecompModuleInfo recomp_modules[] = {\n")
+            for m in img.modules:
+                bid = ",".join(f"0x{b:02x}" for b in m.build_id[:32].ljust(32, bytes(1)))
+                table.append(f'    {{ "{m.name}", {hx(m.base)}, {hx(m.size)}, {{ {bid} }} }},\n')
+            table.append("};\n")
+            table.append(f"const uint64_t recomp_module_count = {len(img.modules)};\n")
         if args.embed_image:
             table.append("\n".join(emit_image(img)) + "\n")
         if chunked:

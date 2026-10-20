@@ -148,6 +148,22 @@ def branch_info(insn, pc):
     return None
 
 
+def bl_over_literal(word_at, pc):
+    """Hand-written code (rtld) gets addresses with this idiom:
+        pc:     BL   pc+8            X30 = pc+4
+        pc+4:   .word offset         data, not an instruction
+        pc+8:   LDR  Wn, [X30]       Xn = pc+4 + offset (after SXTW and ADD Xn, Xn, X30)
+    word_at(addr) reads a code word. If the BL at pc is this idiom, returns the address it
+    computes, else None. The callee never returns to pc+4 (that's data): it either never
+    returns or returns straight to our own caller, so the translator ends the function there."""
+    if word_at(pc) != 0x94000002:                       # BL pc+8
+        return None
+    ldr = word_at(pc + 8)
+    if ldr & 0xFFFFFFE0 != 0xB94003C0:                  # LDR Wn, [X30]
+        return None
+    return (pc + 4 + sx(word_at(pc + 4), 32)) & MASK64
+
+
 # --------------------------------------------------------------------------
 # The translator
 # --------------------------------------------------------------------------

@@ -51,9 +51,19 @@ typedef struct {
     RecompFunc fn;
 } RecompFuncEntry;
 
+/* The modules the code was generated from (chunked game builds only), so the loader
+ * can check that the player's dump is the same version. */
+typedef struct {
+    const char *name;
+    uint64_t base, size;
+    uint8_t build_id[32];
+} RecompModuleInfo;
+
 /* Provided by the generated code */
 extern const RecompFuncEntry recomp_func_table[];
 extern const uint64_t recomp_func_count;
+extern const RecompModuleInfo recomp_modules[];
+extern const uint64_t recomp_module_count;
 
 /* Provided by recomp_runtime.c */
 void recomp_call_addr(CPU *c, uint64_t addr);       /* indirect call (BLR, tail calls) */

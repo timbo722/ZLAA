@@ -155,8 +155,11 @@ def _cstr(img, addr):
         addr += 1
 
 
-def load_exefs(paths, base=DEFAULT_BASE, verify_hashes=True):
-    """Load a list of NSO files (or one ExeFS directory) into one Image, linked together."""
+def load_exefs(paths, base=DEFAULT_BASE, verify_hashes=True, relocate=True):
+    """Load a list of NSO files (or one ExeFS directory) into one Image, linked together.
+
+    relocate=False leaves memory exactly as the kernel loads it (rtld links it later, at run
+    time); relocations are still read, so code_pointers is the same either way."""
     if isinstance(paths, str) and os.path.isdir(paths):
         found = [os.path.join(paths, n) for n in MODULE_ORDER if os.path.isfile(os.path.join(paths, n))]
         if not found:
@@ -243,6 +246,12 @@ def load_exefs(paths, base=DEFAULT_BASE, verify_hashes=True):
                 if rtype == R_AARCH64_RELATIVE:
                     value = mod.base + addend
                 elif rtype in (R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_ABS64):
+                    if rtype == R_AARCH64_JUMP_SLOT:
+                        # Lazy binding: until rtld resolves it, the slot holds the offset of
+                        # PLT0, which calls rtld's resolver. That stub must be recompiled too.
+                        plt0 = mod.base + img.u64(where)
+                        if img.is_code(plt0):
+                            img.code_pointers.add(plt0)
                     name, svalue, _, _, bind, defined = info["syms"][sym_idx]
                     if defined:
                         target = mod.base + svalue
@@ -257,7 +266,8 @@ def load_exefs(paths, base=DEFAULT_BASE, verify_hashes=True):
                     label = RELOC_NAMES.get(rtype, str(rtype))
                     unknown[label] = unknown.get(label, 0) + 1
                     continue
-                img.write_u64(where, value)
+                if relocate:
+                    img.write_u64(where, value)
                 if img.is_code(value):
                     img.code_pointers.add(value)
         for tag_arr, tag_sz in ((DT_INIT_ARRAY, DT_INIT_ARRAYSZ), (DT_FINI_ARRAY, DT_FINI_ARRAYSZ)):

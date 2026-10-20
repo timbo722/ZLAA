@@ -17,7 +17,7 @@ A function without a known size runs until the next known start.
 import bisect
 import struct
 
-from arm64 import branch_info
+from arm64 import bl_over_literal, branch_info
 
 SOURCES = ("symbol", "eh_frame", "pointer", "call", "tailcall")
 
@@ -194,6 +194,9 @@ def discover(img, log=print):
                 continue
             if info[0] == "bl":
                 fs.add(info[1], "call")
+                ptr = bl_over_literal(img.word, pc)
+                if ptr is not None and img.is_code(ptr):
+                    fs.add(ptr, "pointer")
             elif info[0] in ("b", "cond"):
                 jumps.append((pc, info[1]))
 

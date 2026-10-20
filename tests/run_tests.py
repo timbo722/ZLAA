@@ -110,7 +110,10 @@ def write_harness(path, tests, symbols):
         '#include "recomp_runtime.h"',
         "#include <stdio.h>",
         "#include <inttypes.h>",
+        "#include <stdlib.h>",
         "void recomp_init(CPU *c);",
+        "/* test programs make no OS calls; the game's SVCs live in runtime/svc.c */",
+        'void recomp_svc(CPU *c, uint64_t pc, uint32_t imm) { (void)c; fprintf(stderr, "SVC 0x%x at 0x%" PRIx64 "\\n", imm, pc); abort(); }',
         "extern const uint64_t recomp_stack_top;",
     ]
     for t in tests:
