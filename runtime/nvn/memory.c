@@ -6,8 +6,47 @@
  * just returns where it already is.
  */
 #include "nvn.h"
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 static uint64_t next_debug_id = 1;
+
+/* Every live memory pool, so the renderer can find which pool a GPU address belongs to. */
+static struct { uint64_t storage, size; } *pools;
+static int npools, pools_cap;
+static pthread_mutex_t pools_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void pool_register(uint64_t storage, uint64_t size) {
+    pthread_mutex_lock(&pools_lock);
+    if (npools == pools_cap) {
+        pools_cap = pools_cap ? pools_cap * 2 : 64;
+        pools = realloc(pools, (size_t)pools_cap * sizeof *pools);
+    }
+    pools[npools].storage = storage;
+    pools[npools++].size = size;
+    pthread_mutex_unlock(&pools_lock);
+}
+
+static void pool_unregister(uint64_t storage) {
+    pthread_mutex_lock(&pools_lock);
+    for (int i = 0; i < npools; i++)
+        if (pools[i].storage == storage) { pools[i] = pools[--npools]; break; }
+    pthread_mutex_unlock(&pools_lock);
+}
+
+int nvn_pool_find(uint64_t address, uint64_t *storage, uint64_t *size) {
+    int found = 0;
+    pthread_mutex_lock(&pools_lock);
+    for (int i = 0; i < npools && !found; i++)
+        if (address - pools[i].storage < pools[i].size) {
+            *storage = pools[i].storage;
+            *size = pools[i].size;
+            found = 1;
+        }
+    pthread_mutex_unlock(&pools_lock);
+    return found;
+}
 
 /* ---- memory pool ---- */
 
@@ -28,8 +67,10 @@ static void nvnMemoryPoolBuilderGetSize(CPU *c)     { RET(MPB->size); }
 static void nvnMemoryPoolInitialize(CPU *c) {
     MemoryPoolBuilder *b = gptr(ARG(1));
     *(MemoryPool *)gptr(ARG(0)) = (MemoryPool){ b->storage, b->size, b->flags };
+    pool_register(b->storage, b->size);
     RET(1);
 }
+static void nvnMemoryPoolFinalize(CPU *c) { pool_unregister(((MemoryPool *)gptr(ARG(0)))->storage); }
 #define MP ((MemoryPool *)gptr(ARG(0)))
 static void nvnMemoryPoolMap(CPU *c)              { RET(MP->storage); }
 static void nvnMemoryPoolGetBufferAddress(CPU *c) { RET(MP->storage); }
@@ -66,7 +107,7 @@ const NvnEntry nvn_memory_functions[] = {
     NVN_ENTRY(nvnMemoryPoolBuilderSetFlags), NVN_ENTRY(nvnMemoryPoolBuilderSetStorage),
     NVN_ENTRY(nvnMemoryPoolBuilderGetDevice), NVN_ENTRY(nvnMemoryPoolBuilderGetFlags),
     NVN_ENTRY(nvnMemoryPoolBuilderGetMemory), NVN_ENTRY(nvnMemoryPoolBuilderGetSize),
-    NVN_ENTRY(nvnMemoryPoolInitialize), { "nvnMemoryPoolFinalize", nvn_nothing },
+    NVN_ENTRY(nvnMemoryPoolInitialize), NVN_ENTRY(nvnMemoryPoolFinalize),
     { "nvnMemoryPoolSetDebugLabel", nvn_nothing },
     NVN_ENTRY(nvnMemoryPoolMap), NVN_ENTRY(nvnMemoryPoolGetBufferAddress),
     NVN_ENTRY(nvnMemoryPoolGetSize), NVN_ENTRY(nvnMemoryPoolGetFlags),

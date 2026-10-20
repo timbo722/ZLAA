@@ -7,6 +7,7 @@
  */
 #include "png.h"
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,7 +38,7 @@ static void chunk(FILE *f, const char *type, const uint8_t *data, uint32_t len) 
     fwrite(c, 1, 4, f);
 }
 
-int png_write(const char *path, const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t stride) {
+int png_write(const char *path, const uint8_t *rgba, uint32_t width, uint32_t height, int32_t stride) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
@@ -66,7 +67,7 @@ int png_write(const char *path, const uint8_t *rgba, uint32_t width, uint32_t he
         *o++ = done + n == raw;                      /* "last block" flag, stored type */
         *o++ = n & 0xFF; *o++ = n >> 8; *o++ = ~n & 0xFF; *o++ = (~n >> 8) & 0xFF;
         for (uint32_t i = 0; i < n; i++) {
-            uint8_t v = x == 0 ? 0 : rgba[(size_t)y * stride + x - 1];
+            uint8_t v = x == 0 ? 0 : rgba[(ptrdiff_t)y * stride + x - 1];
             *o++ = v;
             a = (a + v) % 65521;
             b = (b + a) % 65521;

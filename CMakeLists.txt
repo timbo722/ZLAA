@@ -56,6 +56,14 @@ add_library(recomp_runtime STATIC runtime/recomp_runtime.c runtime/recomp_crypto
             runtime/movie/movie.c)
 target_include_directories(recomp_runtime PUBLIC runtime)
 
+# The shader translator (Maxwell -> SPIR-V), also built into a test tool
+add_library(laa_shader STATIC runtime/render/shader/translate.c runtime/render/shader/alu.c
+            runtime/render/shader/texture.c runtime/render/shader/spirv_builder.c)
+target_include_directories(laa_shader PUBLIC runtime)
+target_compile_options(laa_shader PRIVATE -Wall -Wextra)
+add_executable(shader_tool tools/shader_tool.c)
+target_link_libraries(shader_tool PRIVATE laa_shader)
+
 # Window, input and sound: SDL3 (also finds the Vulkan loader for us). Without it the game
 # still runs, with no window. LAA_DEPS_ROOT: a folder with unpacked SDL3 + Vulkan headers
 # (and the libraries SDL3 needs), for systems where they can't be installed.
@@ -68,7 +76,9 @@ endif()
 find_package(SDL3 CONFIG)
 if(SDL3_FOUND)
     target_sources(recomp_runtime PRIVATE runtime/render/vk.c runtime/render/render.c runtime/render/image.c
-                                          runtime/render/submit.c runtime/render/draw.c)
+                                          runtime/render/submit.c runtime/render/draw.c runtime/render/buffer.c
+                                          runtime/render/pipeline.c)
+    target_link_libraries(recomp_runtime PRIVATE laa_shader)
     # PRIVATE: the game's generated code needn't see SDL (its compile flags stay the same)
     target_link_libraries(recomp_runtime PRIVATE SDL3::SDL3)
     target_compile_definitions(recomp_runtime PRIVATE LAA_HAVE_SDL=1)

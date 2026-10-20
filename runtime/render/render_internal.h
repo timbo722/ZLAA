@@ -22,6 +22,7 @@ typedef struct HostImage {
     int needs_upload;                /* guest memory has data the image doesn't */
     int layout_ready;                /* moved to VK_IMAGE_LAYOUT_GENERAL */
     int gpu_written;                 /* rendered into: the image is newer than guest memory */
+    struct ImageView *views;         /* views made for sampling it (image.c) */
 } HostImage;
 
 VkFormat render_vk_format(uint32_t nvn_format);
@@ -32,6 +33,12 @@ void render_upload(HostImage *h);                /* guest memory -> image, recor
 void render_image_init_layout(VkCommandBuffer cmd, HostImage *h);
 /* the image for a texture, ready to use: uploaded if the CPU's copy is newer */
 HostImage *render_image_ready(uint64_t texture);
+/* A view of an image for sampling, as a shader texture of `dim`/`array` wants it, applying
+ * an NVN texture view (view->set == 0: the whole texture) */
+VkImageView render_image_view(HostImage *h, const TextureView *view, int dim, int array);
+/* A 1x1 black image view of the given kind, for textures we can't provide */
+VkImageView render_dummy_view(int dim, int array);
+VkSampler render_sampler(const SamplerDesc *d);
 
 /* ---- submissions (submit.c) ---- */
 /* The command buffer being recorded; recording starts on first use. */
@@ -45,7 +52,48 @@ void render_barrier(VkCommandBuffer cmd);
 void *render_staging(uint64_t size, uint64_t *offset);
 VkBuffer render_staging_buffer(void);
 
+/* ---- GPU access to guest memory (buffer.c) ---- */
+/* The VkBuffer and offset for a GPU (= guest) address inside a memory pool; 0 on success */
+int render_guest_buffer(uint64_t address, VkBuffer *buffer, VkDeviceSize *offset);
+
+/* ---- shaders and pipelines (pipeline.c) ---- */
+#include "render/shader/shader.h"
+typedef struct HostShader {
+    struct HostShader *next;
+    uint64_t code;
+    int stage;
+    VkShaderModule module;           /* 0: translation failed (info.error says why) */
+    ShaderInfo info;
+    uint64_t constants;              /* guest address and size of its c1 data */
+    uint32_t constants_size;
+} HostShader;
+HostShader *render_shader(uint64_t code, uint64_t control, int stage);
+
+typedef struct { uint8_t src_color, dst_color, src_alpha, dst_alpha, eq_color, eq_alpha; } BlendKey;
+
+/* Everything a pipeline depends on. Zero it before filling it in: it is compared bytewise. */
+typedef struct {
+    VkShaderModule vs, fs;
+    uint64_t vs_code, fs_code;       /* (for messages) */
+    uint32_t vs_inputs;              /* attribute locations the vertex shader reads */
+    uint8_t nattribs;
+    struct { uint8_t format, stream; uint16_t offset; } attr[16];
+    struct { uint32_t stride, divisor; } stream[16];
+    uint8_t topology, primitive_restart, cull, front_ccw, rasterizer_discard, depth_bias, alpha_to_coverage;
+    uint8_t depth_test, depth_write, depth_func, stencil_test, stencil_func[2];
+    uint16_t stencil_ops[2];
+    uint8_t blend_enable, logic_op, ncolor, pad;
+    uint32_t channel_mask;
+    BlendKey blend[8];
+    VkFormat color_format[8], depth_format;
+} PipelineKey;
+VkPipeline render_pipeline(const PipelineKey *k);
+VkPipelineLayout render_pipeline_layout(void);
+VkDescriptorSetLayout render_set_layout(void);
+VkCompareOp render_compare_op(uint32_t nvn_func);
+
 /* ---- command execution (draw.c) ---- */
 void render_end_rendering(void);                 /* close the current vkCmdBeginRendering */
+void render_submission_done(void);               /* the GPU finished everything submitted */
 
 #endif

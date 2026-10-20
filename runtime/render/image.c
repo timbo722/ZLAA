@@ -135,8 +135,21 @@ static void create(HostImage *h) {
     VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &h->target_view));
 }
 
+/* Can this GPU sample (and, for uncompressed formats, render to) images of this format? */
+static int format_supported(VkFormat f) {
+    static uint8_t known[256];                       /* 0 unknown, 1 yes, 2 no (formats < 256 only) */
+    if (f < 256 && known[f]) return known[f] == 1;
+    VkFormatProperties p;
+    vkGetPhysicalDeviceFormatProperties(vk.gpu, f, &p);
+    int ok = (p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    if (f < 256) known[f] = ok ? 1 : 2;
+    if (!ok) fprintf(stderr, "render: this GPU can't use texture format %d\n", (int)f);
+    return ok;
+}
+
 HostImage *render_image(const Texture *t) {
     if (!t || !t->address || render_vk_format(t->d.format) == VK_FORMAT_UNDEFINED) return NULL;
+    if (!format_supported(render_vk_format(t->d.format))) return NULL;
     unsigned b = bucket_of(t->address);
     for (HostImage *h = buckets[b]; h; h = h->next)
         if (h->address == t->address && same_image(&h->desc, &t->d)) return h;
@@ -184,6 +197,7 @@ void render_upload(HostImage *h) {
             }
         }
     }
+    render_end_rendering();                          /* (copies can't happen while rendering) */
     VkCommandBuffer cmd = render_cmd();
     render_image_init_layout(cmd, h);
     vkCmdCopyBufferToImage(cmd, render_staging_buffer(), h->image, VK_IMAGE_LAYOUT_GENERAL, ncopies, copies);
@@ -214,4 +228,143 @@ void render_image_init_layout(VkCommandBuffer cmd, HostImage *h) {
         .image = h->image, .subresourceRange = { h->aspects, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS } };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
                          0, NULL, 0, NULL, 1, &b);
+}
+
+/* ---- views and samplers for shaders ---- */
+
+typedef struct ImageView {
+    struct ImageView *next;
+    TextureView view;
+    int dim, array;
+    VkImageView handle;
+} ImageView;
+
+/* NVN swizzle (ZERO, ONE, R, G, B, A) -> Vulkan */
+static VkComponentSwizzle swizzle(uint8_t s) {
+    static const VkComponentSwizzle m[6] = { VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R,
+                                             VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A };
+    return s < 6 ? m[s] : VK_COMPONENT_SWIZZLE_IDENTITY;
+}
+
+VkImageView render_image_view(HostImage *h, const TextureView *view, int dim, int array) {
+    for (ImageView *v = h->views; v; v = v->next)
+        if (v->dim == dim && v->array == array && memcmp(&v->view, view, sizeof *view) == 0) return v->handle;
+    int is3d = h->desc.target == TARGET_3D;
+    if ((dim == TEXDIM_3D) != is3d) return VK_NULL_HANDLE;             /* the shader wants another kind */
+    if (dim == TEXDIM_CUBE && h->layers < 6) return VK_NULL_HANDLE;
+    uint32_t base_level = view->set & VIEW_LEVELS ? view->base_level : 0;
+    uint32_t levels = view->set & VIEW_LEVELS && view->num_levels ? view->num_levels : h->levels - base_level;
+    uint32_t base_layer = view->set & VIEW_LAYERS ? view->min_layer : 0;
+    uint32_t layers = view->set & VIEW_LAYERS && view->num_layers ? view->num_layers : h->layers - base_layer;
+    if (base_level >= h->levels || base_layer >= h->layers) return VK_NULL_HANDLE;
+    if (base_level + levels > h->levels) levels = h->levels - base_level;
+    if (base_layer + layers > h->layers) layers = h->layers - base_layer;
+    VkImageViewType type;
+    if (dim == TEXDIM_3D) { type = VK_IMAGE_VIEW_TYPE_3D; layers = 1; }
+    else if (dim == TEXDIM_CUBE) { type = array ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE; layers = array ? layers / 6 * 6 : 6; }
+    else if (array) type = h->desc.target == TARGET_1D || h->desc.target == TARGET_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    else { type = h->desc.target == TARGET_1D || h->desc.target == TARGET_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D; layers = 1; }
+    VkFormat format = h->format;
+    if (view->set & VIEW_FORMAT) {
+        VkFormat f = render_vk_format(view->format);
+        if (f != VK_FORMAT_UNDEFINED) format = f;
+    }
+    const uint8_t *sw = view->set & VIEW_SWIZZLE ? view->swizzle : h->desc.swizzle;
+    VkImageAspectFlags aspect = h->aspects;
+    if (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) aspect = VK_IMAGE_ASPECT_DEPTH_BIT;    /* sample depth, not stencil */
+    VkImageViewCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = h->image, .viewType = type,
+        .format = format,
+        /* the identity swizzle as IDENTITY: some drivers (llvmpipe) crash on explicit R/G/B/A
+         * swizzles that name channels a format doesn't have */
+        .components = { sw[0] == 2 ? VK_COMPONENT_SWIZZLE_IDENTITY : swizzle(sw[0]), sw[1] == 3 ? VK_COMPONENT_SWIZZLE_IDENTITY : swizzle(sw[1]),
+                        sw[2] == 4 ? VK_COMPONENT_SWIZZLE_IDENTITY : swizzle(sw[2]), sw[3] == 5 ? VK_COMPONENT_SWIZZLE_IDENTITY : swizzle(sw[3]) },
+        .subresourceRange = { aspect, base_level, levels, base_layer, layers } };
+    ImageView *v = calloc(1, sizeof *v);
+    if (vkCreateImageView(vk.device, &ci, NULL, &v->handle) != VK_SUCCESS) { free(v); return VK_NULL_HANDLE; }
+    v->view = *view;
+    v->dim = dim;
+    v->array = array;
+    v->next = h->views;
+    h->views = v;
+    return v->handle;
+}
+
+VkImageView render_dummy_view(int dim, int array) {
+    static VkImage image2d, image3d;
+    static VkImageView views[4][2];
+    int is3d = dim == TEXDIM_3D, d = dim > 3 ? 1 : dim;
+    if (views[d][array]) return views[d][array];
+    VkImage *image = is3d ? &image3d : &image2d;
+    if (!*image) {
+        VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .flags = is3d ? 0 : VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+            .imageType = is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .extent = { 1, 1, 1 }, .mipLevels = 1, .arrayLayers = is3d ? 1 : 6, .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
+        VK_CHECK(vkCreateImage(vk.device, &ci, NULL, image));
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(vk.device, *image, &req);
+        VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+            .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+        VkDeviceMemory mem;
+        VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &mem));
+        VK_CHECK(vkBindImageMemory(vk.device, *image, mem, 0));
+        /* to GENERAL and cleared to black, once */
+        render_end_rendering();
+        VkCommandBuffer cmd = render_cmd();
+        VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = *image,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS } };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+        VkClearColorValue black = { { 0, 0, 0, 1 } };
+        vkCmdClearColorImage(cmd, *image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &b.subresourceRange);
+        render_barrier(cmd);
+    }
+    VkImageViewType type = is3d ? VK_IMAGE_VIEW_TYPE_3D : dim == TEXDIM_CUBE ? (array ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE)
+                         : array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    uint32_t layers = is3d ? 1 : dim == TEXDIM_CUBE ? 6 : 1;
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = *image, .viewType = type,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers } };
+    VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &views[d][array]));
+    return views[d][array];
+}
+
+/* Samplers: one per distinct SamplerDesc */
+typedef struct SamplerEntry { struct SamplerEntry *next; SamplerDesc d; VkSampler s; } SamplerEntry;
+static SamplerEntry *samplers;
+
+static VkSamplerAddressMode wrap_mode(uint8_t w) {
+    switch (w) {
+    case 1: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case 2: case 3: case 4: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+    case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    case 6: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    }
+    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;                       /* CLAMP, CLAMP_TO_EDGE */
+}
+
+VkSampler render_sampler(const SamplerDesc *d) {
+    for (SamplerEntry *e = samplers; e; e = e->next)
+        if (memcmp(&e->d, d, sizeof *d) == 0) return e->s;
+    /* min filter: NEAREST, LINEAR, then {NEAREST,LINEAR}_MIPMAP_{NEAREST,LINEAR} */
+    int minf = d->min_filter;
+    VkFilter min = minf == 1 || minf == 3 || minf == 5 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    VkSamplerMipmapMode mip = minf == 4 || minf == 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    float max_lod = minf <= 1 ? 0.25f : d->lod_max;                     /* no mipmapping: level 0 only */
+    float border[4];
+    memcpy(border, d->border, 16);
+    VkBorderColor bc = border[3] == 0.0f ? VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK
+                     : border[0] > 0.5f ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    VkSamplerCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = d->mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .minFilter = min, .mipmapMode = mip,
+        .addressModeU = wrap_mode(d->wrap[0]), .addressModeV = wrap_mode(d->wrap[1]), .addressModeW = wrap_mode(d->wrap[2]),
+        .mipLodBias = d->lod_bias, .compareEnable = d->compare_mode != 0, .compareOp = render_compare_op(d->compare_func),
+        .minLod = d->lod_min, .maxLod = max_lod < d->lod_min ? d->lod_min : max_lod, .borderColor = bc };
+    SamplerEntry *e = calloc(1, sizeof *e);
+    e->d = *d;
+    VK_CHECK(vkCreateSampler(vk.device, &ci, NULL, &e->s));
+    e->next = samplers;
+    samplers = e;
+    return e->s;
 }

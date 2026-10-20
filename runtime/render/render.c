@@ -167,7 +167,8 @@ void render_present(uint64_t texture) {
         .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
         .srcOffsets = { { 0, 0, 0 }, { width, height, 1 } },
         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        .dstOffsets = { { 0, 0, 0 }, { (int32_t)vk.extent.width, (int32_t)vk.extent.height, 1 } },
+        /* upside down: NVN's (OpenGL's) row 0 is the bottom of the screen, Vulkan's the top */
+        .dstOffsets = { { 0, (int32_t)vk.extent.height, 0 }, { (int32_t)vk.extent.width, 0, 1 } },
     };
     vkCmdBlitImage(cmd, src, src_layout, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
     barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);

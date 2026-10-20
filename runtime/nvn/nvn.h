@@ -234,6 +234,8 @@ FITS(VertexAttribState, 4);
 typedef struct { uint32_t stride, divisor; } VertexStreamState;
 
 static inline MemoryPool *pool_of(uint64_t guest) { return gptr(guest); }
+/* The memory pool containing a GPU (= guest) address: 1 and its storage/size, or 0 */
+int nvn_pool_find(uint64_t address, uint64_t *storage, uint64_t *size);
 static inline uint64_t pool_address(uint64_t pool, uint64_t offset) {
     return pool ? pool_of(pool)->storage + offset : 0;
 }

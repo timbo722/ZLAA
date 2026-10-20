@@ -124,12 +124,17 @@ static int create_device(void) {
         vkEnumerateDeviceExtensionProperties(vk.gpu, NULL, &n, ext);
         for (uint32_t i = 0; i < n; i++) fprintf(stderr, "vulkan: extension %s\n", ext[i].extensionName);
     }
-    (void)has_extension;
+
     float priority = 1.0f;
     VkDeviceQueueCreateInfo q = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                   .queueFamilyIndex = vk.queue_family, .queueCount = 1,
                                   .pQueuePriorities = &priority };
-    const char *ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char *ext[4] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    uint32_t next = 1;
+    if (has_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+        ext[next++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+        vk.host_import = 1;
+    }
     /* Vulkan 1.3 features we rely on: rendering without render pass objects */
     VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                              .dynamicRendering = VK_TRUE };
@@ -140,11 +145,19 @@ static int create_device(void) {
     features.features.textureCompressionASTC_LDR = supported.textureCompressionASTC_LDR;
     VkDeviceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
                               .queueCreateInfoCount = 1, .pQueueCreateInfos = &q,
-                              .enabledExtensionCount = 1, .ppEnabledExtensionNames = ext };
+                              .enabledExtensionCount = next, .ppEnabledExtensionNames = ext };
     VK_CHECK(vkCreateDevice(vk.gpu, &ci, NULL, &vk.device));
 #define VK_LOAD_DEVICE(name) name = (PFN_##name)vkGetDeviceProcAddr(vk.device, #name);
     VK_DEVICE_FUNCTIONS(VK_LOAD_DEVICE)
     vkGetDeviceQueue(vk.device, vk.queue_family, 0, &vk.queue);
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT host = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
+    VkPhysicalDeviceProperties2 props = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                          .pNext = vk.host_import ? &host : NULL };
+    vkGetPhysicalDeviceProperties2(vk.gpu, &props);
+    vk.limits = props.properties.limits;
+    vk.import_alignment = vk.host_import ? host.minImportedHostPointerAlignment : 0;
+    if (!vk.host_import) fprintf(stderr, "vulkan: no VK_EXT_external_memory_host; drawing needs it for now\n");
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                                     .queueFamilyIndex = vk.queue_family };

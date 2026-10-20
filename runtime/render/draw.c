@@ -7,17 +7,100 @@
  */
 #include "render_internal.h"
 #include <stdio.h>
+#include <stdlib.h>
+
+typedef struct { uint64_t address, size; } Range;
 
 static struct {
     RenderTargets rt;                /* as the game set them */
     HostImage *color[8], *depth;     /* their images */
     int rendering;                   /* inside vkCmdBeginRendering */
-} st;
+
+    Program program;
+    BlendState blend[8];
+    ColorState color_state;
+    uint32_t channel_mask;
+    DepthStencilState depth_stencil;
+    MultisampleState multisample;
+    PolygonState polygon;
+    uint32_t nattribs;
+    VertexAttribState attrib[16];
+    VertexStreamState stream[16];
+    Range vertex_buffer[16];
+    Range uniform[6][14];            /* per NVN shader stage: vertex 0, fragment 1, ... */
+    uint64_t texture[6][32];         /* bound texture handles */
+    DescriptorPool texture_pool, sampler_pool;
+    float viewport[4], depth_range[2];
+    int32_t scissor[4];
+    float blend_color[4];
+    uint32_t stencil_ref[2], stencil_mask[2], stencil_value_mask[2];
+    float line_width, polygon_offset[3];
+    uint32_t primitive_restart, restart_index;
+} st = {
+    .channel_mask = 0xFFFFFFFF, .viewport = { 0, 0, 1, 1 }, .depth_range = { 0, 1 },
+    .scissor = { 0, 0, 0x7FFF, 0x7FFF }, .stencil_mask = { 0xFF, 0xFF }, .stencil_value_mask = { 0xFF, 0xFF },
+    .line_width = 1.0f,
+};
 
 void render_end_rendering(void) {
     if (!st.rendering) return;
     vkCmdEndRendering(render_cmd());
     st.rendering = 0;
+}
+
+/* ---- descriptor sets: from a pool emptied after each submission ---- */
+
+static VkDescriptorPool descriptor_pool;
+
+void render_submission_done(void) {
+    if (descriptor_pool) vkResetDescriptorPool(vk.device, descriptor_pool, 0);
+}
+
+static VkDescriptorSet new_set(void) {
+    if (!descriptor_pool) {
+        VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 8 },
+                                          { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 8 } };
+        VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4096,
+                                          .poolSizeCount = 2, .pPoolSizes = sizes };
+        VK_CHECK(vkCreateDescriptorPool(vk.device, &ci, NULL, &descriptor_pool));
+    }
+    VkDescriptorSetLayout layout = render_set_layout();
+    VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                       .descriptorPool = descriptor_pool, .descriptorSetCount = 1, .pSetLayouts = &layout };
+    VkDescriptorSet set;
+    if (vkAllocateDescriptorSets(vk.device, &ai, &set) != VK_SUCCESS) {
+        render_flush();                              /* pool full: finish the work so far, start over */
+        VK_CHECK(vkAllocateDescriptorSets(vk.device, &ai, &set));
+    }
+    return set;
+}
+
+/* A buffer of zeros, for constant buffers the game didn't bind (and c0, the driver's) */
+static VkBuffer zero_buffer(void) {
+    static VkBuffer buffer;
+    if (buffer) return buffer;
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 0x10000,
+                              .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &buffer));
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(vk.device, buffer, &req);
+    VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+    VkDeviceMemory mem;
+    VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &mem));
+    VK_CHECK(vkBindBufferMemory(vk.device, buffer, mem, 0));
+    void *p;
+    VK_CHECK(vkMapMemory(vk.device, mem, 0, VK_WHOLE_SIZE, 0, &p));
+    memset(p, 0, 0x10000);
+    return buffer;
+}
+
+static void warn_once(const char *what, uint64_t key) {
+    static uint64_t seen[64];
+    static int nseen;
+    for (int i = 0; i < nseen; i++) if (seen[i] == key) return;
+    if (nseen < 64) seen[nseen++] = key;
+    fprintf(stderr, "render: %s (%#llx)\n", what, (unsigned long long)key);
 }
 
 static void set_render_targets(const RenderTargets *rt) {
@@ -37,6 +120,7 @@ static VkClearColorValue clear_value(const uint8_t *color) {
 static void clear_image(HostImage *h, const VkClearColorValue *color, const VkClearDepthStencilValue *ds,
                         VkImageAspectFlags aspects) {
     if (!h) return;
+    if (getenv("LAA_TRACE_PIPELINES")) fprintf(stderr, "render: clear %ux%u fmt %d aspects %#x\n", h->width, h->height, h->format, aspects);
     render_end_rendering();
     VkCommandBuffer cmd = render_cmd();
     render_image_init_layout(cmd, h);
@@ -73,6 +157,9 @@ static void region_box(const HostImage *h, uint32_t level, const int32_t *r, VkO
 static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint32_t flags) {
     HostImage *src = render_image_ready(src_ref->texture), *dst = render_image_ready(dst_ref->texture);
     if (!src || !dst) return;
+    if (getenv("LAA_TRACE_PIPELINES"))
+        fprintf(stderr, "render: copy %ux%u fmt %d -> %ux%u fmt %d, flags %#x\n", src->width, src->height, src->format,
+                dst->width, dst->height, dst->format, flags);
     render_end_rendering();
     VkCommandBuffer cmd = render_cmd();
     render_image_init_layout(cmd, src);
@@ -88,6 +175,9 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
         VkImageCopy c = { .srcSubresource = ss, .srcOffset = sb[0], .dstSubresource = ds, .dstOffset = db[0],
                           .extent = { (uint32_t)(sb[1].x - sb[0].x), (uint32_t)(sb[1].y - sb[0].y), (uint32_t)(sb[1].z - sb[0].z) } };
         vkCmdCopyImage(cmd, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    } else if (!(src->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) {
+        warn_once("scaled copy of a depth/stencil image", src->format);  /* (can't blit those; needs a shader) */
+        return;
     } else {
         VkImageBlit b = { .srcSubresource = ss, .srcOffsets = { sb[0], sb[1] }, .dstSubresource = ds,
                           .dstOffsets = { db[0], db[1] } };
@@ -98,8 +188,278 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
     dst->gpu_written = 1;
 }
 
+/* ---- drawing ---- */
+
+/* Start rendering into the current targets, if not already. 0 on success. */
+static int begin_rendering(void) {
+    if (st.rendering) return 0;
+    VkRenderingAttachmentInfo color[8], depth = { 0 };
+    uint32_t ncolor = 0, w = 0x7FFFFFFF, h = 0x7FFFFFFF;
+    VkCommandBuffer cmd = render_cmd();
+    for (uint32_t i = 0; i < st.rt.count; i++) {
+        HostImage *img = st.color[i];
+        color[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+        if (img) {
+            render_image_init_layout(cmd, img);
+            color[i].imageView = img->target_view;
+            color[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            color[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            color[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            if (img->width < w) w = img->width;
+            if (img->height < h) h = img->height;
+        }
+        ncolor = i + 1;
+    }
+    if (st.depth) {
+        render_image_init_layout(cmd, st.depth);
+        depth = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = st.depth->target_view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        if (st.depth->width < w) w = st.depth->width;
+        if (st.depth->height < h) h = st.depth->height;
+    }
+    if (w == 0x7FFFFFFF) return -1;                      /* nothing to render into */
+    int has_d = st.depth && (st.depth->aspects & VK_IMAGE_ASPECT_DEPTH_BIT);
+    int has_s = st.depth && (st.depth->aspects & VK_IMAGE_ASPECT_STENCIL_BIT);
+    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { w, h } },
+        .layerCount = 1, .colorAttachmentCount = ncolor, .pColorAttachments = color,
+        .pDepthAttachment = has_d ? &depth : NULL, .pStencilAttachment = has_s ? &depth : NULL };
+    vkCmdBeginRendering(cmd, &ri);
+    st.rendering = 1;
+    return 0;
+}
+
+/* Bind the constant buffers and textures one shader stage uses */
+static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, uint32_t *nw,
+                      VkDescriptorBufferInfo *buffers, uint32_t *nb, VkDescriptorImageInfo *images, uint32_t *ni,
+                      VkDescriptorSet set) {
+    uint32_t base = (uint32_t)stage * SHADER_STAGE_BINDINGS;
+    for (int slot = 0; slot < 18; slot++) {
+        if (!(sh->info.cbuf_mask >> slot & 1)) continue;
+        VkDescriptorBufferInfo *bi = &buffers[(*nb)++];
+        *bi = (VkDescriptorBufferInfo){ zero_buffer(), 0, 0x10000 };
+        uint64_t addr = 0, size = 0;
+        if (slot == 1) { addr = sh->constants; size = sh->constants_size; }
+        else if (slot >= 3 && slot - 3 < 14) { addr = st.uniform[stage][slot - 3].address; size = st.uniform[stage][slot - 3].size; }
+        if (addr && size) {
+            VkBuffer b;
+            VkDeviceSize off;
+            if (render_guest_buffer(addr, &b, &off) == 0 && off % vk.limits.minUniformBufferOffsetAlignment == 0) {
+                *bi = (VkDescriptorBufferInfo){ b, off, size < 0x10000 ? (size + 15) & ~15ull : 0x10000 };
+            } else {
+                warn_once("uniform buffer not usable", addr);
+            }
+        }
+        writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+            .dstBinding = base + SHADER_CBUF_BINDING + (uint32_t)slot, .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = bi };
+    }
+    for (uint32_t i = 0; i < sh->info.ntextures; i++) {
+        const ShaderTexture *tx = &sh->info.textures[i];
+        VkDescriptorImageInfo *ii = &images[(*ni)++];
+        ii->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        ii->imageView = VK_NULL_HANDLE;
+        ii->sampler = VK_NULL_HANDLE;
+        /* the handle: texture id | sampler id << 20, bound at index (offset / 4 - 8) / 2 */
+        uint32_t index = (tx->handle_offset / 4 - 8) / 2;
+        uint64_t handle = index < 32 ? st.texture[stage][index] : 0;
+        uint32_t tex_id = (uint32_t)(handle & 0xFFFFF), smp_id = (uint32_t)(handle >> 20 & 0xFFF);
+        if (handle && st.texture_pool.entries && tex_id < st.texture_pool.count) {
+            const TexturePoolEntry *e = &((TexturePoolEntry *)st.texture_pool.entries)[tex_id];
+            HostImage *h = e->texture ? render_image_ready(e->texture) : NULL;
+            if (h) ii->imageView = render_image_view(h, &e->view, tx->dim, tx->array);
+            if (h && getenv("LAA_TRACE_PIPELINES"))
+                fprintf(stderr, "render:   texture %u: id %u, %ux%u nvn format %#x vk %d view set %#x fmt %#x, levels %u layers %u\n", i, tex_id,
+                        h->width, h->height, h->desc.format, h->format, e->view.set, e->view.format, h->levels, h->layers),
+                fprintf(stderr, "render:     swizzle %u %u %u %u / view %u %u %u %u, image %p, target %p, sampler %u\n",
+                        h->desc.swizzle[0], h->desc.swizzle[1], h->desc.swizzle[2], h->desc.swizzle[3], e->view.swizzle[0],
+                        e->view.swizzle[1], e->view.swizzle[2], e->view.swizzle[3], (void *)h, (void *)st.color[0], smp_id);
+        }
+        if (st.sampler_pool.entries && smp_id < st.sampler_pool.count)
+            ii->sampler = render_sampler(&((SamplerDesc *)st.sampler_pool.entries)[smp_id]);
+        if (st.sampler_pool.entries && smp_id < st.sampler_pool.count && getenv("LAA_TRACE_PIPELINES")) {
+            const SamplerDesc *d = &((SamplerDesc *)st.sampler_pool.entries)[smp_id];
+            fprintf(stderr, "render:     sampler %u: filt %u/%u wrap %u %u %u cmp %u/%u red %u lod %g..%g bias %g aniso %g\n", smp_id,
+                    d->min_filter, d->mag_filter, d->wrap[0], d->wrap[1], d->wrap[2], d->compare_mode, d->compare_func,
+                    d->reduction, d->lod_min, d->lod_max, d->lod_bias, d->max_anisotropy);
+        }
+        if (!ii->sampler) { SamplerDesc d = { .wrap = { 1, 1, 1 }, .lod_max = 1000 }; ii->sampler = render_sampler(&d); }
+        if (!ii->imageView) ii->imageView = render_dummy_view(tx->dim, tx->array);
+        writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+            .dstBinding = base + SHADER_TEXTURE_BINDING + i, .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = ii };
+    }
+    return 0;
+}
+
+/* DRAW_ARRAYS: a = mode, first, count, base instance, instances
+ * DRAW_ELEMENTS: a = mode, index type, count, index buffer, base vertex, base instance, instances */
+static void draw(const Cmd *r, int indexed) {
+    const Program *p = &st.program;
+    if (!(p->stages >> STAGE_VERTEX & 1) || !(p->stages >> STAGE_FRAGMENT & 1)) {
+        warn_once("draw without a vertex and a fragment shader", p->stages);
+        return;
+    }
+    HostShader *vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX);
+    HostShader *fs = render_shader(p->code[STAGE_FRAGMENT], p->control[STAGE_FRAGMENT], SHADER_FRAGMENT);
+    if (!vs->module || !fs->module) return;
+    if (r->a[0] == 7 || r->a[0] == 8 || r->a[0] == 9 || r->a[0] == 2) { warn_once("quads/polygons/line loops", r->a[0]); return; }
+
+    /* resources first: making a descriptor set may have to submit work (which ends rendering) */
+    VkDescriptorSet set = new_set();
+    VkWriteDescriptorSet writes[2 * 50];
+    VkDescriptorBufferInfo buffers[2 * 18];
+    VkDescriptorImageInfo images[2 * SHADER_MAX_TEXTURES];
+    uint32_t nw = 0, nb = 0, ni = 0;
+    fill_stage(vs, SHADER_VERTEX, writes, &nw, buffers, &nb, images, &ni, set);
+    fill_stage(fs, SHADER_FRAGMENT, writes, &nw, buffers, &nb, images, &ni, set);
+    vkUpdateDescriptorSets(vk.device, nw, writes, 0, NULL);
+    if (begin_rendering() != 0) return;
+
+    PipelineKey k;
+    memset(&k, 0, sizeof k);
+    k.vs = vs->module;
+    k.fs = fs->module;
+    k.vs_code = vs->code;
+    k.fs_code = fs->code;
+    k.vs_inputs = vs->info.inputs;
+    k.nattribs = (uint8_t)st.nattribs;
+    for (uint32_t i = 0; i < st.nattribs; i++) {
+        k.attr[i].format = (uint8_t)st.attrib[i].format;
+        k.attr[i].stream = (uint8_t)st.attrib[i].stream;
+        k.attr[i].offset = (uint16_t)st.attrib[i].offset;
+        k.stream[st.attrib[i].stream].stride = st.stream[st.attrib[i].stream].stride;
+        k.stream[st.attrib[i].stream].divisor = st.stream[st.attrib[i].stream].divisor;
+    }
+    k.topology = (uint8_t)r->a[0];
+    k.primitive_restart = (uint8_t)st.primitive_restart;
+    k.cull = st.polygon.cull_face;
+    k.front_ccw = st.polygon.front_face;
+    k.depth_bias = (st.polygon.offset_enables & 4) != 0;
+    k.alpha_to_coverage = st.multisample.alpha_to_coverage;
+    k.depth_test = st.depth && st.depth_stencil.depth_test;
+    k.depth_write = st.depth && st.depth_stencil.depth_write;
+    k.depth_func = st.depth_stencil.depth_func;
+    k.stencil_test = st.depth && st.depth_stencil.stencil_test && (st.depth->aspects & VK_IMAGE_ASPECT_STENCIL_BIT);
+    memcpy(k.stencil_func, st.depth_stencil.stencil_func, 2);
+    memcpy(k.stencil_ops, st.depth_stencil.stencil_ops, 4);
+    k.blend_enable = st.color_state.blend_enable;
+    k.logic_op = st.color_state.logic_op;
+    k.channel_mask = st.channel_mask;
+    k.ncolor = (uint8_t)st.rt.count;
+    for (uint32_t i = 0; i < st.rt.count; i++) {
+        k.color_format[i] = st.color[i] ? st.color[i]->format : VK_FORMAT_UNDEFINED;
+        k.blend[i] = (BlendKey){ st.blend[i].src_color, st.blend[i].dst_color, st.blend[i].src_alpha,
+                                 st.blend[i].dst_alpha, st.blend[i].eq_color, st.blend[i].eq_alpha };
+    }
+    k.depth_format = st.depth ? st.depth->format : VK_FORMAT_UNDEFINED;
+    VkPipeline pipeline = render_pipeline(&k);
+
+    VkCommandBuffer cmd = render_cmd();
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipeline_layout(), 0, 1, &set, 0, NULL);
+    for (uint32_t i = 0; i < st.nattribs; i++) {
+        if (!(vs->info.inputs >> i & 1) || !st.attrib[i].format) continue;
+        uint32_t s = st.attrib[i].stream;
+        VkBuffer b;
+        VkDeviceSize off;
+        if (render_guest_buffer(st.vertex_buffer[s].address, &b, &off) != 0) {
+            warn_once("vertex buffer not in a memory pool", st.vertex_buffer[s].address);
+            return;
+        }
+        vkCmdBindVertexBuffers(cmd, s, 1, &b, &off);
+    }
+    VkViewport vp = { st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3], st.depth_range[0], st.depth_range[1] };
+    if (vp.width <= 0) vp.width = 1;
+    if (vp.height == 0) vp.height = 1;
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = { { st.scissor[0] > 0 ? st.scissor[0] : 0, st.scissor[1] > 0 ? st.scissor[1] : 0 },
+                    { (uint32_t)(st.scissor[2] > 0 ? st.scissor[2] : 0), (uint32_t)(st.scissor[3] > 0 ? st.scissor[3] : 0) } };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdSetBlendConstants(cmd, st.blend_color);
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_ref[0]);
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_ref[1]);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_value_mask[0]);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_value_mask[1]);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_mask[0]);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_mask[1]);
+    vkCmdSetDepthBias(cmd, st.polygon_offset[1], st.polygon_offset[2], st.polygon_offset[0]);
+    vkCmdSetLineWidth(cmd, 1.0f);
+    if (indexed) {
+        static const VkIndexType types[3] = { VK_INDEX_TYPE_UINT8_EXT, VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32 };
+        if (r->a[1] == 0) { warn_once("8-bit indices", 0); return; }
+        VkBuffer b;
+        VkDeviceSize off;
+        if (render_guest_buffer(r->a[3], &b, &off) != 0) { warn_once("index buffer not in a memory pool", r->a[3]); return; }
+        vkCmdBindIndexBuffer(cmd, b, off, types[r->a[1] < 3 ? r->a[1] : 2]);
+        vkCmdDrawIndexed(cmd, (uint32_t)r->a[2], (uint32_t)r->a[6], 0, (int32_t)r->a[4], (uint32_t)r->a[5]);
+    } else {
+        vkCmdDraw(cmd, (uint32_t)r->a[2], (uint32_t)r->a[4], (uint32_t)r->a[1], (uint32_t)r->a[3]);
+    }
+    for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) st.color[i]->gpu_written = 1, st.color[i]->needs_upload = 0;
+    if (st.depth) st.depth->gpu_written = 1, st.depth->needs_upload = 0;
+    static int each = -1;                            /* LAA_FLUSH_EACH_DRAW: find which draw breaks the GPU */
+    if (each < 0) each = getenv("LAA_FLUSH_EACH_DRAW") != NULL;
+    if (each) { render_flush(); fprintf(stderr, "render: draw done\n"); }
+}
+
+/* array binds: (first, count, values) -> a table */
+static void bind_ranges(Range *table, uint32_t max, uint64_t first, uint64_t count, const uint8_t *extra) {
+    for (uint64_t i = 0; i < count && first + i < max; i++) memcpy(&table[first + i], extra + 16 * i, 16);
+}
+
+static void set_value(const Cmd *r) {
+    switch (r->sub) {
+    case VALUE_BLEND_COLOR: memcpy(st.blend_color, r->extra, 16); break;
+    /* (faces, value): face bit 1 front, 2 back */
+    case VALUE_STENCIL_REF:        for (int f = 0; f < 2; f++) if (r->a[0] >> f & 1) st.stencil_ref[f] = (uint32_t)r->a[1]; break;
+    case VALUE_STENCIL_MASK:       for (int f = 0; f < 2; f++) if (r->a[0] >> f & 1) st.stencil_mask[f] = (uint32_t)r->a[1]; break;
+    case VALUE_STENCIL_VALUE_MASK: for (int f = 0; f < 2; f++) if (r->a[0] >> f & 1) st.stencil_value_mask[f] = (uint32_t)r->a[1]; break;
+    case VALUE_PRIMITIVE_RESTART: st.primitive_restart = (uint32_t)r->a[0] & 1; st.restart_index = (uint32_t)r->a[1]; break;
+    case VALUE_POLYGON_OFFSET_CLAMP: memcpy(st.polygon_offset, r->f, 12); break;   /* factor, units, clamp */
+    case VALUE_LINE_WIDTH: st.line_width = r->f[0]; break;
+    default: break;
+    }
+}
+
 void render_command(const Cmd *r) {
     switch (r->op) {
+    case CMD_BIND_PROGRAM: memcpy(&st.program, r->extra, sizeof st.program); break;
+    case CMD_BIND_STATE:
+        switch (r->sub) {
+        case STATE_BLEND: { BlendState b; memcpy(&b, r->extra, sizeof b); st.blend[b.target] = b; break; }
+        case STATE_CHANNEL_MASK: memcpy(&st.channel_mask, r->extra, 4); break;
+        case STATE_COLOR: memcpy(&st.color_state, r->extra, sizeof st.color_state); break;
+        case STATE_DEPTH_STENCIL: memcpy(&st.depth_stencil, r->extra, sizeof st.depth_stencil); break;
+        case STATE_MULTISAMPLE: memcpy(&st.multisample, r->extra, sizeof st.multisample); break;
+        case STATE_POLYGON: memcpy(&st.polygon, r->extra, sizeof st.polygon); break;
+        }
+        break;
+    case CMD_BIND_VERTEX_ATTRIBS:                         /* a = count */
+        st.nattribs = r->a[0] < 16 ? (uint32_t)r->a[0] : 16;
+        memcpy(st.attrib, r->extra, st.nattribs * sizeof *st.attrib);
+        break;
+    case CMD_BIND_VERTEX_STREAMS: {
+        uint32_t n = r->a[0] < 16 ? (uint32_t)r->a[0] : 16;
+        memcpy(st.stream, r->extra, n * sizeof *st.stream);
+        break;
+    }
+    case CMD_BIND_VERTEX_BUFFERS: bind_ranges(st.vertex_buffer, 16, r->a[0], r->a[1], r->extra); break;
+    case CMD_BIND_UNIFORM_BUFFERS:                        /* a = stage, first, count */
+        if (r->a[0] < 6) bind_ranges(st.uniform[r->a[0]], 14, r->a[1], r->a[2], r->extra);
+        break;
+    case CMD_BIND_TEXTURES:
+        if (r->a[0] < 6)
+            for (uint64_t i = 0; i < r->a[2] && r->a[1] + i < 32; i++) memcpy(&st.texture[r->a[0]][r->a[1] + i], r->extra + 8 * i, 8);
+        break;
+    case CMD_SET_TEXTURE_POOL: memcpy(&st.texture_pool, r->extra, sizeof st.texture_pool); break;
+    case CMD_SET_SAMPLER_POOL: memcpy(&st.sampler_pool, r->extra, sizeof st.sampler_pool); break;
+    case CMD_SET_VIEWPORTS: if (r->a[0] == 0 && r->a[1] >= 1) memcpy(st.viewport, r->extra, 16); break;
+    case CMD_SET_SCISSORS: if (r->a[0] == 0 && r->a[1] >= 1) memcpy(st.scissor, r->extra, 16); break;
+    case CMD_SET_DEPTH_RANGES: if (r->a[0] == 0 && r->a[1] >= 1) memcpy(st.depth_range, r->extra, 8); break;
+    case CMD_SET_VALUE: set_value(r); break;
+    case CMD_DRAW_ARRAYS: draw(r, 0); break;
+    case CMD_DRAW_ELEMENTS: draw(r, 1); break;
     case CMD_SET_RENDER_TARGETS:
         set_render_targets((const RenderTargets *)r->extra);
         break;

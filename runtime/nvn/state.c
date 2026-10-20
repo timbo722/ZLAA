@@ -6,6 +6,7 @@
  */
 #include "nvn.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ---- blend state (8 bytes) ---- */
 
@@ -180,6 +181,17 @@ static void set_shaders(CPU *c, int stride) {
         p->code[stage] = code;
         p->control[stage] = control;
         p->stages |= 1u << stage;
+        /* LAA_DUMP_SHADERS=dir: save each shader (code and control section) for offline work */
+        const char *dir = getenv("LAA_DUMP_SHADERS");
+        if (dir) {
+            char path[4096];
+            snprintf(path, sizeof path, "%s/%09llx.ctrl", dir, (unsigned long long)code);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(gptr(control), 1, 0x1000, f); fclose(f); }
+            snprintf(path, sizeof path, "%s/%09llx.code", dir, (unsigned long long)code);
+            f = fopen(path, "wb");
+            if (f) { fwrite(gptr(code), 1, 0x10000, f); fclose(f); }
+        }
     }
     RET(1);
 }

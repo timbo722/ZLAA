@@ -1,0 +1,290 @@
+/*
+ * pipeline.c - translated shaders, and Vulkan pipelines for the game's draw state.
+ *
+ * A Vulkan pipeline bakes in most of what NVN sets with separate state objects (shaders,
+ * vertex layout, blending, depth test, ...). We collect that state into a PipelineKey and keep
+ * one pipeline per distinct key. Viewports, scissors, blend color, stencil reference and
+ * masks, depth bias and line width stay "dynamic" (set per draw) so they don't multiply the
+ * number of pipelines.
+ */
+#include "render_internal.h"
+#include "render/shader/shader.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+/* ================================================================ shaders */
+
+#define SHADER_BUCKETS 1024
+static HostShader *shader_buckets[SHADER_BUCKETS];
+
+HostShader *render_shader(uint64_t code, uint64_t control, int stage) {
+    unsigned b = (unsigned)((code >> 6) * 0x9E3779B1u >> 22) & (SHADER_BUCKETS - 1);
+    for (HostShader *s = shader_buckets[b]; s; s = s->next)
+        if (s->code == code && s->stage == stage) return s;
+    HostShader *s = calloc(1, sizeof *s);
+    s->code = code;
+    s->stage = stage;
+    s->next = shader_buckets[b];
+    shader_buckets[b] = s;
+
+    uint64_t storage, size;
+    if (!nvn_pool_find(code, &storage, &size)) {
+        snprintf(s->info.error, sizeof s->info.error, "code isn't in a memory pool");
+    } else {
+        uint64_t avail = storage + size - code;
+        uint32_t c_off = 0, c_size = 0;
+        if (control) shader_constants(gptr(control), &c_off, &c_size);
+        if (c_off > avail || c_size > avail - c_off) c_off = c_size = 0;
+        const uint8_t *p = gptr(code);
+        if (shader_translate(p, avail, stage, p + c_off, c_size, SHADER_GL_DEPTH, &s->info) == 0) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                            .codeSize = s->info.words * 4, .pCode = s->info.spirv };
+            VK_CHECK(vkCreateShaderModule(vk.device, &ci, NULL, &s->module));
+            s->constants = code + c_off;
+            s->constants_size = c_size;
+        }
+    }
+    if (!s->module) fprintf(stderr, "render: shader %#llx (stage %d) not translated: %s\n",
+                            (unsigned long long)code, stage, s->info.error);
+    return s;
+}
+
+/* ================================================================ layouts */
+
+static VkDescriptorSetLayout set_layout;
+static VkPipelineLayout pipeline_layout;
+
+/* One layout for everything: per stage (vertex, fragment), 18 uniform buffers and 32 textures */
+static void make_layouts(void) {
+    VkDescriptorSetLayoutBinding b[2 * (18 + SHADER_MAX_TEXTURES)];
+    uint32_t n = 0;
+    const int stages[2] = { SHADER_VERTEX, SHADER_FRAGMENT };
+    for (int s = 0; s < 2; s++) {
+        VkShaderStageFlags flag = stages[s] == SHADER_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+        uint32_t base = (uint32_t)stages[s] * SHADER_STAGE_BINDINGS;
+        for (uint32_t i = 0; i < 18; i++)
+            b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_CBUF_BINDING + i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flag, NULL };
+        for (uint32_t i = 0; i < SHADER_MAX_TEXTURES; i++)
+            b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_TEXTURE_BINDING + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, flag, NULL };
+    }
+    VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = n, .pBindings = b };
+    VK_CHECK(vkCreateDescriptorSetLayout(vk.device, &li, NULL, &set_layout));
+    VkPipelineLayoutCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount = 1, .pSetLayouts = &set_layout };
+    VK_CHECK(vkCreatePipelineLayout(vk.device, &pi, NULL, &pipeline_layout));
+}
+
+VkDescriptorSetLayout render_set_layout(void) { if (!set_layout) make_layouts(); return set_layout; }
+VkPipelineLayout render_pipeline_layout(void) { if (!set_layout) make_layouts(); return pipeline_layout; }
+
+/* ================================================================ NVN enums -> Vulkan */
+
+static VkPrimitiveTopology topology(uint32_t mode) {
+    switch (mode) {
+    case 0: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    case 1: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    case 3: return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    case 4: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    case 5: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    case 6: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+    case 10: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
+    case 11: return VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
+    case 12: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
+    case 13: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY;
+    case 14: return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    }
+    return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;          /* (quads etc. need converting: later) */
+}
+
+static VkBlendFactor blend_factor(uint32_t f) {
+    switch (f) {
+    case 1: return VK_BLEND_FACTOR_ZERO;
+    case 2: return VK_BLEND_FACTOR_ONE;
+    case 3: return VK_BLEND_FACTOR_SRC_COLOR;
+    case 4: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+    case 5: return VK_BLEND_FACTOR_SRC_ALPHA;
+    case 6: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case 7: return VK_BLEND_FACTOR_DST_ALPHA;
+    case 8: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    case 9: return VK_BLEND_FACTOR_DST_COLOR;
+    case 10: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+    case 11: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+    case 16: return VK_BLEND_FACTOR_SRC1_COLOR;
+    case 17: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+    case 18: return VK_BLEND_FACTOR_SRC1_ALPHA;
+    case 19: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+    case 97: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+    case 98: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    case 99: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    case 100: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    }
+    return VK_BLEND_FACTOR_ONE;
+}
+
+static VkBlendOp blend_op(uint32_t e) {
+    static const VkBlendOp ops[6] = { VK_BLEND_OP_ADD, VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT,
+                                      VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_MIN, VK_BLEND_OP_MAX };
+    return e < 6 ? ops[e] : VK_BLEND_OP_ADD;
+}
+
+/* NVN compare functions are NEVER = 1 ... ALWAYS = 8; Vulkan's are the same order from 0 */
+VkCompareOp render_compare_op(uint32_t f) { return f >= 1 && f <= 8 ? (VkCompareOp)(f - 1) : VK_COMPARE_OP_ALWAYS; }
+
+static VkStencilOp stencil_op(uint32_t o) {
+    static const VkStencilOp ops[9] = { VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_ZERO, VK_STENCIL_OP_REPLACE,
+        VK_STENCIL_OP_INCREMENT_AND_CLAMP, VK_STENCIL_OP_DECREMENT_AND_CLAMP, VK_STENCIL_OP_INVERT,
+        VK_STENCIL_OP_INCREMENT_AND_WRAP, VK_STENCIL_OP_DECREMENT_AND_WRAP };
+    return o < 9 ? ops[o] : VK_STENCIL_OP_KEEP;
+}
+
+/* Vertex attribute formats: the color ones, plus NVN's "integer read as float" ones */
+static VkFormat vertex_format(uint32_t f) {
+    static const VkFormat scaled[] = {
+        [0x51] = VK_FORMAT_R8_USCALED, [0x52] = VK_FORMAT_R8_SSCALED, [0x53] = VK_FORMAT_R16_USCALED,
+        [0x54] = VK_FORMAT_R16_SSCALED, [0x57] = VK_FORMAT_R8G8_USCALED, [0x58] = VK_FORMAT_R8G8_SSCALED,
+        [0x59] = VK_FORMAT_R16G16_USCALED, [0x5A] = VK_FORMAT_R16G16_SSCALED, [0x5D] = VK_FORMAT_R8G8B8_USCALED,
+        [0x5E] = VK_FORMAT_R8G8B8_SSCALED, [0x5F] = VK_FORMAT_R16G16B16_USCALED, [0x60] = VK_FORMAT_R16G16B16_SSCALED,
+        [0x63] = VK_FORMAT_R8G8B8A8_USCALED, [0x64] = VK_FORMAT_R8G8B8A8_SSCALED,
+        [0x65] = VK_FORMAT_R16G16B16A16_USCALED, [0x66] = VK_FORMAT_R16G16B16A16_SSCALED,
+        [0x69] = VK_FORMAT_A2B10G10R10_SNORM_PACK32, [0x6B] = VK_FORMAT_A2B10G10R10_USCALED_PACK32,
+        [0x6C] = VK_FORMAT_A2B10G10R10_SSCALED_PACK32,
+    };
+    static const VkFormat rgb[] = {          /* 3-component formats (not textures, so not in image.c) */
+        [0x19] = VK_FORMAT_R8G8B8_UNORM, [0x1A] = VK_FORMAT_R8G8B8_SNORM, [0x1D] = VK_FORMAT_R16G16B16_SFLOAT,
+        [0x1E] = VK_FORMAT_R16G16B16_UNORM, [0x1F] = VK_FORMAT_R16G16B16_SNORM, [0x22] = VK_FORMAT_R32G32B32_SFLOAT,
+    };
+    if (f < sizeof scaled / sizeof *scaled && scaled[f]) return scaled[f];
+    if (f < sizeof rgb / sizeof *rgb && rgb[f]) return rgb[f];
+    return render_vk_format(f);
+}
+
+/* ================================================================ pipelines */
+
+typedef struct Pipeline {
+    struct Pipeline *next;
+    PipelineKey key;
+    VkPipeline pipeline;
+} Pipeline;
+
+#define PIPELINE_BUCKETS 1024
+static Pipeline *pipeline_buckets[PIPELINE_BUCKETS];
+
+static uint32_t hash(const void *p, size_t n) {
+    const uint8_t *b = p;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 16777619u;
+    return h;
+}
+
+static VkPipeline create(const PipelineKey *k) {
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = k->vs, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = k->fs, .pName = "main" },
+    };
+
+    /* vertex input: only the attributes the vertex shader reads */
+    VkVertexInputAttributeDescription attrs[16];
+    VkVertexInputBindingDescription binds[16];
+    uint32_t nattrs = 0, nbinds = 0, stream_used = 0;
+    for (uint32_t i = 0; i < k->nattribs; i++) {
+        if (!(k->vs_inputs >> i & 1) || !k->attr[i].format) continue;
+        VkFormat f = vertex_format(k->attr[i].format);
+        if (f == VK_FORMAT_UNDEFINED) { fprintf(stderr, "render: vertex format %#x\n", k->attr[i].format); continue; }
+        attrs[nattrs++] = (VkVertexInputAttributeDescription){ i, k->attr[i].stream, f, k->attr[i].offset };
+        stream_used |= 1u << k->attr[i].stream;
+    }
+    for (uint32_t s = 0; s < 16; s++)
+        if (stream_used >> s & 1)
+            binds[nbinds++] = (VkVertexInputBindingDescription){ s, k->stream[s].stride,
+                k->stream[s].divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = nbinds, .pVertexBindingDescriptions = binds,
+        .vertexAttributeDescriptionCount = nattrs, .pVertexAttributeDescriptions = attrs };
+    VkPrimitiveTopology topo = topology(k->topology);
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = topo,
+        .primitiveRestartEnable = k->primitive_restart && (topo == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+                                  topo == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || topo == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) };
+    VkPipelineViewportStateCreateInfo vp = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                                             .viewportCount = 1, .scissorCount = 1 };
+    /* cull: NONE, FRONT, BACK, FRONT_AND_BACK. Front face: NVN's CCW is Vulkan's CW (see notes in
+     * draw.c: we render with y pointing the other way) */
+    static const VkCullModeFlags cull[4] = { VK_CULL_MODE_NONE, VK_CULL_MODE_FRONT_BIT, VK_CULL_MODE_BACK_BIT,
+                                             VK_CULL_MODE_FRONT_AND_BACK };
+    static const VkPolygonMode poly[3] = { VK_POLYGON_MODE_POINT, VK_POLYGON_MODE_LINE, VK_POLYGON_MODE_FILL };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE, .rasterizerDiscardEnable = k->rasterizer_discard,
+        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = cull[k->cull & 3],
+        .frontFace = k->front_ccw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable = k->depth_bias, .lineWidth = 1.0f };
+    (void)poly;
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, .alphaToCoverageEnable = k->alpha_to_coverage };
+    VkStencilOpState front = { stencil_op(k->stencil_ops[0] & 0xF), stencil_op(k->stencil_ops[0] >> 8 & 0xF),
+                               stencil_op(k->stencil_ops[0] >> 4 & 0xF), render_compare_op(k->stencil_func[0]), 0, 0, 0 };
+    VkStencilOpState back = { stencil_op(k->stencil_ops[1] & 0xF), stencil_op(k->stencil_ops[1] >> 8 & 0xF),
+                              stencil_op(k->stencil_ops[1] >> 4 & 0xF), render_compare_op(k->stencil_func[1]), 0, 0, 0 };
+    VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = k->depth_test, .depthWriteEnable = k->depth_write,
+        .depthCompareOp = render_compare_op(k->depth_func), .stencilTestEnable = k->stencil_test,
+        .front = front, .back = back };
+    VkPipelineColorBlendAttachmentState att[8];
+    for (uint32_t i = 0; i < k->ncolor; i++) {
+        const BlendKey *b = &k->blend[i];
+        att[i] = (VkPipelineColorBlendAttachmentState){
+            .blendEnable = k->blend_enable >> i & 1,
+            .srcColorBlendFactor = blend_factor(b->src_color), .dstColorBlendFactor = blend_factor(b->dst_color),
+            .colorBlendOp = blend_op(b->eq_color),
+            .srcAlphaBlendFactor = blend_factor(b->src_alpha), .dstAlphaBlendFactor = blend_factor(b->dst_alpha),
+            .alphaBlendOp = blend_op(b->eq_alpha),
+            .colorWriteMask = k->channel_mask >> (4 * i) & 0xF,
+        };
+    }
+    VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = k->logic_op != 3 && k->logic_op < 16, .logicOp = (VkLogicOp)(k->logic_op & 15),
+        .attachmentCount = k->ncolor, .pAttachments = att };
+    VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                             VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+                             VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_LINE_WIDTH };
+    VkPipelineDynamicStateCreateInfo dy = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+                                            .dynamicStateCount = sizeof dyn / sizeof *dyn, .pDynamicStates = dyn };
+    VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = k->ncolor, .pColorAttachmentFormats = k->color_format,
+        .depthAttachmentFormat = (render_aspects(k->depth_format) & VK_IMAGE_ASPECT_DEPTH_BIT) ? k->depth_format : VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = (render_aspects(k->depth_format) & VK_IMAGE_ASPECT_STENCIL_BIT) ? k->depth_format : VK_FORMAT_UNDEFINED };
+    VkGraphicsPipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri,
+        .stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+        .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
+        .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = render_pipeline_layout() };
+    if (getenv("LAA_TRACE_PIPELINES"))
+        fprintf(stderr, "render: pipeline vs %#llx fs %#llx, %u attributes, %u targets\n",
+                (unsigned long long)k->vs_code, (unsigned long long)k->fs_code, nattrs, k->ncolor);
+    if (getenv("LAA_TRACE_PIPELINES"))
+        fprintf(stderr, "render:   topo %u blend %#x logic %u mask %#x depth %u/%u/%u stencil %u cull %u ccw %u fmt %d/%d bl %u,%u,%u,%u,%u,%u\n",
+                k->topology, k->blend_enable, k->logic_op, k->channel_mask, k->depth_test, k->depth_write, k->depth_func,
+                k->stencil_test, k->cull, k->front_ccw, k->color_format[0], k->depth_format, k->blend[0].src_color,
+                k->blend[0].dst_color, k->blend[0].src_alpha, k->blend[0].dst_alpha, k->blend[0].eq_color, k->blend[0].eq_alpha);
+    if (getenv("LAA_TRACE_PIPELINES"))
+        for (uint32_t i = 0; i < nattrs; i++)
+            fprintf(stderr, "render:   attribute %u: format %d (nvn %#x) stream %u offset %u, stride %u; color format %d\n",
+                    attrs[i].location, attrs[i].format, k->attr[attrs[i].location].format, attrs[i].binding,
+                    attrs[i].offset, k->stream[attrs[i].binding].stride, k->color_format[0]);
+    VkPipeline p;
+    VK_CHECK(vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &p));
+    return p;
+}
+
+VkPipeline render_pipeline(const PipelineKey *k) {
+    unsigned b = hash(k, sizeof *k) & (PIPELINE_BUCKETS - 1);
+    for (Pipeline *p = pipeline_buckets[b]; p; p = p->next)
+        if (memcmp(&p->key, k, sizeof *k) == 0) return p->pipeline;
+    Pipeline *p = calloc(1, sizeof *p);
+    p->key = *k;
+    p->pipeline = create(k);
+    p->next = pipeline_buckets[b];
+    pipeline_buckets[b] = p;
+    return p->pipeline;
+}

@@ -61,6 +61,7 @@ void render_flush(void) {
     VK_CHECK(vkWaitForFences(vk.device, 1, &done, VK_TRUE, UINT64_MAX));
     VK_CHECK(vkResetFences(vk.device, 1, &done));
     staging_used = 0;
+    render_submission_done();
 }
 
 void render_barrier(VkCommandBuffer c) {

@@ -119,7 +119,9 @@ static void screenshot(uint64_t texture) {
     for (size_t i = 3; i < (size_t)s.width * s.height * 4; i += 4) rgba[i] = 255;   /* opaque */
     char path[4096];
     snprintf(path, sizeof path, "%s/frame_%06" PRIu64 ".png", dir, frames);
-    if (png_write(path, rgba, s.width, s.height, s.width * 4) == 0) fprintf(stderr, "nvn: wrote %s\n", path);
+    /* row 0 is the bottom of the screen (NVN's default, as in OpenGL): write it last */
+    if (png_write(path, rgba + (size_t)(s.height - 1) * s.width * 4, s.width, s.height, -(int32_t)s.width * 4) == 0)
+        fprintf(stderr, "nvn: wrote %s\n", path);
     free(rgba);
 }
 

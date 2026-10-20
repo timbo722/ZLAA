@@ -25,7 +25,7 @@
     X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
-    X(vkDestroySurfaceKHR)
+    X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceProperties2)
 
 /* loaded with vkGetDeviceProcAddr(device, ...) */
 #define VK_DEVICE_FUNCTIONS(X) \
@@ -42,7 +42,15 @@
     X(vkAllocateMemory) X(vkFreeMemory) X(vkMapMemory) X(vkUnmapMemory) \
     X(vkCmdPipelineBarrier) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) X(vkCmdBlitImage) \
     X(vkCmdCopyImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) \
-    X(vkCmdBeginRendering) X(vkCmdEndRendering)
+    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkGetMemoryHostPointerPropertiesEXT) \
+    X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
+    X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) X(vkCreateDescriptorSetLayout) \
+    X(vkCreateDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
+    X(vkCreateSampler) X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers) \
+    X(vkCmdBindIndexBuffer) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdSetViewport) X(vkCmdSetScissor) \
+    X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetStencilCompareMask) \
+    X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias) X(vkCmdSetLineWidth) X(vkCmdUpdateBuffer) \
+    X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments)
 
 #define VK_DECLARE(name) extern PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DECLARE)
@@ -64,6 +72,9 @@ typedef struct {
     uint32_t image_count;
     VkImage images[8];
     VkCommandPool pool;
+    int host_import;                 /* VK_EXT_external_memory_host: GPU access to guest memory */
+    VkDeviceSize import_alignment;
+    VkPhysicalDeviceLimits limits;
 } Vk;
 extern Vk vk;
 
