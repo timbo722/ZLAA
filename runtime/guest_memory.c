@@ -6,6 +6,7 @@
 #include "guest_memory.h"
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -79,17 +80,19 @@ int gmem_move(uint64_t dst, uint64_t src, uint64_t size) {
     if (dst + size > guest_mem_size || src + size > guest_mem_size || dst + size < dst || src + size < src)
         return -1;
     if (((dst | src | size) & (hp - 1)) == 0) {
-        /* mremap moves the pages themselves: no copying, and untouched pages stay free */
-        void *p = mremap(guest_mem + src, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, guest_mem + dst);
-        if (p == MAP_FAILED) {
+        /* mremap moves the pages themselves: no copying, and untouched pages stay free.
+         * MREMAP_DONTUNMAP leaves src mapped (emptied) instead of making a hole there: in a
+         * hole, another thread's mmap (the GPU driver's, say) could land, and we would then
+         * map over it. With src never unmapped, nothing else can ever be placed inside guest
+         * memory. (Linux 5.7+; otherwise we copy, below.) */
+        void *p = mremap(guest_mem + src, size, size, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, guest_mem + dst);
+        if (p != MAP_FAILED) return gmem_protect(src, size, GMEM_NONE);
+        if (errno != EINVAL) {
             perror("gmem_move: mremap");
             return -1;
         }
-        /* mremap left a hole at src; fill it back in with reserved, no-access memory */
-        p = mmap(guest_mem + src, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
-        return p == MAP_FAILED ? -1 : 0;
     }
-    /* Host pages bigger than 4 KiB: copy instead */
+    /* Host pages bigger than 4 KiB, or no MREMAP_DONTUNMAP: copy instead */
     if (gmem_protect(dst, size, GMEM_READ | GMEM_WRITE) != 0) return -1;
     memcpy(guest_mem + dst, guest_mem + src, size);
     return gmem_decommit(src, size);

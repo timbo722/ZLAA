@@ -27,7 +27,7 @@
 #define HOST_STACK_SIZE (64u << 20)   /* recompiled code can nest deeply; this is only address space */
 
 static pthread_mutex_t kernel_lock = PTHREAD_MUTEX_INITIALIZER;
-static KThread *threads[MAX_THREADS];  /* every thread ever created (exited ones stay, for now) */
+static KThread *threads[MAX_THREADS];  /* live threads, and exited ones until their handle is closed */
 static int nthreads;
 static uint64_t next_thread_id = 0x51, wait_counter;
 static __thread KThread *cur_thread;
@@ -103,8 +103,22 @@ static int count_waiters(int kind, uint64_t addr) {
 }
 
 /* ================================================================ threads */
+/* A slot in threads[]: a new one, or one whose thread has exited and whose handle the game has
+ * closed (nothing can refer to it any more). The old KThread is left allocated: its host
+ * thread may still be on its way out. */
+static int free_slot(void) {
+    if (nthreads < MAX_THREADS) return nthreads++;
+    for (int i = 0; i < nthreads; i++) {
+        KThread *old = threads[i];
+        KHandle *h = khandle_get(old->handle);
+        if (old->exited && (!h || h->obj != old)) return i;
+    }
+    return -1;
+}
+
 static KThread *new_thread(uint64_t entry, uint64_t arg, uint64_t stack_top, int priority, int core) {
-    if (nthreads == MAX_THREADS) return NULL;
+    int slot = free_slot();
+    if (slot < 0) { fprintf(stderr, "kernel: too many threads\n"); return NULL; }
     KThread *t = calloc(1, sizeof *t);
     pthread_cond_t *cv = malloc(sizeof *cv);
     if (!t || !cv) { free(t); free(cv); return NULL; }
@@ -116,14 +130,20 @@ static KThread *new_thread(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->host_cond = cv;
     t->tls = ktls_alloc();
     t->handle = khandle_new(KOBJ_THREAD, t);
-    if (!t->tls || !t->handle) { free(cv); free(t); return NULL; }
+    if (!t->tls || !t->handle) {
+        fprintf(stderr, "kernel: can't create a thread: no %s\n", !t->tls ? "TLS slot" : "free handle");
+        if (!threads[slot]) nthreads--;              /* it was a new slot: give it back */
+        free(cv);
+        free(t);
+        return NULL;
+    }
     t->entry = entry;
     t->arg = arg;
     t->stack_top = stack_top;
     t->priority = priority;
     t->core = core;
     t->id = next_thread_id++;
-    threads[nthreads++] = t;
+    threads[slot] = t;
     return t;
 }
 

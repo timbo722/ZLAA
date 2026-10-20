@@ -10,6 +10,7 @@
 #include "guest_memory.h"
 #include "ipc.h"
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
 #include <time.h>
@@ -41,22 +42,31 @@ static void svc_set_memory_attribute(CPU *c) {
     ret(c, R_SUCCESS);
 }
 
+/* The state and permission of [addr, addr+size) if it is all the same, else -1. (Our memory
+ * map may keep neighbouring blocks with the same state apart, which the real kernel merges,
+ * so one query isn't enough.) */
+static int range_state(uint64_t addr, uint64_t size, int *perm) {
+    uint64_t b, sz;
+    int state, p, first = -1;
+    for (uint64_t at = addr; at < addr + size; at = b + sz) {
+        kmem_query(at, &b, &sz, &state, &p);
+        if (first < 0) { first = state; *perm = p; }
+        else if (state != first || p != *perm) return -1;
+        if (sz == 0) return -1;
+    }
+    return first;
+}
+
 /* 0x04 MapMemory(dst, src, size): make heap memory (or a module's static data) appear at
  * dst, in the stack or alias region; e.g. for a thread stack. The source keeps its state
  * but can't be used until it's unmapped. */
 static void svc_map_memory(CPU *c) {
     uint64_t dst = c->x[0], src = c->x[1], size = c->x[2];
     if ((dst | src | size) & (GUEST_PAGE - 1) || size == 0) { ret(c, R_INVALID_ADDRESS); return; }
-    uint64_t b, sz;
-    int state, perm;
-    kmem_query(src, &b, &sz, &state, &perm);
+    int perm, state = range_state(src, size, &perm);
     int src_state = state;   /* memory the kernel lets you alias: heap and module data */
-    if ((state != MEM_HEAP && state != MEM_CODE_DATA) || perm != PERM_RW || src + size > b + sz) {
-        ret(c, R_INVALID_CURRENT_MEM);
-        return;
-    }
-    kmem_query(dst, &b, &sz, &state, &perm);
-    if (state != MEM_FREE || dst + size > b + sz) { ret(c, R_INVALID_CURRENT_MEM); return; }
+    if ((state != MEM_HEAP && state != MEM_CODE_DATA) || perm != PERM_RW) { ret(c, R_INVALID_CURRENT_MEM); return; }
+    if (range_state(dst, size, &perm) != MEM_FREE) { ret(c, R_INVALID_CURRENT_MEM); return; }
     int dst_state = dst >= STACK_BASE && dst < STACK_BASE + STACK_SIZE ? MEM_STACK : MEM_ALIAS;
     if (gmem_move(dst, src, size) != 0 || kmem_map(dst, size, dst_state, PERM_RW) != 0 ||
         kmem_map(src, size, src_state, PERM_NONE) != 0) {   /* same state, but locked */
@@ -70,11 +80,9 @@ static void svc_map_memory(CPU *c) {
 static void svc_unmap_memory(CPU *c) {
     uint64_t dst = c->x[0], src = c->x[1], size = c->x[2];
     if ((dst | src | size) & (GUEST_PAGE - 1) || size == 0) { ret(c, R_INVALID_ADDRESS); return; }
-    uint64_t b, sz;
-    int state, perm;
-    kmem_query(dst, &b, &sz, &state, &perm);
-    if ((state != MEM_STACK && state != MEM_ALIAS) || dst + size > b + sz) { ret(c, R_INVALID_CURRENT_MEM); return; }
-    kmem_query(src, &b, &sz, &state, &perm);
+    int perm, state = range_state(dst, size, &perm);
+    if (state != MEM_STACK && state != MEM_ALIAS) { ret(c, R_INVALID_CURRENT_MEM); return; }
+    state = range_state(src, size, &perm);
     if ((state != MEM_HEAP && state != MEM_CODE_DATA) || perm != PERM_NONE) { ret(c, R_INVALID_CURRENT_MEM); return; }
     if (gmem_move(src, dst, size) != 0 || kmem_map(src, size, state, PERM_RW) != 0 ||
         kmem_map(dst, size, MEM_FREE, PERM_NONE) != 0) {
@@ -295,11 +303,13 @@ static const struct { SvcHandler fn; const char *name; } svcs[0x80] = {
 
 void recomp_svc(CPU *c, uint64_t pc, uint32_t imm) {
     if (imm < 0x80 && svcs[imm].fn) {
-        if (ktrace)
-            fprintf(stderr, "svc 0x%02x %-18s at 0x%" PRIx64 " (x0=%" PRIx64 " x1=%" PRIx64 " x2=%" PRIx64 " x3=%" PRIx64 ")",
-                    imm, svcs[imm].name, pc, c->x[0], c->x[1], c->x[2], c->x[3]);
+        uint64_t in[6];
+        memcpy(in, c->x, sizeof in);
         svcs[imm].fn(c);
-        if (ktrace) fprintf(stderr, " -> w0=%" PRIx64 " x1=%" PRIx64 "\n", c->x[0] & 0xFFFFFFFF, c->x[1]);
+        if (ktrace)                                      /* one line per call, so threads don't mix */
+            fprintf(stderr, "svc 0x%02x %-18s at 0x%" PRIx64 " (x0=%" PRIx64 " x1=%" PRIx64 " x2=%" PRIx64 " x3=%" PRIx64
+                    " x4=%" PRIx64 " x5=%" PRIx64 ") -> w0=%" PRIx64 " x1=%" PRIx64 "\n", imm, svcs[imm].name, pc, in[0],
+                    in[1], in[2], in[3], in[4], in[5], c->x[0] & 0xFFFFFFFF, c->x[1]);
         return;
     }
     fprintf(stderr, "\nsvc: SVC 0x%" PRIx32 " at 0x%" PRIx64 " is not implemented yet "

@@ -50,9 +50,24 @@ static RecompFunc override(uint64_t addr) {
     return NULL;
 }
 
+/* nn::diag::detail::AbortImpl(condition, function, file, line): the SDK's assert failure.
+ * Say what failed before stopping (the original would just call svcBreak). */
+static const char *guest_cstr(uint64_t a) {
+    if (!a || a >= guest_mem_size) return "?";
+    const char *s = (const char *)guest_mem + a;
+    return memchr(s, 0, 512) ? s : "?";
+}
+static void abort_impl(CPU *c) {
+    fprintf(stderr, "\ngame abort: %s\n  in %s\n  at %s:%d\n", guest_cstr(c->x[0]), guest_cstr(c->x[1]),
+            guest_cstr(c->x[2]), (int)c->x[3]);
+    kernel_dump_state();
+    exit(1);
+}
+
 void hle_init(const GameImage *img) {
     image = img;
     recomp_override = override;
+    hle_replace_symbol("_ZN2nn4diag6detail9AbortImplEPKcS3_S3_i", abort_impl);
 }
 
 uint64_t hle_function(const char *name, HleFunc fn) {
