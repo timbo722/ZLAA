@@ -348,6 +348,71 @@ int emit_io(T *t, const Inst *in) {
     }
 }
 
+/* ---- global memory: LDG / STG ----
+ * Addresses are 64-bit GPU addresses (from c0, where the renderer puts the device address of
+ * each storage buffer the game bound). We read and write through SPIR-V physical pointers. */
+static uint32_t address(T *t, const Inst *in) {
+    int ra = (int)bits(in->w, 8, 8), wide = bit(in->w, 45);
+    uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
+    uint32_t lo = op1(t, SpvOpUConvert, t_u64, get_u(t, ra));
+    uint32_t a = lo;
+    if (wide && ra != RZ) {
+        uint32_t hi = op1(t, SpvOpUConvert, t_u64, get_u(t, ra + 1));
+        a = op2(t, SpvOpBitwiseOr, t_u64, lo, op2(t, SpvOpShiftLeftLogical, t_u64, hi, cu(t, 32)));
+    }
+    int32_t off = sext(bits(in->w, 20, 24), 24);
+    uint64_t off64 = (uint64_t)(int64_t)off;
+    uint32_t c = spv_id(&t->s);
+    spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, c, (uint32_t)off64, (uint32_t)(off64 >> 32));
+    t->uses_pointers = 1;
+    return op2(t, SpvOpIAdd, t_u64, a, c);
+}
+
+/* pointer to the uint at a 64-bit address (+ byte offset) */
+static uint32_t word_ptr(T *t, uint32_t addr, uint32_t byte_offset) {
+    uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
+    if (byte_offset) {
+        uint32_t c = spv_id(&t->s);
+        spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, c, byte_offset, 0);
+        addr = op2(t, SpvOpIAdd, t_u64, addr, c);
+    }
+    return op1(t, SpvOpConvertUToPtr, ptr_type(t, SpvStorageClassPhysicalStorageBuffer, t->t_u32), addr);
+}
+
+int emit_memory(T *t, const Inst *in) {
+    uint64_t w = in->w;
+    int rd = (int)bits(w, 0, 8);
+    if (in->op != OP_LDG && in->op != OP_STG) return 0;
+    int size = (int)bits(w, 48, 3);                     /* U8 S8 U16 S16 B32 B64 B128 */
+    uint32_t a = address(t, in);
+    int words = size == 5 ? 2 : size == 6 || size == 7 ? 4 : 1;
+    if (in->op == OP_LDG) {
+        if (size < 4) {                                  /* small: the aligned word, then the bits */
+            uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
+            uint32_t mask = spv_id(&t->s);
+            spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, mask, 0xFFFFFFFCu, 0xFFFFFFFFu);
+            uint32_t aligned = op2(t, SpvOpBitwiseAnd, t_u64, a, mask);
+            uint32_t v = spv_id(&t->s);
+            spv_op(&t->s, SEC_BODY, SpvOpLoad, 5, t->t_u32, v, word_ptr(t, aligned, 0), SpvMemoryAccessAlignedMask, 4);
+            uint32_t shift = op2(t, SpvOpShiftLeftLogical, t->t_u32, op2(t, SpvOpBitwiseAnd, t->t_u32,
+                                 op1(t, SpvOpUConvert, t->t_u32, a), cu(t, 3)), cu(t, 3));
+            v = op3(t, size & 1 ? SpvOpBitFieldSExtract : SpvOpBitFieldUExtract, t->t_u32, v, shift, cu(t, size < 2 ? 8 : 16));
+            set_u(t, rd, v);
+            return 1;
+        }
+        for (int i = 0; i < words; i++) {
+            uint32_t v = spv_id(&t->s);
+            spv_op(&t->s, SEC_BODY, SpvOpLoad, 5, t->t_u32, v, word_ptr(t, a, 4u * i), SpvMemoryAccessAlignedMask, 4);
+            set_u(t, rd + i, v);
+        }
+        return 1;
+    }
+    if (size < 4) { fail(t, "STG of %d-bit data", size < 2 ? 8 : 16); return 1; }
+    for (int i = 0; i < words; i++)
+        spv_op(&t->s, SEC_BODY, SpvOpStore, 4, word_ptr(t, a, 4u * i), get_u(t, rd + i), SpvMemoryAccessAlignedMask, 4);
+    return 1;
+}
+
 /* Fragment shaders return their colors in registers: each written render target takes 4
  * registers (R0-R3, then R4-R7, ...), depth comes after (see shader.h's header notes). */
 void emit_outputs_at_exit(T *t) {
@@ -631,7 +696,7 @@ static int emit_flow(T *t, const Inst *in, uint32_t next_block) {
 }
 
 static void emit_one(T *t, const Inst *in, uint32_t next_block) {
-    if (emit_flow(t, in, next_block) || emit_io(t, in) || emit_alu(t, in) || emit_texture(t, in)) return;
+    if (emit_flow(t, in, next_block) || emit_io(t, in) || emit_memory(t, in) || emit_alu(t, in) || emit_texture(t, in)) return;
     fail(t, "%s (%016llx) not translated yet", op_name(in->op), (unsigned long long)in->w);
 }
 
@@ -754,7 +819,6 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
         spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityImageQuery);
         t->glsl = spv_id(s);
         spv_inst_str(s, SEC_IMPORT, SpvOpExtInstImport, &t->glsl, 1, "GLSL.std.450", NULL, 0);
-        spv_op(s, SEC_MEMMODEL, SpvOpMemoryModel, 2, SpvAddressingModelLogical, SpvMemoryModelGLSL450);
         setup_types(t);
         uint32_t fn_type = spv_type(s, SpvOpTypeFunction, &t->t_void, 1);
         uint32_t main_fn = spv_id(s);
@@ -762,6 +826,14 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
         spv_op(s, SEC_FUNC, SpvOpLabel, 1, spv_id(s));
         emit_program(t);
         spv_op(s, SEC_BODY, SpvOpFunctionEnd, 0);
+        if (t->uses_pointers) {                           /* (decided while translating) */
+            spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityInt64);
+            spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityPhysicalStorageBufferAddresses);
+            spv_inst_str(s, SEC_EXT, SpvOpExtension, NULL, 0, "SPV_KHR_physical_storage_buffer", NULL, 0);
+            spv_op(s, SEC_MEMMODEL, SpvOpMemoryModel, 2, SpvAddressingModelPhysicalStorageBuffer64, SpvMemoryModelGLSL450);
+        } else {
+            spv_op(s, SEC_MEMMODEL, SpvOpMemoryModel, 2, SpvAddressingModelLogical, SpvMemoryModelGLSL450);
+        }
         uint32_t model = stage == SHADER_VERTEX ? SpvExecutionModelVertex : SpvExecutionModelFragment;
         uint32_t before[2] = { model, main_fn };
         spv_inst_str(s, SEC_ENTRY, SpvOpEntryPoint, before, 2, "main", t->interface, t->ninterface);

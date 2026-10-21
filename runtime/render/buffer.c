@@ -32,7 +32,7 @@ static int import_pool(uint64_t storage, uint64_t size, Import *out) {
         .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT };
     VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &out->buffer));
     VkMemoryHostPointerPropertiesEXT hp = { .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
     VK_CHECK(vkGetMemoryHostPointerPropertiesEXT(vk.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
@@ -41,13 +41,23 @@ static int import_pool(uint64_t storage, uint64_t size, Import *out) {
     vkGetBufferMemoryRequirements(vk.device, out->buffer, &req);
     VkImportMemoryHostPointerInfoEXT imp = { .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = host };
-    VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
+    VkMemoryAllocateFlagsInfo flags = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &imp,
+                                        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
+    VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &flags, .allocationSize = size,
         .memoryTypeIndex = vk_memory_type(hp.memoryTypeBits & req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) };
     VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &out->memory));
     VK_CHECK(vkBindBufferMemory(vk.device, out->buffer, out->memory, 0));
     out->storage = storage;
     out->size = size;
     return 0;
+}
+
+uint64_t render_guest_device_address(uint64_t address) {
+    VkBuffer b;
+    VkDeviceSize off;
+    if (render_guest_buffer(address, &b, &off) != 0) return 0;
+    VkBufferDeviceAddressInfo ai = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = b };
+    return vkGetBufferDeviceAddress(vk.device, &ai) + off;
 }
 
 int render_guest_buffer(uint64_t address, VkBuffer *buffer, VkDeviceSize *offset) {

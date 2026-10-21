@@ -64,10 +64,49 @@ static void abort_impl(CPU *c) {
     exit(1);
 }
 
+/* LAA_SPY=sym1,sym2,...: print each call to these guest functions (arguments, result, and
+ * the first 32 bytes at the first argument afterwards: often an output struct). Calls made
+ * through a pointer or an import only (see hle.h). Every 60th call, to keep it readable. */
+#define MAX_SPIES 16
+static struct { uint64_t addr; char name[128]; uint64_t calls; } spies[MAX_SPIES];
+static int nspies;
+static void spy(CPU *c, int k) {
+    uint64_t in[4];
+    memcpy(in, c->x, sizeof in);
+    recomp_lookup(spies[k].addr)(c);
+    uint32_t w2 = 0;                                 /* (e.g. buttons in an input state) */
+    if (in[0] && in[0] + 32 < guest_mem_size) memcpy(&w2, guest_mem + in[0] + 8, 4);
+    if (spies[k].calls++ % 60 && !w2) return;
+    fprintf(stderr, "spy: %s(%#" PRIx64 ", %#" PRIx64 ", %#" PRIx64 ") -> %#" PRIx64 " [", spies[k].name, in[0], in[1], in[2], c->x[0]);
+    for (int i = 0; i < 8 && in[0] && in[0] + 32 < guest_mem_size; i++) {
+        uint32_t w;
+        memcpy(&w, guest_mem + in[0] + 4 * i, 4);
+        fprintf(stderr, " %08x", w);
+    }
+    fprintf(stderr, " ]\n");
+}
+#define SPY(n) static void spy_##n(CPU *c) { spy(c, n); }
+SPY(0) SPY(1) SPY(2) SPY(3) SPY(4) SPY(5) SPY(6) SPY(7) SPY(8) SPY(9) SPY(10) SPY(11) SPY(12) SPY(13) SPY(14) SPY(15)
+static const HleFunc spy_fns[MAX_SPIES] = { spy_0, spy_1, spy_2, spy_3, spy_4, spy_5, spy_6, spy_7, spy_8, spy_9,
+                                            spy_10, spy_11, spy_12, spy_13, spy_14, spy_15 };
+
+static void install_spies(void) {
+    const char *list = getenv("LAA_SPY");
+    while (list && *list && nspies < MAX_SPIES) {
+        size_t n = strcspn(list, ",");
+        snprintf(spies[nspies].name, sizeof spies[nspies].name, "%.*s", (int)n, list);
+        spies[nspies].addr = nso_find_symbol(image, spies[nspies].name);
+        if (spies[nspies].addr) hle_replace(spies[nspies].addr, spy_fns[nspies]), nspies++;
+        else fprintf(stderr, "spy: no symbol %s\n", spies[nspies].name);
+        list += n + (list[n] == ',');
+    }
+}
+
 void hle_init(const GameImage *img) {
     image = img;
     recomp_override = override;
     hle_replace_symbol("_ZN2nn4diag6detail9AbortImplEPKcS3_S3_i", abort_impl);
+    install_spies();
 }
 
 uint64_t hle_function(const char *name, HleFunc fn) {

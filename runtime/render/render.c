@@ -16,7 +16,9 @@ static volatile int resized;
 static struct {
     VkCommandBuffer cmd;
     VkFence done;                    /* the GPU finished this frame's commands */
-    VkSemaphore acquired, rendered;  /* swapchain image ready / our copy into it done */
+    VkSemaphore acquired;            /* the swapchain image is ready to draw into */
+    VkSemaphore rendered[8];         /* per swapchain image: our copy into it is done (an image
+                                        can't be acquired again until its present used this) */
     VkBuffer staging;                /* CPU-visible copy of the texture */
     VkDeviceMemory staging_mem;
     void *staging_ptr;
@@ -39,7 +41,7 @@ int render_init(void *sdl_window) {
     VK_CHECK(vkCreateFence(vk.device, &fi, NULL, &frame.done));
     VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &frame.acquired));
-    VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &frame.rendered));
+    for (int i = 0; i < 8; i++) VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &frame.rendered[i]));
     active = 1;
     return 0;
 }
@@ -178,10 +180,10 @@ void render_present(uint64_t texture) {
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
                         .pWaitSemaphores = &frame.acquired, .pWaitDstStageMask = &wait_stage,
                         .commandBufferCount = 1, .pCommandBuffers = &cmd,
-                        .signalSemaphoreCount = 1, .pSignalSemaphores = &frame.rendered };
+                        .signalSemaphoreCount = 1, .pSignalSemaphores = &frame.rendered[index] };
     VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, frame.done));
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
-                            .pWaitSemaphores = &frame.rendered, .swapchainCount = 1,
+                            .pWaitSemaphores = &frame.rendered[index], .swapchainCount = 1,
                             .pSwapchains = &vk.swapchain, .pImageIndices = &index };
     r = vkQueuePresentKHR(vk.queue, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) resized = 1;

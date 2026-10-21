@@ -19,5 +19,6 @@ void render_command(const Cmd *r);
 void render_submitted(void);
 /* If the GPU rendered this texture, copy its level 0 (32-bit pixels) to out and return 0. */
 int render_read_back(uint64_t texture, uint8_t *out);
+void render_stats(void);             /* print and reset draw statistics */
 
 #endif

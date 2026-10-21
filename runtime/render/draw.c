@@ -28,6 +28,7 @@ static struct {
     VertexStreamState stream[16];
     Range vertex_buffer[16];
     Range uniform[6][14];            /* per NVN shader stage: vertex 0, fragment 1, ... */
+    Range storage[6][16];
     uint64_t texture[6][32];         /* bound texture handles */
     DescriptorPool texture_pool, sampler_pool;
     float viewport[4], depth_range[2];
@@ -239,6 +240,21 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
         VkDescriptorBufferInfo *bi = &buffers[(*nb)++];
         *bi = (VkDescriptorBufferInfo){ zero_buffer(), 0, 0x10000 };
         uint64_t addr = 0, size = 0;
+        if (slot == 0) {                             /* the driver's constants: storage buffer addresses */
+            VkBuffer b;
+            VkDeviceSize off;
+            uint8_t *c0 = render_uniforms(0x800, &b, &off);
+            memset(c0, 0, 0x800);
+            for (int s = 0; s < 2; s++)
+                for (int i = 0; i < 16; i++) {
+                    const Range *sb = &st.storage[s][i];
+                    uint64_t dev = sb->address ? render_guest_device_address(sb->address) : 0;
+                    uint32_t size32 = (uint32_t)sb->size;
+                    memcpy(c0 + 0x110 + 0x400 * s + 0x10 * i, &dev, 8);
+                    memcpy(c0 + 0x118 + 0x400 * s + 0x10 * i, &size32, 4);
+                }
+            *bi = (VkDescriptorBufferInfo){ b, off, 0x800 };
+        }
         if (slot == 1) { addr = sh->constants; size = sh->constants_size; }
         else if (slot >= 3 && slot - 3 < 14) { addr = st.uniform[stage][slot - 3].address; size = st.uniform[stage][slot - 3].size; }
         if (addr && size) {
@@ -294,15 +310,27 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
 
 /* DRAW_ARRAYS: a = mode, first, count, base instance, instances
  * DRAW_ELEMENTS: a = mode, index type, count, index buffer, base vertex, base instance, instances */
+/* draw statistics, printed with the frame count (render_stats) */
+static struct { uint64_t done, no_shader, failed_shader, other; } stats;
+
+void render_stats(void) {
+    fprintf(stderr, "render: draws %llu done, skipped: %llu without shaders, %llu untranslated shaders, %llu other\n",
+            (unsigned long long)stats.done, (unsigned long long)stats.no_shader,
+            (unsigned long long)stats.failed_shader, (unsigned long long)stats.other);
+    memset(&stats, 0, sizeof stats);
+}
+
 static void draw(const Cmd *r, int indexed) {
     const Program *p = &st.program;
     if (!(p->stages >> STAGE_VERTEX & 1) || !(p->stages >> STAGE_FRAGMENT & 1)) {
         warn_once("draw without a vertex and a fragment shader", p->stages);
+        stats.no_shader++;
         return;
     }
     HostShader *vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX);
     HostShader *fs = render_shader(p->code[STAGE_FRAGMENT], p->control[STAGE_FRAGMENT], SHADER_FRAGMENT);
-    if (!vs->module || !fs->module) return;
+    if (!vs->module || !fs->module) { stats.failed_shader++; return; }
+    stats.other++;                                   /* (until it is done, below) */
     if (r->a[0] == 7 || r->a[0] == 8 || r->a[0] == 9 || r->a[0] == 2) { warn_once("quads/polygons/line loops", r->a[0]); return; }
 
     /* resources first: making a descriptor set may have to submit work (which ends rendering) */
@@ -396,6 +424,8 @@ static void draw(const Cmd *r, int indexed) {
     } else {
         vkCmdDraw(cmd, (uint32_t)r->a[2], (uint32_t)r->a[4], (uint32_t)r->a[1], (uint32_t)r->a[3]);
     }
+    stats.other--;
+    stats.done++;
     for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) st.color[i]->gpu_written = 1, st.color[i]->needs_upload = 0;
     if (st.depth) st.depth->gpu_written = 1, st.depth->needs_upload = 0;
     static int each = -1;                            /* LAA_FLUSH_EACH_DRAW: find which draw breaks the GPU */
@@ -447,6 +477,9 @@ void render_command(const Cmd *r) {
     case CMD_BIND_VERTEX_BUFFERS: bind_ranges(st.vertex_buffer, 16, r->a[0], r->a[1], r->extra); break;
     case CMD_BIND_UNIFORM_BUFFERS:                        /* a = stage, first, count */
         if (r->a[0] < 6) bind_ranges(st.uniform[r->a[0]], 14, r->a[1], r->a[2], r->extra);
+        break;
+    case CMD_BIND_STORAGE_BUFFERS:
+        if (r->a[0] < 6) bind_ranges(st.storage[r->a[0]], 16, r->a[1], r->a[2], r->extra);
         break;
     case CMD_BIND_TEXTURES:
         if (r->a[0] < 6)

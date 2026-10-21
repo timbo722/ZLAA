@@ -125,9 +125,16 @@ static void screenshot(uint64_t texture) {
     free(rgba);
 }
 
+uint64_t nvn_frame_count(void) { return frames; }
+
 void nvn_present(const Window *w, uint64_t texture) {
     frames++;
-    if (frames == 1 || frames % 300 == 0) fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
+    if (frames == 1 || frames % 300 == 0) {
+        fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
+#ifdef LAA_HAVE_SDL
+        if (render_active()) render_stats();
+#endif
+    }
     screenshot(texture);
 #ifdef LAA_HAVE_SDL
     if (render_active()) {                           /* the display's vsync paces us */

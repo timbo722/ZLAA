@@ -51,10 +51,13 @@ void render_barrier(VkCommandBuffer cmd);
  * next flush. May flush first to make room, so call it before render_cmd(). */
 void *render_staging(uint64_t size, uint64_t *offset);
 VkBuffer render_staging_buffer(void);
+/* Uniform data written by the CPU (e.g. our c0), valid until the next flush */
+void *render_uniforms(uint32_t size, VkBuffer *buffer, VkDeviceSize *offset);
 
 /* ---- GPU access to guest memory (buffer.c) ---- */
 /* The VkBuffer and offset for a GPU (= guest) address inside a memory pool; 0 on success */
 int render_guest_buffer(uint64_t address, VkBuffer *buffer, VkDeviceSize *offset);
+uint64_t render_guest_device_address(uint64_t address);   /* for shaders' pointers; 0 if none */
 
 /* ---- shaders and pipelines (pipeline.c) ---- */
 #include "render/shader/shader.h"

@@ -24,9 +24,63 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "input.h"
 #ifdef LAA_HAVE_SDL
 #include <SDL3/SDL.h>
 #include "render/render.h"
+
+/* Keyboard: arrows = left stick, I/J/K/L = right stick, X = A, Z = B, S = X, A = Y, Q = L, W = R,
+ * 1 = ZL, 2 = ZR, Enter = +, Backspace = -, T/F/G/H = d-pad. Gamepads map one to one. */
+static void read_input(void) {
+    static SDL_Gamepad *pad;
+    if (!pad) {
+        int n = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&n);
+        if (ids && n > 0) pad = SDL_OpenGamepad(ids[0]);
+        SDL_free(ids);
+    }
+    const bool *k = SDL_GetKeyboardState(NULL);
+    InputState s = { 0 };
+    static const struct { SDL_Scancode key; uint64_t bit; } keys[] = {
+        { SDL_SCANCODE_X, BTN_A }, { SDL_SCANCODE_Z, BTN_B }, { SDL_SCANCODE_S, BTN_X }, { SDL_SCANCODE_A, BTN_Y },
+        { SDL_SCANCODE_Q, BTN_L }, { SDL_SCANCODE_W, BTN_R }, { SDL_SCANCODE_1, BTN_ZL }, { SDL_SCANCODE_2, BTN_ZR },
+        { SDL_SCANCODE_RETURN, BTN_PLUS }, { SDL_SCANCODE_BACKSPACE, BTN_MINUS }, { SDL_SCANCODE_T, BTN_UP },
+        { SDL_SCANCODE_G, BTN_DOWN }, { SDL_SCANCODE_F, BTN_LEFT }, { SDL_SCANCODE_H, BTN_RIGHT },
+    };
+    for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) if (k[keys[i].key]) s.buttons |= keys[i].bit;
+    if (k[SDL_SCANCODE_LEFT]) s.lx -= 32767;
+    if (k[SDL_SCANCODE_RIGHT]) s.lx += 32767;
+    if (k[SDL_SCANCODE_UP]) s.ly += 32767;
+    if (k[SDL_SCANCODE_DOWN]) s.ly -= 32767;
+    if (k[SDL_SCANCODE_J]) s.rx -= 32767;
+    if (k[SDL_SCANCODE_L]) s.rx += 32767;
+    if (k[SDL_SCANCODE_I]) s.ry += 32767;
+    if (k[SDL_SCANCODE_K]) s.ry -= 32767;
+    if (pad) {
+        /* SDL names buttons by position (south = the Switch's B, east = A) */
+        static const struct { SDL_GamepadButton b; uint64_t bit; } map[] = {
+            { SDL_GAMEPAD_BUTTON_EAST, BTN_A }, { SDL_GAMEPAD_BUTTON_SOUTH, BTN_B }, { SDL_GAMEPAD_BUTTON_NORTH, BTN_X },
+            { SDL_GAMEPAD_BUTTON_WEST, BTN_Y }, { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L },
+            { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, BTN_R }, { SDL_GAMEPAD_BUTTON_START, BTN_PLUS },
+            { SDL_GAMEPAD_BUTTON_BACK, BTN_MINUS }, { SDL_GAMEPAD_BUTTON_DPAD_UP, BTN_UP },
+            { SDL_GAMEPAD_BUTTON_DPAD_DOWN, BTN_DOWN }, { SDL_GAMEPAD_BUTTON_DPAD_LEFT, BTN_LEFT },
+            { SDL_GAMEPAD_BUTTON_DPAD_RIGHT, BTN_RIGHT }, { SDL_GAMEPAD_BUTTON_LEFT_STICK, BTN_LSTICK },
+            { SDL_GAMEPAD_BUTTON_RIGHT_STICK, BTN_RSTICK },
+        };
+        for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (SDL_GetGamepadButton(pad, map[i].b)) s.buttons |= map[i].bit;
+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) s.buttons |= BTN_ZL;
+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) s.buttons |= BTN_ZR;
+        int lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+        int rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX), ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+        if (abs(lx) > 4000 || abs(ly) > 4000) { s.lx = lx; s.ly = ly; }
+        if (abs(rx) > 4000 || abs(ry) > 4000) { s.rx = rx; s.ry = ry; }
+    }
+    if (s.lx > 32767) s.lx = 32767;
+    if (s.ly > 32767) s.ly = 32767;
+    if (s.lx < -32767) s.lx = -32767;
+    if (s.ly < -32767) s.ly = -32767;
+    input_set(&s);
+}
 #endif
 
 #define LOAD_BASE 0x8000000ull   /* must match recomp.py --base (same as yuzu/Ryujinx) */
@@ -87,7 +141,7 @@ int main(int argc, char **argv) {
     void *window = NULL;
 #ifdef LAA_HAVE_SDL
     if (!headless) {
-        if (!SDL_Init(SDL_INIT_VIDEO)) {
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
             fprintf(stderr, "No window: %s\n", SDL_GetError());
         } else {
             window = SDL_CreateWindow("LAARecomp", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
@@ -108,6 +162,7 @@ int main(int argc, char **argv) {
             if (e.type == SDL_EVENT_QUIT) exit(0);
             if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) render_resized();
         }
+        if (window) read_input();
 #endif
         if (kernel_wait_main(window ? 10 : 1000)) break;   /* the game ended */
     }

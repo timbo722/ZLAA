@@ -18,6 +18,7 @@ static VkBuffer staging;
 static VkDeviceMemory staging_memory;
 static uint8_t *staging_ptr;
 static uint64_t staging_used;
+static uint64_t uniform_used;                   /* (see render_uniforms) */
 
 static void init(void) {
     VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -61,6 +62,7 @@ void render_flush(void) {
     VK_CHECK(vkWaitForFences(vk.device, 1, &done, VK_TRUE, UINT64_MAX));
     VK_CHECK(vkResetFences(vk.device, 1, &done));
     staging_used = 0;
+    uniform_used = 0;
     render_submission_done();
 }
 
@@ -83,3 +85,32 @@ void *render_staging(uint64_t size, uint64_t *offset) {
 }
 
 VkBuffer render_staging_buffer(void) { return staging; }
+
+/* A ring of host-visible memory for small uniform buffers made per draw */
+#define UNIFORM_RING (8u << 20)
+static VkBuffer uniform_buffer;
+static uint8_t *uniform_ptr;
+
+void *render_uniforms(uint32_t size, VkBuffer *buffer, VkDeviceSize *offset) {
+    if (!uniform_buffer) {
+        VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = UNIFORM_RING,
+                                  .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT };
+        VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &uniform_buffer));
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(vk.device, uniform_buffer, &req);
+        VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+            .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+        VkDeviceMemory mem;
+        VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &mem));
+        VK_CHECK(vkBindBufferMemory(vk.device, uniform_buffer, mem, 0));
+        VK_CHECK(vkMapMemory(vk.device, mem, 0, VK_WHOLE_SIZE, 0, (void **)&uniform_ptr));
+    }
+    uint64_t align = vk.limits.minUniformBufferOffsetAlignment ? vk.limits.minUniformBufferOffsetAlignment : 256;
+    uint64_t at = (uniform_used + align - 1) / align * align;
+    if (at + size > UNIFORM_RING) { render_flush(); at = 0; }
+    uniform_used = at + size;
+    *buffer = uniform_buffer;
+    *offset = at;
+    return uniform_ptr + at;
+}

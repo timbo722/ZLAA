@@ -51,6 +51,7 @@ typedef struct {
     uint32_t pc_var;                 /* dispatch loop: the next block to run */
     uint32_t cbuf[18];               /* uniform buffer variables */
     int cbuf_decorated;              /* their types got their decorations */
+    int uses_pointers;               /* global memory (LDG/STG): 64-bit physical pointers */
     uint32_t in_attr[32], out_attr[32];
     uint32_t in_position, in_front_facing, in_vertex_index, in_instance_index, frag_coord;
     uint32_t out_position, out_point_size, out_layer, out_viewport, out_clip[8], out_color[8], out_depth;
@@ -112,6 +113,7 @@ uint32_t operand_c(T *t, const Inst *in);
 int emit_alu(T *t, const Inst *in);              /* alu.c: 1 if handled */
 int emit_texture(T *t, const Inst *in);          /* texture.c: 1 if handled */
 int emit_io(T *t, const Inst *in);               /* translate.c: attributes, IPA */
+int emit_memory(T *t, const Inst *in);           /* translate.c: LDG / STG (global memory) */
 void emit_outputs_at_exit(T *t);                 /* fragment: colors/depth from registers */
 
 #endif

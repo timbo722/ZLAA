@@ -175,6 +175,9 @@ void render_upload(HostImage *h) {
         total += (uint64_t)l.wb * s.fmt->bytes * l.hb * l.depth * s.layers;
     }
     uint64_t offset;
+    if (getenv("LAA_TRACE_PIPELINES"))
+        fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u: %llu bytes\n", (unsigned long long)h->address,
+                s.width, s.height, s.depth, h->desc.format, s.levels, s.layers, (unsigned long long)total);
     uint8_t *out = render_staging(total, &offset);
     VkBufferImageCopy copies[16];
     uint32_t ncopies = 0;

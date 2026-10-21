@@ -138,9 +138,14 @@ static int create_device(void) {
     /* Vulkan 1.3 features we rely on: rendering without render pass objects */
     VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                              .dynamicRendering = VK_TRUE };
-    VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v13 };
+    /* buffer device addresses: shaders read the game's memory through 64-bit pointers (LDG) */
+    VkPhysicalDeviceVulkan12Features v12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                                             .pNext = &v13, .bufferDeviceAddress = VK_TRUE };
+    VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v12 };
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(vk.gpu, &supported);
+    features.features.shaderInt64 = supported.shaderInt64;
+    features.features.shaderImageGatherExtended = supported.shaderImageGatherExtended;
     features.features.textureCompressionBC = supported.textureCompressionBC;
     features.features.textureCompressionASTC_LDR = supported.textureCompressionASTC_LDR;
     VkDeviceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,

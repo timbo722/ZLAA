@@ -342,6 +342,7 @@ typedef struct {
 
 void nvn_execute(uint64_t handle);  /* exec.c: run a finalized command list */
 void nvn_present(const Window *w, uint64_t texture);
+uint64_t nvn_frame_count(void);      /* frames presented so far */
 uint64_t nvn_gpu_ticks(void);       /* GPU timestamp counter, in units of 625/384 ns */
 
 #endif

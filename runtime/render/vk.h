@@ -50,7 +50,7 @@
     X(vkCmdBindIndexBuffer) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetStencilCompareMask) \
     X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias) X(vkCmdSetLineWidth) X(vkCmdUpdateBuffer) \
-    X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments)
+    X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments) X(vkGetBufferDeviceAddress)
 
 #define VK_DECLARE(name) extern PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DECLARE)
