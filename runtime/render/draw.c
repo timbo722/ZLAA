@@ -155,6 +155,12 @@ static void region_box(const HostImage *h, uint32_t level, const int32_t *r, VkO
                            h->depth > 1 ? r[2] + (r[5] > 0 ? r[5] : d) : 1 };
 }
 
+static int can_blit(VkFormat f, VkFormatFeatureFlags need) {
+    VkFormatProperties p;
+    vkGetPhysicalDeviceFormatProperties(vk.gpu, f, &p);
+    return (p.optimalTilingFeatures & need) == need;
+}
+
 /* CopyTextureToTexture: same size -> vkCmdCopyImage; scaled or different formats -> blit */
 static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint32_t flags) {
     HostImage *src = render_image_ready(src_ref->texture), *dst = render_image_ready(dst_ref->texture);
@@ -190,8 +196,17 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
                           .extent = { (uint32_t)(sb[1].x - sb[0].x), (uint32_t)(sb[1].y - sb[0].y), (uint32_t)(sb[1].z - sb[0].z) } };
         vkCmdCopyImage(cmd, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     } else if (!(src->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) {
-        warn_once("scaled copy of a depth/stencil image", src->format);  /* (can't blit those; needs a shader) */
-        return;
+        /* scaled depth (e.g. a smaller depth buffer for ambient occlusion): a blit of the depth
+         * aspect with NEAREST, where the GPU can blit that format */
+        if (!can_blit(src->format, VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !can_blit(dst->format, VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
+            !(dst->aspects & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            warn_once("scaled copy of a depth/stencil image this GPU can't blit", src->format);
+            return;
+        }
+        ss.aspectMask = ds.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        VkImageBlit b = { .srcSubresource = ss, .srcOffsets = { sb[0], sb[1] }, .dstSubresource = ds,
+                          .dstOffsets = { db[0], db[1] } };
+        vkCmdBlitImage(cmd, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
     } else {
         VkImageBlit b = { .srcSubresource = ss, .srcOffsets = { sb[0], sb[1] }, .dstSubresource = ds,
                           .dstOffsets = { db[0], db[1] } };
@@ -634,6 +649,17 @@ static void draw(const Cmd *r, int indexed) {
     stats.done++;
     for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) render_image_gpu_wrote(st.color[i]);
     if (st.depth) render_image_gpu_wrote(st.depth);
+    /* LAA_DUMP_DRAWS_AT=frame (+ LAA_DUMP_DIR): after each full-screen pass of that frame (no depth
+     * buffer, at least 960 wide), save its render target */
+    static int64_t dump_draws = -2;
+    static int draw_no;
+    if (dump_draws == -2) dump_draws = getenv("LAA_DUMP_DRAWS_AT") ? strtoll(getenv("LAA_DUMP_DRAWS_AT"), NULL, 0) : -1;
+    if (dump_draws >= 0 && nvn_frame_count() == (uint64_t)dump_draws && !st.depth && st.color[0] && st.color[0]->width >= 960) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/draw%03d_fs%llx.png", getenv("LAA_DUMP_DIR") ? getenv("LAA_DUMP_DIR") : ".", draw_no++,
+                 (unsigned long long)fs->code);
+        render_debug_dump(st.color[0], path);
+    }
     static int each = -1;                            /* LAA_FLUSH_EACH_DRAW: find which draw breaks the GPU */
     if (each < 0) each = getenv("LAA_FLUSH_EACH_DRAW") != NULL;
     if (each) { render_flush(); fprintf(stderr, "render: draw done\n"); }
