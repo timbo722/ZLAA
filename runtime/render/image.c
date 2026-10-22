@@ -9,6 +9,7 @@
  */
 #include "render_internal.h"
 #include "astc.h"
+#include "png.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -187,10 +188,14 @@ HostImage *render_image(const Texture *t) {
  * its memory (the font cache does: glyphs are drawn into it as text needs them). Our image is
  * a copy, so we notice changes by hashing the guest memory before an image is used:
  *   - an image that changed recently ("hot") is checked every frame;
- *   - others at most every CHECK_EVERY frames, within a per-frame byte budget. */
+ *   - others at most every CHECK_EVERY frames, within a per-frame byte budget;
+ *   - an image the GPU writes (a render target) isn't checked while the GPU keeps writing it.
+ *     After GPU_QUIET frames without, its guest memory is hashed again as the new baseline:
+ *     some images are cleared by the GPU once, then filled by the CPU (glyph caches). */
 #define CHECK_EVERY 30
 #define CHECK_BUDGET (24u << 20)                     /* bytes per frame, for images that aren't hot */
 #define HOT_FRAMES 600
+#define GPU_QUIET 60
 static uint64_t frame_no = 1, budget = CHECK_BUDGET;
 
 void render_images_new_frame(void) { frame_no++; budget = CHECK_BUDGET; }
@@ -211,25 +216,96 @@ static uint64_t guest_hash(const HostImage *h) {
     return v;
 }
 
+void render_image_gpu_wrote(HostImage *h) {
+    h->gpu_written = 1;
+    h->needs_upload = 0;
+    h->gpu_frame = frame_no;
+    h->hash_valid = 0;
+}
+
 static void check_cpu_writes(HostImage *h) {
-    if (h->gpu_written || h->needs_upload || h->checked == frame_no) return;
+    if (h->needs_upload || h->checked == frame_no) return;
+    if (h->gpu_written && frame_no - h->gpu_frame < GPU_QUIET) return;
     int hot = h->hot_until > frame_no;
-    if (!hot) {
-        uint64_t size = storage_bytes(h);
+    uint64_t size = storage_bytes(h);
+    if (!hot || !h->hash_valid) {
         if (frame_no - h->checked < CHECK_EVERY || size > budget) return;
         budget -= size;
     }
     h->checked = frame_no;
-    if (guest_hash(h) != h->hash) {
+    uint64_t now = guest_hash(h);
+    if (!h->hash_valid) {                            /* (after GPU writes: just the new baseline) */
+        h->hash = now;
+        h->hash_valid = 1;
+    } else if (now != h->hash) {
         h->needs_upload = 1;
         h->hot_until = frame_no + HOT_FRAMES;
     }
+}
+
+/* Debugging: save a colour image as a PNG (blitted to RGBA8 first, so HDR values clamp to
+ * 0..1). Finishes the GPU work recorded so far. */
+void render_debug_dump(HostImage *h, const char *path) {
+    if (!(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) return;
+    VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { h->width, h->height, 1 }, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    VkImage tmp;
+    VkDeviceMemory mem;
+    VK_CHECK(vkCreateImage(vk.device, &ci, NULL, &tmp));
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(vk.device, tmp, &req);
+    VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &mem));
+    VK_CHECK(vkBindImageMemory(vk.device, tmp, mem, 0));
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    render_image_init_layout(cmd, h);
+    VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .image = tmp,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+    VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .srcOffsets = { { 0, 0, 0 }, { (int32_t)h->width, (int32_t)h->height, 1 } },
+        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .dstOffsets = { { 0, 0, 0 }, { (int32_t)h->width, (int32_t)h->height, 1 } } };
+    vkCmdBlitImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, tmp, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+    render_barrier(cmd);
+    uint64_t size = (uint64_t)h->width * h->height * 4, offset;
+    uint8_t *staging = render_staging(size, &offset);
+    VkBufferImageCopy copy = { .bufferOffset = offset, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                               .imageExtent = { h->width, h->height, 1 } };
+    vkCmdCopyImageToBuffer(cmd, tmp, VK_IMAGE_LAYOUT_GENERAL, render_staging_buffer(), 1, &copy);
+    render_flush();
+    for (uint64_t i = 3; i < size; i += 4) staging[i] = 255;    /* (opaque, to see the colours) */
+    /* NVN's images are upside down (OpenGL convention): rows bottom-up */
+    if (png_write(path, staging + size - (uint64_t)h->width * 4, h->width, h->height, -(int32_t)h->width * 4) == 0)
+        fprintf(stderr, "render: wrote %s (%ux%u, format %d)\n", path, h->width, h->height, h->format);
+    vkDestroyImage(vk.device, tmp, NULL);
+    vkFreeMemory(vk.device, mem, NULL);
+}
+
+int render_tracing(void) {
+    static int on = -1;
+    static uint64_t from, frames;
+    if (on < 0) {
+        on = getenv("LAA_TRACE_PIPELINES") != NULL;
+        from = getenv("LAA_TRACE_FROM") ? strtoull(getenv("LAA_TRACE_FROM"), NULL, 0) : 0;
+        frames = getenv("LAA_TRACE_FRAMES") ? strtoull(getenv("LAA_TRACE_FRAMES"), NULL, 0) : ~0ull;
+    }
+    uint64_t f = nvn_frame_count();
+    return on && f >= from && f - from < frames;
 }
 
 /* Copy the texture's guest memory into its image (all levels and layers), through the staging
  * buffer: block-linear -> rows on the CPU (layout.c), then vkCmdCopyBufferToImage. */
 void render_upload(HostImage *h) {
     h->needs_upload = 0;
+    h->gpu_written = 0;                              /* (now the same as guest memory) */
+    h->hash_valid = 1;
     h->hash = guest_hash(h);
     h->checked = frame_no;
     TexShape s;
@@ -243,7 +319,7 @@ void render_upload(HostImage *h) {
     }
     uint8_t *blocks = h->astc_decode ? malloc(most) : NULL;
     uint64_t offset;
-    if (getenv("LAA_TRACE_PIPELINES"))
+    if (render_tracing())
         fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u: %llu bytes\n", (unsigned long long)h->address,
                 s.width, s.height, s.depth, h->desc.format, s.levels, s.layers, (unsigned long long)total);
     uint8_t *out = render_staging(total, &offset);
@@ -298,8 +374,7 @@ void render_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width,
                                .imageExtent = { width, height, 1 } };
     vkCmdCopyBufferToImage(cmd, render_staging_buffer(), h->image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
     render_barrier(cmd);
-    h->needs_upload = 0;
-    h->gpu_written = 1;                              /* newer than guest memory */
+    render_image_gpu_wrote(h);
 }
 
 /* The CPU wrote texels (nvnTextureWriteTexels) into the texture's guest memory: copy that

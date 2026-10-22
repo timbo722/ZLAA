@@ -26,6 +26,8 @@ typedef struct HostImage {
     uint64_t hash;                   /* of its guest memory when last uploaded (CPU writes, image.c) */
     uint64_t checked;                /* frame of the last hash check */
     uint64_t hot_until;              /* changed recently: check every frame until this frame */
+    uint64_t gpu_frame;              /* frame of the last GPU write */
+    int hash_valid;                  /* `hash` describes guest memory as it is now */
     struct ImageView *views;         /* views made for sampling it (image.c) */
 } HostImage;
 
@@ -35,6 +37,9 @@ HostImage *render_image(const Texture *t);       /* find or create; NULL for uns
 HostImage *render_image_find(uint64_t texture);  /* find only */
 void render_reupload_all(void);
 void render_images_new_frame(void);              /* once per presented frame */
+void render_image_gpu_wrote(HostImage *h);       /* the GPU wrote h: it is newer than guest memory */
+int render_tracing(void);                        /* LAA_TRACE_PIPELINES, within LAA_TRACE_FROM/_FRAMES */
+void render_debug_dump(HostImage *h, const char *path);   /* save a colour image as a PNG (debugging) */
 void render_upload(HostImage *h);                /* guest memory -> image, recorded in render_cmd() */
 void render_image_init_layout(VkCommandBuffer cmd, HostImage *h);
 /* the image for a texture, ready to use: uploaded if the CPU's copy is newer */
@@ -75,6 +80,7 @@ typedef struct HostShader {
     ShaderInfo info;
     uint64_t constants;              /* guest address and size of its c1 data */
     uint32_t constants_size;
+    VkPipeline compute;              /* compute shaders: their pipeline (made on first use) */
 } HostShader;
 HostShader *render_shader(uint64_t code, uint64_t control, int stage);
 
@@ -99,6 +105,9 @@ typedef struct {
 VkPipeline render_pipeline(const PipelineKey *k);
 VkPipelineLayout render_pipeline_layout(void);
 VkDescriptorSetLayout render_set_layout(void);
+VkPipelineLayout render_compute_layout(void);    /* compute: its own set (bindings from SHADER_COMPUTE * 64) */
+VkDescriptorSetLayout render_compute_set_layout(void);
+VkPipeline render_compute_pipeline(HostShader *cs);
 VkCompareOp render_compare_op(uint32_t nvn_func);
 
 /* ---- command execution (draw.c) ---- */

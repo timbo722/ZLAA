@@ -38,6 +38,7 @@ static struct {
     uint32_t stencil_ref[2], stencil_mask[2], stencil_value_mask[2];
     float line_width, polygon_offset[3];
     uint64_t copy_row_stride, copy_image_stride;     /* bytes; 0 = tightly packed */
+    uint32_t groups[3];                              /* the dispatch being set up (compute's c0) */
     uint32_t primitive_restart, restart_index;
 } st = {
     .channel_mask = 0xFFFFFFFF, .viewport = { 0, 0, 1, 1 }, .depth_range = { 0, 1 },
@@ -59,7 +60,7 @@ void render_submission_done(void) {
     if (descriptor_pool) vkResetDescriptorPool(vk.device, descriptor_pool, 0);
 }
 
-static VkDescriptorSet new_set(void) {
+static VkDescriptorSet new_set(VkDescriptorSetLayout layout) {
     if (!descriptor_pool) {
         VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 8 },
                                           { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 8 } };
@@ -67,7 +68,6 @@ static VkDescriptorSet new_set(void) {
                                           .poolSizeCount = 2, .pPoolSizes = sizes };
         VK_CHECK(vkCreateDescriptorPool(vk.device, &ci, NULL, &descriptor_pool));
     }
-    VkDescriptorSetLayout layout = render_set_layout();
     VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                                        .descriptorPool = descriptor_pool, .descriptorSetCount = 1, .pSetLayouts = &layout };
     VkDescriptorSet set;
@@ -123,7 +123,7 @@ static VkClearColorValue clear_value(const uint8_t *color) {
 static void clear_image(HostImage *h, const VkClearColorValue *color, const VkClearDepthStencilValue *ds,
                         VkImageAspectFlags aspects) {
     if (!h) return;
-    if (getenv("LAA_TRACE_PIPELINES")) fprintf(stderr, "render: clear %ux%u fmt %d aspects %#x\n", h->width, h->height, h->format, aspects);
+    if (render_tracing()) fprintf(stderr, "render: clear %ux%u fmt %d aspects %#x\n", h->width, h->height, h->format, aspects);
     render_end_rendering();
     VkCommandBuffer cmd = render_cmd();
     render_image_init_layout(cmd, h);
@@ -131,8 +131,7 @@ static void clear_image(HostImage *h, const VkClearColorValue *color, const VkCl
     if (color) vkCmdClearColorImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, color, 1, &range);
     else vkCmdClearDepthStencilImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, ds, 1, &range);
     render_barrier(cmd);
-    h->gpu_written = 1;
-    h->needs_upload = 0;
+    render_image_gpu_wrote(h);
 }
 
 /* Which level/layers of an image an ImageRef means (its view, if any) */
@@ -160,7 +159,17 @@ static void region_box(const HostImage *h, uint32_t level, const int32_t *r, VkO
 static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint32_t flags) {
     HostImage *src = render_image_ready(src_ref->texture), *dst = render_image_ready(dst_ref->texture);
     if (!src || !dst) return;
-    if (getenv("LAA_TRACE_PIPELINES"))
+    /* LAA_DUMP_COPIES_AT=frame (+ LAA_DUMP_DIR): save the source of each copy in that frame */
+    static int64_t dump_at = -2;
+    static int copy_no;
+    if (dump_at == -2) dump_at = getenv("LAA_DUMP_COPIES_AT") ? strtoll(getenv("LAA_DUMP_COPIES_AT"), NULL, 0) : -1;
+    if (dump_at >= 0 && nvn_frame_count() == (uint64_t)dump_at) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/copy%02d_fmt%d_%ux%u.png", getenv("LAA_DUMP_DIR") ? getenv("LAA_DUMP_DIR") : ".",
+                 copy_no++, src->format, src->width, src->height);
+        render_debug_dump(src, path);
+    }
+    if (render_tracing())
         fprintf(stderr, "render: copy %ux%u fmt %d -> %ux%u fmt %d, flags %#x, regions %d,%d %dx%d -> %d,%d %dx%d, views %#x %#x\n",
                 src->width, src->height, src->format, dst->width, dst->height, dst->format, flags, src_ref->region[0],
                 src_ref->region[1], src_ref->region[3], src_ref->region[4], dst_ref->region[0], dst_ref->region[1],
@@ -190,7 +199,7 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
                        (flags & 1) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     render_barrier(cmd);
-    dst->gpu_written = 1;
+    render_image_gpu_wrote(dst);
 }
 
 /* CopyBufferToTexture / CopyTextureToBuffer: between guest memory at `address` (rows
@@ -247,7 +256,7 @@ static void copy_buffer_image(uint64_t address, const ImageRef *ref, int to_buff
     if (to_buffer) vkCmdCopyImageToBuffer(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &c);
     else vkCmdCopyBufferToImage(cmd, buffer, h->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
     render_barrier(cmd);
-    if (!to_buffer) h->gpu_written = 1;
+    if (!to_buffer) render_image_gpu_wrote(h);
 }
 
 /* ---- drawing ---- */
@@ -292,6 +301,17 @@ static int begin_rendering(void) {
 }
 
 /* Bind the constant buffers and textures one shader stage uses */
+/* A table of buffers for shaders that reach them through pointers: 16 bytes each, the
+ * device address (what LDG uses) and the size */
+static void put_buffer_table(uint8_t *at, const Range *r, int n) {
+    for (int i = 0; i < n; i++) {
+        uint64_t dev = r[i].address ? render_guest_device_address(r[i].address) : 0;
+        uint32_t size32 = (uint32_t)r[i].size;
+        memcpy(at + 0x10 * i, &dev, 8);
+        memcpy(at + 8 + 0x10 * i, &size32, 4);
+    }
+}
+
 static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, uint32_t *nw,
                       VkDescriptorBufferInfo *buffers, uint32_t *nb, VkDescriptorImageInfo *images, uint32_t *ni,
                       VkDescriptorSet set) {
@@ -306,14 +326,16 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
             VkDeviceSize off;
             uint8_t *c0 = render_uniforms(0x800, &b, &off);
             memset(c0, 0, 0x800);
-            for (int s = 0; s < 2; s++)
-                for (int i = 0; i < 16; i++) {
-                    const Range *sb = &st.storage[s][i];
-                    uint64_t dev = sb->address ? render_guest_device_address(sb->address) : 0;
-                    uint32_t size32 = (uint32_t)sb->size;
-                    memcpy(c0 + 0x110 + 0x400 * s + 0x10 * i, &dev, 8);
-                    memcpy(c0 + 0x118 + 0x400 * s + 0x10 * i, &size32, 4);
-                }
+            /* graphics: stage s's storage buffers at 0x110 + 0x400 * s. Compute has its own c0:
+             * group counts at 0x200, its uniform buffers at 0x210 (it reads them with LDG: compute
+             * has few hardware constant buffers), storage buffers at 0x310. (Layout as LASRecomp found.) */
+            if (stage == SHADER_COMPUTE) {
+                memcpy(c0 + 0x200, st.groups, 12);
+                put_buffer_table(c0 + 0x210, st.uniform[SHADER_COMPUTE], 14);
+                put_buffer_table(c0 + 0x310, st.storage[SHADER_COMPUTE], 16);
+            } else {
+                for (int s = 0; s <= SHADER_FRAGMENT; s++) put_buffer_table(c0 + 0x110 + 0x400 * s, st.storage[s], 16);
+            }
             *bi = (VkDescriptorBufferInfo){ b, off, 0x800 };
         }
         if (slot == 1) { addr = sh->constants; size = sh->constants_size; }
@@ -345,17 +367,17 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
             const TexturePoolEntry *e = &((TexturePoolEntry *)st.texture_pool.entries)[tex_id];
             HostImage *h = e->texture ? render_image_ready(e->texture) : NULL;
             if (h) ii->imageView = render_image_view(h, &e->view, tx->dim, tx->array);
-            if (h && getenv("LAA_TRACE_PIPELINES"))
-                fprintf(stderr, "render:   texture %u: id %u, object %#llx storage %#llx %ux%u nvn format %#x vk %d view set %#x fmt %#x, levels %u layers %u\n", i, tex_id,
+            if (h && render_tracing())
+                fprintf(stderr, "render:   texture %u: id %u, object %#llx storage %#llx %ux%u nvn format %#x vk %d view set %#x fmt %#x, levels %u layers %u, gpu written %d\n", i, tex_id,
                         (unsigned long long)e->texture, (unsigned long long)h->address,
-                        h->width, h->height, h->desc.format, h->format, e->view.set, e->view.format, h->levels, h->layers),
+                        h->width, h->height, h->desc.format, h->format, e->view.set, e->view.format, h->levels, h->layers, h->gpu_written),
                 fprintf(stderr, "render:     swizzle %u %u %u %u / view %u %u %u %u, image %p, target %p, sampler %u\n",
                         h->desc.swizzle[0], h->desc.swizzle[1], h->desc.swizzle[2], h->desc.swizzle[3], e->view.swizzle[0],
                         e->view.swizzle[1], e->view.swizzle[2], e->view.swizzle[3], (void *)h, (void *)st.color[0], smp_id);
         }
         if (st.sampler_pool.entries && smp_id < st.sampler_pool.count)
             ii->sampler = render_sampler(&((SamplerDesc *)st.sampler_pool.entries)[smp_id]);
-        if (st.sampler_pool.entries && smp_id < st.sampler_pool.count && getenv("LAA_TRACE_PIPELINES")) {
+        if (st.sampler_pool.entries && smp_id < st.sampler_pool.count && render_tracing()) {
             const SamplerDesc *d = &((SamplerDesc *)st.sampler_pool.entries)[smp_id];
             fprintf(stderr, "render:     sampler %u: filt %u/%u wrap %u %u %u cmp %u/%u red %u lod %g..%g bias %g aniso %g\n", smp_id,
                     d->min_filter, d->mag_filter, d->wrap[0], d->wrap[1], d->wrap[2], d->compare_mode, d->compare_func,
@@ -373,12 +395,114 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
 /* DRAW_ARRAYS: a = mode, first, count, base instance, instances
  * DRAW_ELEMENTS: a = mode, index type, count, index buffer, base vertex, base instance, instances */
 /* draw statistics, printed with the frame count (render_stats) */
-static struct { uint64_t done, no_shader, failed_shader, other; } stats;
+static struct { uint64_t done, no_shader, failed_shader, other, dispatches; } stats;
+
+/* ---- buffer writes, in order with draws and dispatches ----
+ * Buffers live in the game's memory pools, which the GPU uses in place (buffer.c), so a copy
+ * is a GPU copy between two imported buffers. Memory outside the pools: finish the GPU's
+ * work so far, then do it on the CPU. */
+static int pool_range(uint64_t address, uint64_t size, VkBuffer *b, VkDeviceSize *off) {
+    uint64_t storage, pool_size;
+    return render_guest_buffer(address, b, off) == 0 && nvn_pool_find(address + size - 1, &storage, &pool_size) &&
+           address >= storage;
+}
+
+static void copy_buffer(uint64_t src, uint64_t dst, uint64_t size) {
+    VkBuffer sb, db;
+    VkDeviceSize so, dof;
+    int overlap = src < dst + size && dst < src + size;
+    if (!size) return;
+    if (overlap || !pool_range(src, size, &sb, &so) || !pool_range(dst, size, &db, &dof)) {
+        render_flush();
+        memmove(gptr(dst), gptr(src), size);
+        return;
+    }
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    VkBufferCopy c = { so, dof, size };
+    vkCmdCopyBuffer(cmd, sb, db, 1, &c);
+    render_barrier(cmd);
+}
+
+static void update_buffer(uint64_t dst, const void *data, uint64_t size) {
+    VkBuffer db;
+    VkDeviceSize dof;
+    if (!size) return;
+    if (size > 65536 || size % 4 || dst % 4 || !pool_range(dst, size, &db, &dof)) {
+        render_flush();
+        memcpy(gptr(dst), data, size);
+        return;
+    }
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    vkCmdUpdateBuffer(cmd, db, dof, size, data);
+    render_barrier(cmd);
+}
+
+static void fill_buffer(uint64_t dst, uint64_t size, uint32_t value) {
+    VkBuffer db;
+    VkDeviceSize dof;
+    size &= ~3ull;
+    if (!size) return;
+    if (dst % 4 || !pool_range(dst, size, &db, &dof)) {
+        render_flush();
+        for (uint64_t o = 0; o < size; o += 4) memcpy(gptr(dst + o), &value, 4);
+        return;
+    }
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    vkCmdFillBuffer(cmd, db, dof, size, value);
+    render_barrier(cmd);
+}
+
+/* ---- compute ---- */
+
+/* DispatchCompute (a = groups x, y, z) / DispatchComputeIndirect (a = address of the counts) */
+static void dispatch(const Cmd *r, int indirect) {
+    const Program *p = &st.program;
+    if (!(p->stages >> STAGE_COMPUTE & 1)) { warn_once("dispatch without a compute shader", p->stages); return; }
+    HostShader *cs = render_shader(p->code[STAGE_COMPUTE], p->control[STAGE_COMPUTE], SHADER_COMPUTE);
+    VkPipeline pipeline = render_compute_pipeline(cs);
+    if (!pipeline) { stats.failed_shader++; return; }
+    if (indirect) memcpy(st.groups, gptr(r->a[0]), 12);   /* (as the CPU sees them now) */
+    else for (int i = 0; i < 3; i++) st.groups[i] = (uint32_t)r->a[i];
+    VkDescriptorSet set = new_set(render_compute_set_layout());
+    VkWriteDescriptorSet writes[50];
+    VkDescriptorBufferInfo buffers[18];
+    VkDescriptorImageInfo images[SHADER_MAX_TEXTURES];
+    uint32_t nw = 0, nb = 0, ni = 0;
+    fill_stage(cs, SHADER_COMPUTE, writes, &nw, buffers, &nb, images, &ni, set);
+    vkUpdateDescriptorSets(vk.device, nw, writes, 0, NULL);
+    if (render_tracing())
+        fprintf(stderr, "render: dispatch cs %#llx %s %llu x %llu x %llu (local %u x %u x %u)\n", (unsigned long long)cs->code,
+                indirect ? "indirect" : "", (unsigned long long)r->a[0], (unsigned long long)r->a[1],
+                (unsigned long long)r->a[2], cs->info.local_size[0], cs->info.local_size[1], cs->info.local_size[2]);
+    if (render_tracing())
+        for (int i = 0; i < 16; i++)
+            if (st.storage[SHADER_COMPUTE][i].address)
+                fprintf(stderr, "render:   storage %d: %#llx + %#llx\n", i, (unsigned long long)st.storage[SHADER_COMPUTE][i].address,
+                        (unsigned long long)st.storage[SHADER_COMPUTE][i].size);
+    render_end_rendering();                          /* (no dispatches while rendering) */
+    VkCommandBuffer cmd = render_cmd();
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_compute_layout(), 0, 1, &set, 0, NULL);
+    if (indirect) {
+        VkBuffer b;
+        VkDeviceSize off;
+        if (render_guest_buffer(r->a[0], &b, &off) != 0) { warn_once("indirect dispatch outside a pool", r->a[0]); return; }
+        vkCmdDispatchIndirect(cmd, b, off);
+    } else {
+        vkCmdDispatch(cmd, (uint32_t)r->a[0], (uint32_t)r->a[1], (uint32_t)r->a[2]);
+    }
+    render_barrier(cmd);                             /* its writes, before whatever comes next */
+    stats.dispatches++;
+}
 
 void render_stats(void) {
     fprintf(stderr, "render: draws %llu done, skipped: %llu without shaders, %llu untranslated shaders, %llu other\n",
             (unsigned long long)stats.done, (unsigned long long)stats.no_shader,
             (unsigned long long)stats.failed_shader, (unsigned long long)stats.other);
+    if (stats.dispatches) fprintf(stderr, "render: %llu compute dispatches\n", (unsigned long long)stats.dispatches);
     memset(&stats, 0, sizeof stats);
 }
 
@@ -395,8 +519,28 @@ static void draw(const Cmd *r, int indexed) {
     stats.other++;                                   /* (until it is done, below) */
     if (r->a[0] == 7 || r->a[0] == 8 || r->a[0] == 9 || r->a[0] == 2) { warn_once("quads/polygons/line loops", r->a[0]); return; }
 
+    if (render_tracing()) {                          /* one line per draw: shaders, targets, storage buffers */
+        fprintf(stderr, "render: draw vs %#llx fs %#llx ->", (unsigned long long)vs->code, (unsigned long long)fs->code);
+        for (uint32_t i = 0; i < st.rt.count; i++)
+            if (st.color[i]) fprintf(stderr, " rt%u %ux%u fmt %d", i, st.color[i]->width, st.color[i]->height, st.color[i]->format);
+        if (st.depth) fprintf(stderr, " depth %ux%u", st.depth->width, st.depth->height);
+        for (int s = 0; s < 6; s++)
+            for (int i = 0; i < 16; i++)
+                if (st.storage[s][i].address)
+                    fprintf(stderr, " sb%d.%d %#llx+%#llx", s, i, (unsigned long long)st.storage[s][i].address,
+                            (unsigned long long)st.storage[s][i].size);
+        for (int i = 0; i < 14; i++)                 /* fragment uniform buffers: address, first word */
+            if (st.uniform[SHADER_FRAGMENT][i].address) {
+                uint32_t v = g_ld32(st.uniform[SHADER_FRAGMENT][i].address);
+                float f;
+                memcpy(&f, &v, 4);
+                fprintf(stderr, " ub%d %#llx=%g", i, (unsigned long long)st.uniform[SHADER_FRAGMENT][i].address, f);
+            }
+        fprintf(stderr, "\n");
+    }
+
     /* resources first: making a descriptor set may have to submit work (which ends rendering) */
-    VkDescriptorSet set = new_set();
+    VkDescriptorSet set = new_set(render_set_layout());
     VkWriteDescriptorSet writes[2 * 50];
     VkDescriptorBufferInfo buffers[2 * 18];
     VkDescriptorImageInfo images[2 * SHADER_MAX_TEXTURES];
@@ -488,8 +632,8 @@ static void draw(const Cmd *r, int indexed) {
     }
     stats.other--;
     stats.done++;
-    for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) st.color[i]->gpu_written = 1, st.color[i]->needs_upload = 0;
-    if (st.depth) st.depth->gpu_written = 1, st.depth->needs_upload = 0;
+    for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) render_image_gpu_wrote(st.color[i]);
+    if (st.depth) render_image_gpu_wrote(st.depth);
     static int each = -1;                            /* LAA_FLUSH_EACH_DRAW: find which draw breaks the GPU */
     if (each < 0) each = getenv("LAA_FLUSH_EACH_DRAW") != NULL;
     if (each) { render_flush(); fprintf(stderr, "render: draw done\n"); }
@@ -556,6 +700,11 @@ void render_command(const Cmd *r) {
     case CMD_SET_DEPTH_RANGES: if (r->a[0] == 0 && r->a[1] >= 1) memcpy(st.depth_range, r->extra, 8); break;
     case CMD_SET_VALUE: set_value(r); break;
     case CMD_DRAW_ARRAYS: draw(r, 0); break;
+    case CMD_DISPATCH: dispatch(r, 0); break;
+    case CMD_COPY_BUFFER_TO_BUFFER: copy_buffer(r->a[0], r->a[1], r->a[2]); break;   /* a = src, dst, size */
+    case CMD_UPDATE_UNIFORM_BUFFER: update_buffer(r->a[0] + r->a[2], r->extra, r->a[3]); break;
+    case CMD_CLEAR_BUFFER: fill_buffer(r->a[0], r->a[1], (uint32_t)r->a[2]); break;
+    case CMD_DISPATCH_INDIRECT: dispatch(r, 1); break;
     case CMD_DRAW_ELEMENTS: draw(r, 1); break;
     case CMD_SET_RENDER_TARGETS:
         set_render_targets((const RenderTargets *)r->extra);

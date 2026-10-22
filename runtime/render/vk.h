@@ -44,7 +44,8 @@
     X(vkCmdCopyImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) \
     X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkGetMemoryHostPointerPropertiesEXT) \
     X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) \
-    X(vkCreateGraphicsPipelines) X(vkDestroyPipeline) X(vkCreateDescriptorSetLayout) \
+    X(vkCreateGraphicsPipelines) X(vkCreateComputePipelines) X(vkCmdDispatch) X(vkCmdDispatchIndirect) \
+    X(vkDestroyPipeline) X(vkCreateDescriptorSetLayout) \
     X(vkCreateDescriptorPool) X(vkResetDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
     X(vkCreateSampler) X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdSetViewport) X(vkCmdSetScissor) \

@@ -36,7 +36,8 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage) {
         if (control) shader_constants(gptr(control), &c_off, &c_size);
         if (c_off > avail || c_size > avail - c_off) c_off = c_size = 0;
         const uint8_t *p = gptr(code);
-        if (shader_translate(p, avail, stage, p + c_off, c_size, SHADER_GL_DEPTH, &s->info) == 0) {
+        if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, SHADER_GL_DEPTH,
+                             &s->info) == 0) {
             VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                             .codeSize = s->info.words * 4, .pCode = s->info.spirv };
             VK_CHECK(vkCreateShaderModule(vk.device, &ci, NULL, &s->module));
@@ -54,13 +55,16 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage) {
 static VkDescriptorSetLayout set_layout;
 static VkPipelineLayout pipeline_layout;
 
-/* One layout for everything: per stage (vertex, fragment), 18 uniform buffers and 32 textures */
-static void make_layouts(void) {
+static VkDescriptorSetLayout compute_set_layout;
+static VkPipelineLayout compute_layout;
+
+/* A set layout for some stages: per stage, 18 uniform buffers and 32 textures */
+static void make_layout(const int *stages, int nstages, VkDescriptorSetLayout *set, VkPipelineLayout *layout) {
     VkDescriptorSetLayoutBinding b[2 * (18 + SHADER_MAX_TEXTURES)];
     uint32_t n = 0;
-    const int stages[2] = { SHADER_VERTEX, SHADER_FRAGMENT };
-    for (int s = 0; s < 2; s++) {
-        VkShaderStageFlags flag = stages[s] == SHADER_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+    for (int s = 0; s < nstages; s++) {
+        VkShaderStageFlags flag = stages[s] == SHADER_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT
+                                : stages[s] == SHADER_COMPUTE ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
         uint32_t base = (uint32_t)stages[s] * SHADER_STAGE_BINDINGS;
         for (uint32_t i = 0; i < 18; i++)
             b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_CBUF_BINDING + i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flag, NULL };
@@ -69,14 +73,34 @@ static void make_layouts(void) {
     }
     VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .bindingCount = n, .pBindings = b };
-    VK_CHECK(vkCreateDescriptorSetLayout(vk.device, &li, NULL, &set_layout));
+    VK_CHECK(vkCreateDescriptorSetLayout(vk.device, &li, NULL, set));
     VkPipelineLayoutCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                      .setLayoutCount = 1, .pSetLayouts = &set_layout };
-    VK_CHECK(vkCreatePipelineLayout(vk.device, &pi, NULL, &pipeline_layout));
+                                      .setLayoutCount = 1, .pSetLayouts = set };
+    VK_CHECK(vkCreatePipelineLayout(vk.device, &pi, NULL, layout));
+}
+
+/* graphics: one layout for everything (vertex and fragment) */
+static void make_layouts(void) {
+    static const int graphics[2] = { SHADER_VERTEX, SHADER_FRAGMENT }, compute[1] = { SHADER_COMPUTE };
+    make_layout(graphics, 2, &set_layout, &pipeline_layout);
+    make_layout(compute, 1, &compute_set_layout, &compute_layout);
 }
 
 VkDescriptorSetLayout render_set_layout(void) { if (!set_layout) make_layouts(); return set_layout; }
 VkPipelineLayout render_pipeline_layout(void) { if (!set_layout) make_layouts(); return pipeline_layout; }
+VkDescriptorSetLayout render_compute_set_layout(void) { if (!set_layout) make_layouts(); return compute_set_layout; }
+VkPipelineLayout render_compute_layout(void) { if (!set_layout) make_layouts(); return compute_layout; }
+
+/* A compute shader's pipeline: depends on nothing but the shader */
+VkPipeline render_compute_pipeline(HostShader *cs) {
+    if (cs->compute || !cs->module) return cs->compute;
+    VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                   .module = cs->module, .pName = "main" },
+        .layout = render_compute_layout() };
+    VK_CHECK(vkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &cs->compute));
+    return cs->compute;
+}
 
 /* ================================================================ NVN enums -> Vulkan */
 
@@ -259,15 +283,15 @@ static VkPipeline create(const PipelineKey *k) {
         .stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
         .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
         .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = render_pipeline_layout() };
-    if (getenv("LAA_TRACE_PIPELINES"))
+    if (render_tracing())
         fprintf(stderr, "render: pipeline vs %#llx fs %#llx, %u attributes, %u targets\n",
                 (unsigned long long)k->vs_code, (unsigned long long)k->fs_code, nattrs, k->ncolor);
-    if (getenv("LAA_TRACE_PIPELINES"))
+    if (render_tracing())
         fprintf(stderr, "render:   topo %u blend %#x logic %u mask %#x depth %u/%u/%u stencil %u cull %u ccw %u fmt %d/%d bl %u,%u,%u,%u,%u,%u\n",
                 k->topology, k->blend_enable, k->logic_op, k->channel_mask, k->depth_test, k->depth_write, k->depth_func,
                 k->stencil_test, k->cull, k->front_ccw, k->color_format[0], k->depth_format, k->blend[0].src_color,
                 k->blend[0].dst_color, k->blend[0].src_alpha, k->blend[0].dst_alpha, k->blend[0].eq_color, k->blend[0].eq_alpha);
-    if (getenv("LAA_TRACE_PIPELINES"))
+    if (render_tracing())
         for (uint32_t i = 0; i < nattrs; i++)
             fprintf(stderr, "render:   attribute %u: format %d (nvn %#x) stream %u offset %u, stride %u; color format %d\n",
                     attrs[i].location, attrs[i].format, k->attr[attrs[i].location].format, attrs[i].binding,

@@ -33,14 +33,15 @@ int main(int argc, char **argv) {
     char ctrl_path[4096];
     snprintf(ctrl_path, sizeof ctrl_path, "%.*s.ctrl", (int)(strlen(argv[1]) - 5), argv[1]);
     FILE *cf = fopen(ctrl_path, "rb");
+    static uint8_t control[0x1000];
+    int have_control = 0;
     if (cf) {
-        static uint8_t control[0x1000];
-        if (fread(control, 1, sizeof control, cf) == sizeof control) shader_constants(control, &c_off, &c_size);
+        if (fread(control, 1, sizeof control, cf) == sizeof control) { shader_constants(control, &c_off, &c_size); have_control = 1; }
         fclose(cf);
     }
     if (c_off > size || c_size > size - c_off) c_off = c_size = 0;
     ShaderInfo info;
-    if (shader_translate(code, size, stage, code + c_off, c_size, SHADER_GL_DEPTH, &info) != 0) {
+    if (shader_translate(code, size, stage, code + c_off, c_size, have_control ? control : NULL, SHADER_GL_DEPTH, &info) != 0) {
         printf("%s: FAIL (%s)\n", argv[1], info.error);
         return 1;
     }

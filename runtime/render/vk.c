@@ -157,9 +157,18 @@ static int create_device(void) {
     vkGetDeviceQueue(vk.device, vk.queue_family, 0, &vk.queue);
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT host = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
-    VkPhysicalDeviceProperties2 props = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-                                          .pNext = vk.host_import ? &host : NULL };
+    VkPhysicalDeviceSubgroupProperties subgroup = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+                                                    .pNext = vk.host_import ? &host : NULL };
+    VkPhysicalDeviceProperties2 props = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroup };
     vkGetPhysicalDeviceProperties2(vk.gpu, &props);
+    /* Maxwell shaders' SHFL becomes subgroup shuffle / quad operations, mostly in fragment shaders */
+    VkSubgroupFeatureFlags need = VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT;
+    if ((subgroup.supportedOperations & need) != need || !(subgroup.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT))
+        fprintf(stderr, "vulkan: subgroup shuffle/quad operations in fragment shaders aren't supported (ops %#x, stages %#x)\n",
+                subgroup.supportedOperations, subgroup.supportedStages);
+    if (getenv("LAA_VK_INFO"))
+        fprintf(stderr, "vulkan: subgroup size %u, operations %#x, stages %#x, quad in all stages %u\n", subgroup.subgroupSize,
+                subgroup.supportedOperations, subgroup.supportedStages, subgroup.quadOperationsInAllStages);
     vk.limits = props.properties.limits;
     vk.import_alignment = vk.host_import ? host.minImportedHostPointerAlignment : 0;
     if (!vk.host_import) fprintf(stderr, "vulkan: no VK_EXT_external_memory_host; drawing needs it for now\n");

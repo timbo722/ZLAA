@@ -38,6 +38,7 @@ typedef struct {
     uint32_t inputs, outputs;        /* generic attribute / varying locations used (bit i) */
     uint32_t color_outputs;          /* fragment: render targets written (bit i) */
     int writes_depth, discards;
+    uint32_t local_size[3];          /* compute: threads per workgroup */
     ShaderTexture textures[SHADER_MAX_TEXTURES];
     uint32_t ntextures;              /* binding = base + SHADER_TEXTURE_BINDING + index */
     char error[256];                 /* why translation failed */
@@ -46,11 +47,12 @@ typedef struct {
 /* Translate one shader. code: the compiled shader as NVN stores it (graphics stages start
  * with a 0x80-byte header; compute code starts at once), `size` bytes are readable.
  * constants: the shader's own constant data (what the driver binds as c1; its offset and size
- * are in the control section, see shader_constants()). Returns 0 on success; on failure
+ * are in the control section, see shader_constants()). control: the NVN control section
+ * (compute: the workgroup size is there), or NULL. Returns 0 on success; on failure
  * info->error says why. */
 enum { SHADER_GL_DEPTH = 1 };        /* vertex: clip-space z is -w..w (OpenGL/NVN default) -> 0..w */
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
-                     uint32_t constants_size, int options, ShaderInfo *info);
+                     uint32_t constants_size, const uint8_t *control, int options, ShaderInfo *info);
 /* Where a shader's constants are, from its NVN control section: offset from the start of the
  * code and size in bytes. */
 void shader_constants(const uint8_t *control, uint32_t *offset, uint32_t *size);

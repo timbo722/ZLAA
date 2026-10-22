@@ -57,13 +57,23 @@ static void run_list(uint64_t at, int depth) {
         case CMD_REPORT_VALUE:                           /* a = value, address */
             if (r->a[1]) g_st32(r->a[1], (uint32_t)r->a[0]);
             break;
+        /* buffer writes: in order with the GPU's other work, so through the renderer when there is one */
         case CMD_CLEAR_BUFFER:                           /* a = address, size, u32 value */
+#ifdef LAA_HAVE_SDL
+            if (render_active()) { render_command(r); break; }
+#endif
             for (uint64_t o = 0; o + 4 <= r->a[1]; o += 4) g_st32(r->a[0] + o, (uint32_t)r->a[2]);
             break;
         case CMD_COPY_BUFFER_TO_BUFFER:                  /* a = src, dst, size, flags */
+#ifdef LAA_HAVE_SDL
+            if (render_active()) { render_command(r); break; }
+#endif
             memmove(gptr(r->a[1]), gptr(r->a[0]), r->a[2]);
             break;
         case CMD_UPDATE_UNIFORM_BUFFER:                  /* a = buffer, buffer size, offset, size; extra = data */
+#ifdef LAA_HAVE_SDL
+            if (render_active()) { render_command(r); break; }
+#endif
             memcpy(gptr(r->a[0] + r->a[2]), r->extra, r->a[3]);
             break;
         default:
@@ -183,6 +193,21 @@ void nvn_present(const Window *w, uint64_t texture) {
     int32_t rect[4];
     display_rect(w, rect);
     frames++;
+    /* LAA_PEEK=address,words,frame: print guest memory as floats (and hex) at that frame (debugging) */
+    static uint64_t peek_addr, peek_words, peek_frame;
+    static int peek_init;
+    if (!peek_init) {
+        peek_init = 1;
+        if (getenv("LAA_PEEK")) sscanf(getenv("LAA_PEEK"), "%" SCNi64 ",%" SCNi64 ",%" SCNi64, &peek_addr, &peek_words, &peek_frame);
+    }
+    if (peek_addr && frames == peek_frame) {
+        for (uint64_t i = 0; i < peek_words; i++) {
+            uint32_t v = g_ld32(peek_addr + 4 * i);
+            float f;
+            memcpy(&f, &v, 4);
+            fprintf(stderr, "peek %#" PRIx64 ": %08x %g\n", peek_addr + 4 * i, v, f);
+        }
+    }
     if (frames == 1 || frames % 300 == 0) {
         fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
 #ifdef LAA_HAVE_SDL

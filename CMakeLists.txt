@@ -58,7 +58,7 @@ target_include_directories(recomp_runtime PUBLIC runtime)
 
 # The shader translator (Maxwell -> SPIR-V), also built into a test tool
 add_library(laa_shader STATIC runtime/render/shader/translate.c runtime/render/shader/alu.c
-            runtime/render/shader/texture.c runtime/render/shader/spirv_builder.c)
+            runtime/render/shader/texture.c runtime/render/shader/spirv_builder.c runtime/render/shader/half.c)
 target_include_directories(laa_shader PUBLIC runtime)
 target_compile_options(laa_shader PRIVATE -Wall -Wextra)
 add_executable(shader_tool tools/shader_tool.c)

@@ -52,8 +52,10 @@ typedef struct {
     uint32_t cbuf[18];               /* uniform buffer variables */
     int cbuf_decorated;              /* their types got their decorations */
     int uses_pointers;               /* global memory (LDG/STG): 64-bit physical pointers */
+    int uses_quad, uses_shuffle;     /* SHFL: subgroup quad / shuffle operations */
     uint32_t in_attr[32], out_attr[32];
-    uint32_t in_position, in_front_facing, in_vertex_index, in_instance_index, frag_coord;
+    uint32_t in_position, in_front_facing, in_vertex_index, in_instance_index, frag_coord, in_lane;
+    uint32_t in_local_id, in_workgroup_id, t_v3u;
     uint32_t out_position, out_point_size, out_layer, out_viewport, out_clip[8], out_color[8], out_depth;
     uint32_t tex_var[SHADER_MAX_TEXTURES];
     uint32_t interface[64], ninterface;   /* entry point's Input/Output variables */
@@ -91,6 +93,8 @@ void set_u(T *t, int r, uint32_t v);
 void set_known(T *t, int r, uint32_t value);           /* r now holds this constant */
 void set_f(T *t, int r, uint32_t v);
 uint32_t get_p(T *t, int p);
+uint32_t subgroup_lane(T *t);                        /* this invocation's lane (SR_LANEID) */
+uint32_t compute_id(T *t, int workgroup, int component);   /* compute: thread (0) / workgroup (1) id x, y, z */
 void set_p(T *t, int p, uint32_t v);
 uint32_t get_pred_operand(T *t, int p, int inv);     /* predicate, maybe inverted */
 uint32_t cbuf_u(T *t, int slot, uint32_t byte_offset);
@@ -111,6 +115,10 @@ uint32_t operand_c(T *t, const Inst *in);
 
 /* ---- per-instruction emitters ---- */
 int emit_alu(T *t, const Inst *in);              /* alu.c: 1 if handled */
+int emit_half(T *t, const Inst *in);             /* half.c: HADD2, HMUL2, HFMA2, HSETP2, HSET2 */
+uint32_t sat(T *t, uint32_t v, int on);          /* (alu.c) clamp to 0..1 if on */
+uint32_t bool_op(T *t, int op, uint32_t a, uint32_t b);         /* AND, OR, XOR */
+uint32_t fcompare(T *t, int cmp, uint32_t a, uint32_t b);       /* FComp: F LT EQ LE GT NE GE NUM NAN LTU ... T */
 int emit_texture(T *t, const Inst *in);          /* texture.c: 1 if handled */
 int emit_io(T *t, const Inst *in);               /* translate.c: attributes, IPA */
 int emit_memory(T *t, const Inst *in);           /* translate.c: LDG / STG (global memory) */

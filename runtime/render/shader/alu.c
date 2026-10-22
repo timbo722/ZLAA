@@ -16,7 +16,7 @@ static uint32_t fmod_(T *t, uint32_t v, int abs, int neg) {
     if (neg) v = fneg(t, v);
     return v;
 }
-static uint32_t sat(T *t, uint32_t v, int on) {
+uint32_t sat(T *t, uint32_t v, int on) {
     return on ? ext3(t, t->t_f32, GLSLstd450FClamp, v, cf(t, 0.0f), cf(t, 1.0f)) : v;
 }
 static uint32_t as_f(T *t, uint32_t u) { return bitcast(t, t->t_f32, u); }
@@ -26,7 +26,7 @@ static uint32_t inot(T *t, uint32_t v) { return op1(t, SpvOpNot, t->t_u32, v); }
 static uint32_t ineg(T *t, uint32_t v) { return op1(t, SpvOpSNegate, t->t_u32, v); }
 static uint32_t iadd(T *t, uint32_t a, uint32_t b) { return op2(t, SpvOpIAdd, t->t_u32, a, b); }
 
-static uint32_t bool_op(T *t, int op, uint32_t a, uint32_t b) {
+uint32_t bool_op(T *t, int op, uint32_t a, uint32_t b) {
     switch (op) {
     case 0: return op2(t, SpvOpLogicalAnd, t->t_bool, a, b);
     case 1: return op2(t, SpvOpLogicalOr, t->t_bool, a, b);
@@ -40,7 +40,7 @@ static uint32_t isnan_(T *t, uint32_t v) { return op1(t, SpvOpIsNan, t->t_bool, 
 
 /* FComp: F, LT, EQ, LE, GT, NE, GE, NUM, NAN, LTU, EQU, LEU, GTU, NEU, GEU, T
  * (ordered comparisons are false if either side is NaN; the U ones are true) */
-static uint32_t fcompare(T *t, int cmp, uint32_t a, uint32_t b) {
+uint32_t fcompare(T *t, int cmp, uint32_t a, uint32_t b) {
     static const SpvOp ops[16] = {
         0, SpvOpFOrdLessThan, SpvOpFOrdEqual, SpvOpFOrdLessThanEqual, SpvOpFOrdGreaterThan, SpvOpFOrdNotEqual,
         SpvOpFOrdGreaterThanEqual, 0, 0, SpvOpFUnordLessThan, SpvOpFUnordEqual, SpvOpFUnordLessThanEqual,
@@ -305,6 +305,7 @@ int emit_alu(T *t, const Inst *in) {
         }
         if (dsize < 2) v = op3(t, dsigned ? SpvOpBitFieldSExtract : SpvOpBitFieldUExtract, t->t_u32, v, cu(t, 0), cu(t, dsize == 0 ? 8 : 16));
         set_u(t, rd, v);
+        if (bit(w, 47)) set_zn(t, v);                    /* .CC: zero and sign flags (e.g. I2I.CC RZ, R: "R != 0?") */
         return 1;
     }
 
@@ -320,10 +321,154 @@ int emit_alu(T *t, const Inst *in) {
     case OP_S2R: {
         uint32_t sr = bits(w, 20, 8);
         switch (sr) {
-        case 0x00: case 0x11: set_u(t, rd, cu(t, 0)); return 1;     /* lane id, invocation id */
+        case 0x00: set_u(t, rd, op2(t, SpvOpBitwiseAnd, t->t_u32, subgroup_lane(t), cu(t, 31))); return 1;  /* lane id */
+        case 0x11: set_u(t, rd, cu(t, 0)); return 1;                 /* invocation id */
+        case 0x20:                                                   /* SR_TID: x | y << 16 | z << 26 */
+            set_u(t, rd, op2(t, SpvOpBitwiseOr, t->t_u32, compute_id(t, 0, 0),
+                             op2(t, SpvOpBitwiseOr, t->t_u32, op2(t, SpvOpShiftLeftLogical, t->t_u32, compute_id(t, 0, 1), cu(t, 16)),
+                                 op2(t, SpvOpShiftLeftLogical, t->t_u32, compute_id(t, 0, 2), cu(t, 26)))));
+            return 1;
+        case 0x21: case 0x22: case 0x23: set_u(t, rd, compute_id(t, 0, (int)sr - 0x21)); return 1;   /* SR_TID.X/Y/Z */
+        case 0x25: case 0x26: case 0x27: set_u(t, rd, compute_id(t, 1, (int)sr - 0x25)); return 1;   /* SR_CTAID.X/Y/Z */
         case 0x12: set_u(t, rd, cu(t, 0x3F800000)); return 1;       /* Y direction: +1.0 */
         }
         fail(t, "S2R special register %#x", sr);
+        return 1;
+    }
+    case OP_SHFL: {
+        /* Rd = Ra of another lane of the warp (PTX "shfl"). B: lane or lane offset; C: clamp
+         * (bits 0-4) and segment mask (bits 8-12); modes IDX, UP, DOWN, BFLY (xor). Pd: whether
+         * the source lane was in range. */
+        int mode = (int)bits(w, 30, 2), pd = (int)bits(w, 48, 3);
+        int b_imm = bit(w, 28), c_imm = bit(w, 29);
+        uint32_t b = bits(w, 20, 5), c = bits(w, 34, 13), value = get_u(t, ra);
+        uint32_t scope = cu(t, SpvScopeSubgroup);
+        if (b_imm && c_imm && c == 0x1C03 && ((mode == 3 && b >= 1 && b <= 3) || mode == 0)) {
+            /* within the 2x2 quad of pixels (lanes 0 1 / 2 3, also Vulkan's order): xor 1, 2, 3 =
+             * swap horizontally, vertically, diagonally; IDX = read lane b of the quad */
+            t->uses_quad = 1;
+            uint32_t r = mode == 3 ? op3(t, SpvOpGroupNonUniformQuadSwap, t->t_u32, scope, value, cu(t, b - 1))
+                                   : op3(t, SpvOpGroupNonUniformQuadBroadcast, t->t_u32, scope, value, cu(t, b & 3));
+            set_u(t, rd, r);
+            if (pd != 7) set_p(t, pd, spv_bool_constant(&t->s, t->t_bool, 1));
+            return 1;
+        }
+        /* general: compute the lane as PTX does (exact only with 32-wide subgroups) */
+        t->uses_shuffle = 1;
+        uint32_t lane = op2(t, SpvOpBitwiseAnd, t->t_u32, subgroup_lane(t), cu(t, 31));
+        uint32_t bv = b_imm ? cu(t, b) : op2(t, SpvOpBitwiseAnd, t->t_u32, get_u(t, (int)bits(w, 20, 8)), cu(t, 31));
+        uint32_t cv = c_imm ? cu(t, c) : get_u(t, (int)bits(w, 39, 8));
+        uint32_t seg = op2(t, SpvOpBitwiseAnd, t->t_u32, op2(t, SpvOpShiftRightLogical, t->t_u32, cv, cu(t, 8)), cu(t, 31));
+        uint32_t not_seg = op1(t, SpvOpNot, t->t_u32, seg);
+        uint32_t min_lane = op2(t, SpvOpBitwiseAnd, t->t_u32, lane, seg);
+        uint32_t max_lane = op2(t, SpvOpBitwiseOr, t->t_u32, min_lane,
+                                op2(t, SpvOpBitwiseAnd, t->t_u32, op2(t, SpvOpBitwiseAnd, t->t_u32, cv, cu(t, 31)), not_seg));
+        uint32_t j, ok;
+        switch (mode) {
+        case 0:  j = op2(t, SpvOpBitwiseOr, t->t_u32, min_lane, op2(t, SpvOpBitwiseAnd, t->t_u32, bv, not_seg)); break;
+        case 1:  j = op2(t, SpvOpISub, t->t_u32, lane, bv); break;
+        case 2:  j = op2(t, SpvOpIAdd, t->t_u32, lane, bv); break;
+        default: j = op2(t, SpvOpBitwiseXor, t->t_u32, lane, bv); break;
+        }
+        if (mode == 1) ok = op2(t, SpvOpSGreaterThanEqual, t->t_bool, bitcast(t, t->t_i32, j), bitcast(t, t->t_i32, max_lane));
+        else ok = op2(t, SpvOpULessThanEqual, t->t_bool, j, max_lane);
+        j = select_(t, t->t_u32, ok, j, lane);
+        set_u(t, rd, op3(t, SpvOpGroupNonUniformShuffle, t->t_u32, scope, value, j));
+        if (pd != 7) set_p(t, pd, ok);
+        return 1;
+    }
+    case OP_FSWZADD: {
+        /* "swizzled add", for derivatives: each lane of the 2x2 pixel quad does its own operation,
+         * 2 bits each from an 8-bit table: 0 a + b, 1 b - a, 2 a - b, 3 b */
+        uint32_t lut = bits(w, 28, 8), a = get_f(t, ra), b = get_f(t, (int)bits(w, 20, 8));
+        uint32_t q = op2(t, SpvOpBitwiseAnd, t->t_u32, subgroup_lane(t), cu(t, 3));
+        uint32_t idx = op2(t, SpvOpBitwiseAnd, t->t_u32,
+                           op2(t, SpvOpShiftRightLogical, t->t_u32, cu(t, lut), op2(t, SpvOpShiftLeftLogical, t->t_u32, q, cu(t, 1))),
+                           cu(t, 3));
+        uint32_t one = cf(t, 1.0f), minus_one = cf(t, -1.0f);
+        uint32_t ka = select_(t, t->t_f32, op2(t, SpvOpIEqual, t->t_bool, idx, cu(t, 1)), minus_one,
+                              select_(t, t->t_f32, op2(t, SpvOpIEqual, t->t_bool, idx, cu(t, 3)), cf(t, 0.0f), one));
+        uint32_t kb = select_(t, t->t_f32, op2(t, SpvOpIEqual, t->t_bool, idx, cu(t, 2)), minus_one, one);
+        set_f(t, rd, op2(t, SpvOpFAdd, t->t_f32, op2(t, SpvOpFMul, t->t_f32, a, ka), op2(t, SpvOpFMul, t->t_f32, b, kb)));
+        return 1;
+    }
+    case OP_R2PI: case OP_R2PR: case OP_R2PC: {
+        /* predicates P0-P6 from bits of a byte of Ra, where the mask (immediate, Rb or c[]) has a 1 */
+        if (bit(w, 40)) { fail(t, "R2P to condition codes"); return 1; }
+        uint32_t shift = bits(w, 41, 2) * 8, value = get_u(t, ra);
+        uint32_t mask_id = operand_b(t, in, 0);
+        for (int i = 0; i < 7; i++) {
+            if (in->op == OP_R2PI && !(bits(w, 20, 8) >> i & 1)) continue;
+            uint32_t v = op2(t, SpvOpINotEqual, t->t_bool,
+                             op2(t, SpvOpBitwiseAnd, t->t_u32, value, cu(t, 1u << (shift + i))), cu(t, 0));
+            if (in->op != OP_R2PI) {                  /* (mask only known at run time) */
+                uint32_t m = op2(t, SpvOpINotEqual, t->t_bool, op2(t, SpvOpBitwiseAnd, t->t_u32, mask_id, cu(t, 1u << i)), cu(t, 0));
+                v = select_(t, t->t_bool, m, v, get_p(t, i));
+            }
+            set_p(t, i, v);
+        }
+        return 1;
+    }
+    case OP_IADD3R: case OP_IADD3I: case OP_IADD3C: {
+        /* Rd = A + B (R form: then << 16 or >> 16) + C; each may be negated (bits 51, 50, 49);
+         * in the R form each may be its low or high 16 bits only. X adds the carry flag. */
+        uint32_t v[3] = { get_u(t, ra), operand_b(t, in, 0), get_u(t, (int)bits(w, 39, 8)) };
+        for (int i = 0; i < 3; i++) {
+            int part = in->op == OP_IADD3R ? (int)bits(w, 35 - 2 * i, 2) : 0;   /* 0 all, 1 low half, 2 high half */
+            if (part == 1) v[i] = op2(t, SpvOpBitwiseAnd, t->t_u32, v[i], cu(t, 0xFFFF));
+            else if (part == 2) v[i] = op2(t, SpvOpShiftRightLogical, t->t_u32, v[i], cu(t, 16));
+            if (bit(w, 51 - i)) v[i] = ineg(t, v[i]);
+        }
+        uint32_t r = iadd(t, v[0], v[1]);
+        if (in->op == OP_IADD3R && bits(w, 37, 2) == 1) r = op2(t, SpvOpShiftRightLogical, t->t_u32, r, cu(t, 16));
+        if (in->op == OP_IADD3R && bits(w, 37, 2) == 2) r = op2(t, SpvOpShiftLeftLogical, t->t_u32, r, cu(t, 16));
+        r = iadd(t, r, v[2]);
+        if (bit(w, 48)) r = iadd(t, r, carry_u(t));
+        set_u(t, rd, r);
+        if (bit(w, 47)) set_zn(t, r);                   /* (.CC: carry and overflow not modelled) */
+        return 1;
+    }
+    case OP_ICMPR: case OP_ICMPI: case OP_ICMPC: case OP_ICMPRC: {
+        /* Rd = (C compared with 0) ? A : B. RC: B is the register at bits 39-46, C the constant. */
+        uint32_t b, c;
+        if (in->op == OP_ICMPRC) {
+            b = get_u(t, (int)bits(w, 39, 8));
+            c = cbuf_u(t, (int)bits(w, 34, 5), bits(w, 20, 14) * 4);
+        } else {
+            b = operand_b(t, in, 0);
+            c = get_u(t, (int)bits(w, 39, 8));
+        }
+        uint32_t take_a = icompare(t, (int)bits(w, 49, 3), bit(w, 48), c, cu(t, 0));
+        set_u(t, rd, select_(t, t->t_u32, take_a, get_u(t, ra), b));
+        return 1;
+    }
+    case OP_CSETP: {
+        /* test the condition codes (set by an earlier .CC instruction), combine with a predicate.
+         * The conditions in terms of N(egative) Z(ero) V (overflow) flags, as Ryujinx has them. */
+        uint32_t n = op1(t, SpvOpLoad, t->t_bool, cc_var(t, &t->cc_sign)), z = op1(t, SpvOpLoad, t->t_bool, cc_var(t, &t->cc_zero));
+        uint32_t v = op1(t, SpvOpLoad, t->t_bool, cc_var(t, &t->cc_overflow));
+        uint32_t nz = op1(t, SpvOpLogicalNot, t->t_bool, z), nn = op1(t, SpvOpLogicalNot, t->t_bool, n);
+        uint32_t n_ne_v = op2(t, SpvOpLogicalNotEqual, t->t_bool, n, v), r;
+        switch (bits(w, 8, 5)) {
+        case 0:  r = cb(t, 0); break;                                                   /* F */
+        case 1:  r = op2(t, SpvOpLogicalNotEqual, t->t_bool, op2(t, SpvOpLogicalAnd, t->t_bool, n, nz), v); break;  /* LT */
+        case 2:  r = op2(t, SpvOpLogicalAnd, t->t_bool, nn, z); break;                  /* EQ */
+        case 3:  r = op2(t, SpvOpLogicalNotEqual, t->t_bool, n, op2(t, SpvOpLogicalOr, t->t_bool, z, v)); break;  /* LE */
+        case 4:  r = op1(t, SpvOpLogicalNot, t->t_bool, op2(t, SpvOpLogicalOr, t->t_bool, n_ne_v, z)); break;     /* GT */
+        case 5:  r = nz; break;                                                         /* NE */
+        case 6:  r = op1(t, SpvOpLogicalNot, t->t_bool, n_ne_v); break;                 /* GE */
+        case 7:  r = op1(t, SpvOpLogicalNot, t->t_bool, op2(t, SpvOpLogicalAnd, t->t_bool, n, z)); break;  /* NUM */
+        case 8:  r = op2(t, SpvOpLogicalAnd, t->t_bool, n, z); break;                   /* NAN */
+        case 9:  r = n_ne_v; break;                                                     /* LTU */
+        case 10: r = z; break;                                                          /* EQU */
+        case 11: r = op2(t, SpvOpLogicalOr, t->t_bool, n_ne_v, z); break;               /* LEU */
+        case 12: r = op2(t, SpvOpLogicalNotEqual, t->t_bool, nn, op2(t, SpvOpLogicalOr, t->t_bool, v, z)); break;  /* GTU */
+        case 13: r = op2(t, SpvOpLogicalOr, t->t_bool, n, nz); break;                   /* NEU */
+        case 14: r = op2(t, SpvOpLogicalNotEqual, t->t_bool, op2(t, SpvOpLogicalOr, t->t_bool, nn, z), v); break; /* GEU */
+        case 15: r = cb(t, 1); break;                                                   /* T */
+        default: fail(t, "CSETP condition %u", bits(w, 8, 5)); return 1;
+        }
+        set_compare_preds(t, w, r);
         return 1;
     }
     case OP_LDC: {

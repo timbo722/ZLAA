@@ -261,6 +261,25 @@ static uint32_t component_ptr(T *t, SpvStorageClass sc, uint32_t vec_var, uint32
     return chain;
 }
 
+/* This invocation's lane in its subgroup (the GPU runs 32 of them together as a "warp") */
+uint32_t subgroup_lane(T *t) {
+    if (!t->in_lane) {
+        t->in_lane = builtin_var(t, SpvStorageClassInput, t->t_u32, SpvBuiltInSubgroupLocalInvocationId);
+        if (t->stage == SHADER_FRAGMENT) spv_op(&t->s, SEC_DECO, SpvOpDecorate, 2, t->in_lane, SpvDecorationFlat);
+    }
+    return load(t, t->t_u32, t->in_lane);
+}
+
+/* compute: gl_LocalInvocationID (thread in its workgroup) / gl_WorkGroupID, one component */
+uint32_t compute_id(T *t, int workgroup, int component) {
+    uint32_t *var = workgroup ? &t->in_workgroup_id : &t->in_local_id;
+    if (!t->t_v3u) t->t_v3u = spv_type(&t->s, SpvOpTypeVector, (uint32_t[]){ t->t_u32, 3 }, 2);
+    if (!*var) *var = builtin_var(t, SpvStorageClassInput, t->t_v3u, workgroup ? SpvBuiltInWorkgroupId : SpvBuiltInLocalInvocationId);
+    uint32_t chain = spv_id(&t->s);
+    spv_op(&t->s, SEC_BODY, SpvOpAccessChain, 4, ptr_type(t, SpvStorageClassInput, t->t_u32), chain, *var, cu(t, (uint32_t)component));
+    return load(t, t->t_u32, chain);
+}
+
 /* The fragment shader's gl_FragCoord (x, y, z, 1/w) */
 static uint32_t frag_coord(T *t) {
     if (!t->frag_coord) t->frag_coord = builtin_var(t, SpvStorageClassInput, t->t_v4f, SpvBuiltInFragCoord);
@@ -352,7 +371,8 @@ int emit_io(T *t, const Inst *in) {
  * Addresses are 64-bit GPU addresses (from c0, where the renderer puts the device address of
  * each storage buffer the game bound). We read and write through SPIR-V physical pointers. */
 static uint32_t address(T *t, const Inst *in) {
-    int ra = (int)bits(in->w, 8, 8), wide = bit(in->w, 45);
+    int generic = in->op == OP_LD || in->op == OP_ST;   /* LD/ST: 32-bit offset, E at bit 52 */
+    int ra = (int)bits(in->w, 8, 8), wide = bit(in->w, generic ? 52 : 45);
     uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
     uint32_t lo = op1(t, SpvOpUConvert, t_u64, get_u(t, ra));
     uint32_t a = lo;
@@ -360,7 +380,7 @@ static uint32_t address(T *t, const Inst *in) {
         uint32_t hi = op1(t, SpvOpUConvert, t_u64, get_u(t, ra + 1));
         a = op2(t, SpvOpBitwiseOr, t_u64, lo, op2(t, SpvOpShiftLeftLogical, t_u64, hi, cu(t, 32)));
     }
-    int32_t off = sext(bits(in->w, 20, 24), 24);
+    int32_t off = generic ? (int32_t)bits(in->w, 20, 32) : sext(bits(in->w, 20, 24), 24);
     uint64_t off64 = (uint64_t)(int64_t)off;
     uint32_t c = spv_id(&t->s);
     spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, c, (uint32_t)off64, (uint32_t)(off64 >> 32));
@@ -382,11 +402,15 @@ static uint32_t word_ptr(T *t, uint32_t addr, uint32_t byte_offset) {
 int emit_memory(T *t, const Inst *in) {
     uint64_t w = in->w;
     int rd = (int)bits(w, 0, 8);
-    if (in->op != OP_LDG && in->op != OP_STG) return 0;
-    int size = (int)bits(w, 48, 3);                     /* U8 S8 U16 S16 B32 B64 B128 */
+    /* LDG/STG: global memory. LD/ST: "generic" addresses, which in these shaders are global too */
+    if (in->op != OP_LDG && in->op != OP_STG && in->op != OP_LD && in->op != OP_ST) return 0;
+    int generic = in->op == OP_LD || in->op == OP_ST;
+    int size = (int)bits(w, generic ? 53 : 48, 3);      /* U8 S8 U16 S16 B32 B64 B128 */
+    if (generic && bits(w, 58, 3) != 7) { fail(t, "LD/ST with a predicate operand"); return 1; }
+    int load_op = in->op == OP_LDG || in->op == OP_LD;
     uint32_t a = address(t, in);
     int words = size == 5 ? 2 : size == 6 || size == 7 ? 4 : 1;
-    if (in->op == OP_LDG) {
+    if (load_op) {
         if (size < 4) {                                  /* small: the aligned word, then the bits */
             uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
             uint32_t mask = spv_id(&t->s);
@@ -407,7 +431,7 @@ int emit_memory(T *t, const Inst *in) {
         }
         return 1;
     }
-    if (size < 4) { fail(t, "STG of %d-bit data", size < 2 ? 8 : 16); return 1; }
+    if (size < 4) { fail(t, "store of %d-bit data", size < 2 ? 8 : 16); return 1; }
     for (int i = 0; i < words; i++)
         spv_op(&t->s, SEC_BODY, SpvOpStore, 4, word_ptr(t, a, 4u * i), get_u(t, rd + i), SpvMemoryAccessAlignedMask, 4);
     return 1;
@@ -696,7 +720,8 @@ static int emit_flow(T *t, const Inst *in, uint32_t next_block) {
 }
 
 static void emit_one(T *t, const Inst *in, uint32_t next_block) {
-    if (emit_flow(t, in, next_block) || emit_io(t, in) || emit_memory(t, in) || emit_alu(t, in) || emit_texture(t, in)) return;
+    if (emit_flow(t, in, next_block) || emit_io(t, in) || emit_memory(t, in) || emit_alu(t, in) || emit_half(t, in) ||
+        emit_texture(t, in)) return;
     fail(t, "%s (%016llx) not translated yet", op_name(in->op), (unsigned long long)in->w);
 }
 
@@ -796,9 +821,16 @@ void shader_constants(const uint8_t *control, uint32_t *offset, uint32_t *size) 
 }
 
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
-                     uint32_t constants_size, int options, ShaderInfo *info) {
+                     uint32_t constants_size, const uint8_t *control, int options, ShaderInfo *info) {
     memset(info, 0, sizeof *info);
     info->stage = stage;
+    for (int i = 0; i < 3; i++) info->local_size[i] = 1;
+    if (stage == SHADER_COMPUTE && control)          /* workgroup size: control + 0x748, 0x74C, 0x750 */
+        for (int i = 0; i < 3; i++) {
+            uint32_t v;
+            memcpy(&v, control + 0x748 + 4 * i, 4);
+            info->local_size[i] = v ? v : 1;
+        }
     T *t = calloc(1, sizeof *t);
     t->info = info;
     t->stage = stage;
@@ -810,7 +842,8 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
     if (header) memcpy(t->sph, code + 0x30, sizeof t->sph);
     t->code = code + header;
     t->code_size = (uint32_t)(size - header);
-    if (stage != SHADER_VERTEX && stage != SHADER_FRAGMENT) fail(t, "only vertex and fragment shaders so far");
+    if (stage != SHADER_VERTEX && stage != SHADER_FRAGMENT && stage != SHADER_COMPUTE)
+        fail(t, "only vertex, fragment and compute shaders so far");
 
     spv_init(&t->s);
     if (!info->error[0] && discover(t) == 0) {
@@ -826,6 +859,10 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
         spv_op(s, SEC_FUNC, SpvOpLabel, 1, spv_id(s));
         emit_program(t);
         spv_op(s, SEC_BODY, SpvOpFunctionEnd, 0);
+        if (t->in_lane || t->uses_quad || t->uses_shuffle)
+            spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniform);
+        if (t->uses_quad) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniformQuad);
+        if (t->uses_shuffle) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniformShuffle);
         if (t->uses_pointers) {                           /* (decided while translating) */
             spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityInt64);
             spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityPhysicalStorageBufferAddresses);
@@ -834,9 +871,13 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
         } else {
             spv_op(s, SEC_MEMMODEL, SpvOpMemoryModel, 2, SpvAddressingModelLogical, SpvMemoryModelGLSL450);
         }
-        uint32_t model = stage == SHADER_VERTEX ? SpvExecutionModelVertex : SpvExecutionModelFragment;
+        uint32_t model = stage == SHADER_VERTEX ? SpvExecutionModelVertex
+                       : stage == SHADER_COMPUTE ? SpvExecutionModelGLCompute : SpvExecutionModelFragment;
         uint32_t before[2] = { model, main_fn };
         spv_inst_str(s, SEC_ENTRY, SpvOpEntryPoint, before, 2, "main", t->interface, t->ninterface);
+        if (stage == SHADER_COMPUTE)
+            spv_op(s, SEC_EXECMODE, SpvOpExecutionMode, 5, main_fn, SpvExecutionModeLocalSize,
+                   info->local_size[0], info->local_size[1], info->local_size[2]);
         if (stage == SHADER_FRAGMENT) {
             spv_op(s, SEC_EXECMODE, SpvOpExecutionMode, 2, main_fn, SpvExecutionModeOriginUpperLeft);
             if (info->writes_depth) spv_op(s, SEC_EXECMODE, SpvOpExecutionMode, 2, main_fn, SpvExecutionModeDepthReplacing);
