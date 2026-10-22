@@ -15,8 +15,8 @@
  * game asks for it, has it written into an NVN texture (GetOutputBuffer), shows it, and
  * releases it. nn::os events tell the game when input space or output frames are available.
  *
- * Decoding isn't done yet: every frame comes out with the right timestamp but no picture, so
- * movies play for their real length (with sound) over an unchanged texture.
+ * Frames are decoded with libvpx (desktop) and converted from YUV to RGBA here; without
+ * libvpx, frames keep their timing but have no picture. (Android will use MediaCodec.)
  */
 #include "movie.h"
 #include "hle.h"
@@ -26,6 +26,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "nvn/nvn.h"
+#ifdef LAA_HAVE_VPX
+#include <vpx/vpx_decoder.h>
+#include <vpx/vp8dx.h>
+#endif
 
 #define NIN  4                       /* input buffers */
 #define NOUT 6                       /* output frames */
@@ -46,6 +51,12 @@ typedef struct {
     int      nready;
     int      stopped;
     pthread_mutex_t lock;
+    uint8_t *rgba[NOUT];             /* decoded picture of each output slot (width * height * 4) */
+    int      has_picture[NOUT];
+#ifdef LAA_HAVE_VPX
+    vpx_codec_ctx_t codec;
+    int      codec_open;
+#endif
 } VideoDecoder;
 
 #define MAX_DECODERS 16
@@ -59,6 +70,26 @@ static struct {
     uint64_t buffer_set_data, buffer_set_range, buffer_base, buffer_capacity;
     uint64_t md_clear, md_set_string, md_set_int32, md_find_int32;
 } fn;
+
+/* YUV 4:2:0 -> RGBA, limited range, BT.709 (HD video) or BT.601 coefficients, in 16.16 fixed point */
+static void yuv_to_rgba(uint8_t *out, int w, int h, const uint8_t *y, int ys, const uint8_t *u, int us,
+                        const uint8_t *v, int vs, int bt709) {
+    const int cy = 76309, crv = bt709 ? 117489 : 104597, cgu = bt709 ? 13975 : 25675, cgv = bt709 ? 34925 : 53279,
+              cbu = bt709 ? 138438 : 132201;
+    for (int j = 0; j < h; j++) {
+        const uint8_t *yr = y + (size_t)j * ys, *ur = u + (size_t)(j / 2) * us, *vr = v + (size_t)(j / 2) * vs;
+        uint8_t *o = out + (size_t)j * w * 4;
+        for (int i = 0; i < w; i++) {
+            int Y = (yr[i] - 16) * cy, U = ur[i / 2] - 128, V = vr[i / 2] - 128;
+            int r = (Y + crv * V) >> 16, g = (Y - cgu * U - cgv * V) >> 16, b = (Y + cbu * U) >> 16;
+            o[0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
+            o[1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
+            o[2] = (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
+            o[3] = 255;
+            o += 4;
+        }
+    }
+}
 
 /* Strings handed to guest functions must be in guest memory: copied there once. */
 static uint64_t strings, strings_used;
@@ -94,6 +125,12 @@ static void configure(CPU *c, VideoDecoder *d) {
     if (hle_call(c, fn.md_find_int32, c->x[1], key.width, out, 0) & 1) d->width = (int32_t)g_ld32(out);
     if (hle_call(c, fn.md_find_int32, c->x[1], key.height, out, 0) & 1) d->height = (int32_t)g_ld32(out);
     fprintf(stderr, "movie: video decoder (type %u) %dx%d\n", d->type, d->width, d->height);
+#ifdef LAA_HAVE_VPX
+    vpx_codec_dec_cfg_t cfg = { .threads = 4, .w = (unsigned)d->width, .h = (unsigned)d->height };
+    vpx_codec_iface_t *iface = d->type == 3 ? vpx_codec_vp9_dx() : d->type == 2 ? vpx_codec_vp8_dx() : NULL;
+    if (iface && !d->codec_open) d->codec_open = vpx_codec_dec_init(&d->codec, iface, &cfg, 0) == VPX_CODEC_OK;
+    if (!d->codec_open) fprintf(stderr, "movie: no decoder for this video type\n");
+#endif
     c->x[0] = 0;
 }
 
@@ -172,25 +209,53 @@ static void get_input_buffer(CPU *c, VideoDecoder *d) {
     c->x[0] = 0;
 }
 
+/* Queue an output frame (with a picture from `rgba`, or none); caller holds the lock */
+static int emit(VideoDecoder *d, int64_t time, uint32_t flags, const uint8_t *rgba) {
+    int slot = -1;
+    for (int i = 0; i < NOUT && slot < 0; i++) if (!d->out_busy[i]) slot = i;
+    if (slot < 0) return 0;
+    d->out_busy[slot] = 1;
+    d->has_picture[slot] = 0;
+    if (rgba) {
+        size_t size = (size_t)d->width * d->height * 4;
+        if (!d->rgba[slot]) d->rgba[slot] = malloc(size);
+        if (d->rgba[slot]) { memcpy(d->rgba[slot], rgba, size); d->has_picture[slot] = 1; }
+    }
+    d->ready[d->nready].slot = slot;
+    d->ready[d->nready].time = time;
+    d->ready[d->nready].flags = flags;
+    d->nready++;
+    return 1;
+}
+
 /* SendInputBufferForDecode(int index, int offset, int size, int64 time, uint32 flags) */
 static void send_input(CPU *c, VideoDecoder *d) {
-    int idx = (int)c->x[1], size = (int)c->x[3];
+    int idx = (int)c->x[1], off = (int)c->x[2], size = (int)c->x[3];
     int64_t time = (int64_t)c->x[4];
     uint32_t flags = (uint32_t)c->x[5];
     int produced = 0;
-    pthread_mutex_lock(&d->lock);
-    if (size > 0 || (flags & FLAG_EOS)) {
-        int slot = -1;
-        for (int i = 0; i < NOUT && slot < 0; i++) if (!d->out_busy[i]) slot = i;
-        if (slot >= 0) {
-            d->out_busy[slot] = 1;
-            d->ready[d->nready].slot = slot;
-            d->ready[d->nready].time = time;
-            d->ready[d->nready].flags = size > 0 ? 0 : FLAG_EOS;
-            d->nready++;
-            produced = 1;
+    static uint8_t *picture;                         /* (one converted frame at a time) */
+#ifdef LAA_HAVE_VPX
+    if (size > 0 && idx >= 0 && idx < NIN && d->codec_open) {
+        if (vpx_codec_decode(&d->codec, guest_mem + d->in_mem[idx] + off, (unsigned)size, NULL, 0) != VPX_CODEC_OK)
+            fprintf(stderr, "movie: VP9 decode error: %s\n", vpx_codec_error(&d->codec));
+        vpx_codec_iter_t it = NULL;
+        vpx_image_t *img;
+        while ((img = vpx_codec_get_frame(&d->codec, &it))) {
+            if ((int)img->d_w != d->width || (int)img->d_h != d->height || img->fmt != VPX_IMG_FMT_I420) continue;
+            if (!picture) picture = malloc((size_t)d->width * d->height * 4);
+            yuv_to_rgba(picture, d->width, d->height, img->planes[0], img->stride[0], img->planes[1], img->stride[1],
+                        img->planes[2], img->stride[2], img->cs != VPX_CS_BT_601);
+            pthread_mutex_lock(&d->lock);
+            produced |= emit(d, time, 0, picture);
+            pthread_mutex_unlock(&d->lock);
         }
+        size = 0;                                    /* (frames emitted above) */
     }
+#endif
+    pthread_mutex_lock(&d->lock);
+    if (size > 0) produced |= emit(d, time, 0, NULL);  /* no decoder: a frame without a picture */
+    if (flags & FLAG_EOS) produced |= emit(d, time, FLAG_EOS, NULL);
     if (idx >= 0 && idx < NIN) d->in_busy[idx] = 0;
     pthread_mutex_unlock(&d->lock);
     if (trace) fprintf(stderr, "movie: video packet %d bytes at %" PRId64 " us%s\n", size, time, flags & FLAG_EOS ? " (end)" : "");
@@ -216,14 +281,16 @@ static void acquire_output(CPU *c, VideoDecoder *d) {
     c->x[0] = 0;
 }
 
-/* GetOutputBuffer(int index, Buffer *): in the game's mode the Buffer holds an NVNtexture *
- * (capacity 8) and the frame is to be written into that texture. Not decoded yet. */
+/* GetOutputBuffer(int index, Buffer *): in the game's mode the Buffer's data is the NVNtexture
+ * (capacity 8) to put the frame into. */
 static void get_output_buffer(CPU *c, VideoDecoder *d) {
-    (void)d;
-    static int logged;
+    int i = (int)c->x[1];
     uint64_t base = hle_call(c, fn.buffer_base, c->x[2], 0, 0, 0);
     uint64_t capacity = hle_call(c, fn.buffer_capacity, c->x[2], 0, 0, 0);
-    if (!logged++) fprintf(stderr, "movie: first frame goes to buffer %#" PRIx64 " (capacity %" PRIu64 ")\n", base, capacity);
+    if (trace) fprintf(stderr, "movie: output %d -> buffer %#" PRIx64 " (storage %#" PRIx64 ") capacity %" PRIu64 " picture %d\n", i, base,
+                       g_ld64(base + 0x48 + 0x10), capacity, i >= 0 && i < NOUT ? d->has_picture[i] : -1);
+    if (i >= 0 && i < NOUT && capacity == 8 && d->has_picture[i])
+        nvn_write_texture(base, d->rgba[i], (uint32_t)d->width, (uint32_t)d->height);
     c->x[0] = 0;
 }
 
@@ -250,7 +317,12 @@ static void destroy(CPU *c, VideoDecoder *d) {
     pthread_mutex_lock(&decoders_lock);
     for (int i = 0; i < MAX_DECODERS; i++) if (decoders[i] == d) decoders[i] = NULL;
     pthread_mutex_unlock(&decoders_lock);
-    /* the input buffers' guest memory is kept for the next decoder (see new_decoder) */
+    /* the input buffers' guest memory is kept for the next decoder (see decoder_ctor) */
+#ifdef LAA_HAVE_VPX
+    if (d->codec_open) vpx_codec_destroy(&d->codec);
+    d->codec_open = 0;
+#endif
+    for (int i = 0; i < NOUT; i++) { free(d->rgba[i]); d->rgba[i] = NULL; }
     c->x[0] = 0;
 }
 

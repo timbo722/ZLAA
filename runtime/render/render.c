@@ -126,7 +126,11 @@ int render_read_back(uint64_t texture, uint8_t *out) {
     return 0;
 }
 
-void render_present(uint64_t texture) {
+void render_present(uint64_t texture, const int32_t crop[4]) {
+    static int reupload = -1;
+    if (reupload < 0) reupload = getenv("LAA_REUPLOAD") != NULL;
+    if (reupload) render_reupload_all();
+    render_images_new_frame();
     if (!active || !texture) return;
     render_flush();                                  /* the frame's rendering is finished */
     VK_CHECK(vkWaitForFences(vk.device, 1, &frame.done, VK_TRUE, UINT64_MAX));
@@ -172,6 +176,11 @@ void render_present(uint64_t texture) {
         /* upside down: NVN's (OpenGL's) row 0 is the bottom of the screen, Vulkan's the top */
         .dstOffsets = { { 0, (int32_t)vk.extent.height, 0 }, { (int32_t)vk.extent.width, 0, 1 } },
     };
+    if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] + crop[2] <= width && crop[1] + crop[3] <= height) {
+        /* the window's crop: only this part of the texture is shown (dynamic resolution) */
+        blit.srcOffsets[0] = (VkOffset3D){ crop[0], crop[1], 0 };
+        blit.srcOffsets[1] = (VkOffset3D){ crop[0] + crop[2], crop[1] + crop[3], 1 };
+    }
     vkCmdBlitImage(cmd, src, src_layout, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
     barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
     VK_CHECK(vkEndCommandBuffer(cmd));

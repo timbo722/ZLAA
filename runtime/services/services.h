@@ -35,4 +35,7 @@ ServiceObject *service_audout_create(void);
  * haven't written yet still open fine, and stop the program on their first command. */
 ServiceObject *service_open(const char *name);
 
+int applet_handheld(void);          /* applet.c: are we a handheld (1280x720) Switch? */
+void hid_connect_controllers(void); /* hid.c: (re)connect player 1 / handheld, as the controller applet does */
+
 #endif

@@ -27,8 +27,8 @@ static void apm_dispatch(ServiceObject *self, IpcCall *call) {
     case 0:                     /* OpenSession -> ISession */
         ipc_out_object(call, ipc_new_object(&session_type, NULL));
         break;
-    case 1:                     /* GetPerformanceMode -> 0 normal (handheld) */
-        ipc_out32(call, 0);
+    case 1:                     /* GetPerformanceMode -> 0 normal (handheld), 1 boost (docked) */
+        ipc_out32(call, applet_handheld() ? 0 : 1);
         break;
     default:
         ipc_unknown_command(self, call);

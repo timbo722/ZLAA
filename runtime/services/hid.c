@@ -40,6 +40,7 @@ static uint32_t supported_styles;
 static uint32_t joy_hold_type;
 static KEvent *style_set_update_event[10];
 static volatile int disconnected[10];               /* the game disconnected this npad */
+static volatile int connect_request;                /* hid_connect_controllers was called */
 
 /* npad id -> its index in shared memory: players 1-8 are 0-7, handheld (0x20) 8, other (0x10) 9 */
 static int npad_index(uint32_t id) { return id < 8 ? (int)id : id == 0x20 ? 8 : id == 0x10 ? 9 : -1; }
@@ -98,13 +99,16 @@ static void *input_thread(void *arg) {
     clock_gettime(CLOCK_MONOTONIC, &next);
     for (uint64_t sampling = 1;; sampling++) {
         InputState s = input_get();
-        /* a disconnected controller comes back when one of its buttons is pressed, as on hardware */
-        if (s.buttons && (disconnected[NPAD_PLAYER1] || disconnected[NPAD_HANDHELD])) {
+        /* a disconnected controller comes back when one of its buttons is pressed, as on hardware,
+         * or when the controller applet connects it */
+        int request = connect_request;
+        connect_request = 0;
+        if ((s.buttons || request) && (disconnected[NPAD_PLAYER1] || disconnected[NPAD_HANDHELD])) {
             if (disconnected[NPAD_PLAYER1]) npad_setup(mem + NPAD_BASE + NPAD_PLAYER1 * NPAD_SIZE, STYLE_FULLKEY, 1);
             if (disconnected[NPAD_HANDHELD]) npad_setup(mem + NPAD_BASE + NPAD_HANDHELD * NPAD_SIZE, STYLE_HANDHELD, 4 | 8);
             disconnected[NPAD_PLAYER1] = disconnected[NPAD_HANDHELD] = 0;
             for (int i = 0; i < 10; i++) if (style_set_update_event[i]) kevent_signal(style_set_update_event[i]);
-            fprintf(stderr, "hid: controllers reconnected by a button press\n");
+            fprintf(stderr, "hid: controllers reconnected by %s\n", request ? "the controller applet" : "a button press");
         }
         if (!disconnected[0])
             lifo_write(mem + NPAD_BASE + NPAD_PLAYER1 * NPAD_SIZE + NPAD_LIFO_FULLKEY, sampling, &s,
@@ -118,6 +122,8 @@ static void *input_thread(void *arg) {
     }
     return NULL;
 }
+
+void hid_connect_controllers(void) { connect_request = 1; }
 
 static void applet_resource_dispatch(ServiceObject *self, IpcCall *call) {
     switch (call->cmd) {

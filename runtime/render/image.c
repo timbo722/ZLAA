@@ -8,6 +8,7 @@
  * allows, so we never track layouts (slower on some GPUs; fine for now).
  */
 #include "render_internal.h"
+#include "astc.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -83,15 +84,18 @@ static unsigned bucket_of(uint64_t address) { return (unsigned)((address >> 9) *
 /* Two textures are the same image if they describe the same storage the same way */
 static int same_image(const TexDesc *a, const TexDesc *b) {
     return a->format == b->format && a->target == b->target && a->width == b->width && a->height == b->height &&
-           a->depth == b->depth && a->levels == b->levels && a->samples == b->samples && a->flags == b->flags &&
+           a->depth == b->depth && a->levels == b->levels && a->samples == b->samples &&
+           (a->flags & TEXTURE_FLAG_LINEAR) == (b->flags & TEXTURE_FLAG_LINEAR) &&   /* (other flags: usage only) */
            a->block_height_log2 == b->block_height_log2;
 }
+
+static VkFormat host_format(VkFormat f, int *decode);
 
 static void create(HostImage *h) {
     const TexDesc *d = &h->desc;
     TexShape s;
     tex_shape(d, &s);
-    h->format = render_vk_format(d->format);
+    h->format = host_format(render_vk_format(d->format), &h->astc_decode);
     h->aspects = render_aspects(h->format);
     h->width = s.width;
     h->height = s.height;
@@ -99,7 +103,7 @@ static void create(HostImage *h) {
     h->layers = s.layers;
     h->levels = s.levels;
     int depth_stencil = !(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT);
-    int compressed = s.fmt->bw > 1;
+    int compressed = s.fmt->bw > 1 && !h->astc_decode;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (!compressed) usage |= depth_stencil ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     VkImageCreateInfo ci = {
@@ -135,6 +139,8 @@ static void create(HostImage *h) {
     VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &h->target_view));
 }
 
+static int is_astc(VkFormat f) { return f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK; }
+
 /* Can this GPU sample (and, for uncompressed formats, render to) images of this format? */
 static int format_supported(VkFormat f) {
     static uint8_t known[256];                       /* 0 unknown, 1 yes, 2 no (formats < 256 only) */
@@ -143,13 +149,26 @@ static int format_supported(VkFormat f) {
     vkGetPhysicalDeviceFormatProperties(vk.gpu, f, &p);
     int ok = (p.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
     if (f < 256) known[f] = ok ? 1 : 2;
-    if (!ok) fprintf(stderr, "render: this GPU can't use texture format %d\n", (int)f);
+    if (!ok && is_astc(f)) {
+        static int said;
+        if (!said++) fprintf(stderr, "render: this GPU can't sample ASTC textures: decoding them on the CPU\n");
+    } else if (!ok) {
+        fprintf(stderr, "render: this GPU can't use texture format %d\n", (int)f);
+    }
     return ok;
+}
+
+/* The format of our image for a texture of format f: f itself, or RGBA8 for ASTC we decode. */
+static VkFormat host_format(VkFormat f, int *decode) {
+    *decode = is_astc(f) && !format_supported(f);
+    if (!*decode) return f;
+    return (f - VK_FORMAT_ASTC_4x4_UNORM_BLOCK) & 1 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 }
 
 HostImage *render_image(const Texture *t) {
     if (!t || !t->address || render_vk_format(t->d.format) == VK_FORMAT_UNDEFINED) return NULL;
-    if (!format_supported(render_vk_format(t->d.format))) return NULL;
+    VkFormat f = render_vk_format(t->d.format);
+    if (!format_supported(f) && !is_astc(f)) return NULL;
     unsigned b = bucket_of(t->address);
     for (HostImage *h = buckets[b]; h; h = h->next)
         if (h->address == t->address && same_image(&h->desc, &t->d)) return h;
@@ -163,17 +182,66 @@ HostImage *render_image(const Texture *t) {
     return h;
 }
 
+/* ---- CPU writes ----
+ * On the Switch, CPU and GPU share memory, so a game may change a texture by just writing
+ * its memory (the font cache does: glyphs are drawn into it as text needs them). Our image is
+ * a copy, so we notice changes by hashing the guest memory before an image is used:
+ *   - an image that changed recently ("hot") is checked every frame;
+ *   - others at most every CHECK_EVERY frames, within a per-frame byte budget. */
+#define CHECK_EVERY 30
+#define CHECK_BUDGET (24u << 20)                     /* bytes per frame, for images that aren't hot */
+#define HOT_FRAMES 600
+static uint64_t frame_no = 1, budget = CHECK_BUDGET;
+
+void render_images_new_frame(void) { frame_no++; budget = CHECK_BUDGET; }
+
+static uint64_t storage_bytes(const HostImage *h) {
+    return h->desc.flags & TEXTURE_FLAG_LINEAR ? (uint64_t)h->desc.stride * h->height : texture_storage_size(&h->desc);
+}
+
+static uint64_t guest_hash(const HostImage *h) {
+    uint64_t n = storage_bytes(h) / 8, v = 0x9E3779B97F4A7C15ull;
+    const uint64_t *p = gptr(h->address);
+    for (uint64_t i = 0; i < n; i++) {                /* 4 independent lanes would be faster; this is ~5 GB/s */
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        v = (v ^ w) * 0x100000001B3ull;
+        v ^= v >> 29;
+    }
+    return v;
+}
+
+static void check_cpu_writes(HostImage *h) {
+    if (h->gpu_written || h->needs_upload || h->checked == frame_no) return;
+    int hot = h->hot_until > frame_no;
+    if (!hot) {
+        uint64_t size = storage_bytes(h);
+        if (frame_no - h->checked < CHECK_EVERY || size > budget) return;
+        budget -= size;
+    }
+    h->checked = frame_no;
+    if (guest_hash(h) != h->hash) {
+        h->needs_upload = 1;
+        h->hot_until = frame_no + HOT_FRAMES;
+    }
+}
+
 /* Copy the texture's guest memory into its image (all levels and layers), through the staging
  * buffer: block-linear -> rows on the CPU (layout.c), then vkCmdCopyBufferToImage. */
 void render_upload(HostImage *h) {
     h->needs_upload = 0;
+    h->hash = guest_hash(h);
+    h->checked = frame_no;
     TexShape s;
     tex_shape(&h->desc, &s);
-    uint64_t total = 0;
+    uint64_t total = 0, most = 0;                   /* (most: the largest level, for ASTC decoding) */
     for (uint32_t lv = 0; lv < s.levels; lv++) {
         LevelShape l = tex_level(&s, lv);
-        total += (uint64_t)l.wb * s.fmt->bytes * l.hb * l.depth * s.layers;
+        uint64_t blocks = (uint64_t)l.wb * s.fmt->bytes * l.hb * l.depth;
+        total += (h->astc_decode ? (uint64_t)l.width * l.height * l.depth * 4 : blocks) * s.layers;
+        if (blocks > most) most = blocks;
     }
+    uint8_t *blocks = h->astc_decode ? malloc(most) : NULL;
     uint64_t offset;
     if (getenv("LAA_TRACE_PIPELINES"))
         fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u: %llu bytes\n", (unsigned long long)h->address,
@@ -185,14 +253,23 @@ void render_upload(HostImage *h) {
     for (uint32_t lv = 0; lv < s.levels && lv < 16; lv++) {
         LevelShape l = tex_level(&s, lv);
         uint64_t row = (uint64_t)l.wb * s.fmt->bytes, slice = row * l.hb;
+        uint64_t out_slice = h->astc_decode ? (uint64_t)l.width * l.height * 4 : slice;
         copies[ncopies++] = (VkBufferImageCopy){
-            .bufferOffset = offset + at, .bufferRowLength = l.wb * s.fmt->bw, .bufferImageHeight = l.hb * s.fmt->bh,
+            .bufferOffset = offset + at,
+            .bufferRowLength = h->astc_decode ? l.width : l.wb * s.fmt->bw,
+            .bufferImageHeight = h->astc_decode ? l.height : l.hb * s.fmt->bh,
             .imageSubresource = { h->aspects & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT
                                                                           : VK_IMAGE_ASPECT_DEPTH_BIT, lv, 0, s.layers },
             .imageExtent = { l.width, l.height, l.depth },
         };
-        for (uint32_t layer = 0; layer < s.layers; layer++, at += slice * l.depth) {
-            if (h->desc.flags & TEXTURE_FLAG_LINEAR) {
+        for (uint32_t layer = 0; layer < s.layers; layer++, at += out_slice * l.depth) {
+            if (h->astc_decode) {                    /* block-linear -> rows of blocks -> RGBA */
+                uint32_t region[6] = { 0, 0, 0, l.wb, l.hb, l.depth };
+                tex_copy_level(gptr(h->address + layer * layer_size + l.offset), blocks, &s, &l, region, row, slice, 1);
+                for (uint32_t z = 0; z < l.depth; z++)
+                    astc_decode(blocks + z * slice, row, l.width, l.height, s.fmt->bw, s.fmt->bh,
+                                h->format == VK_FORMAT_R8G8B8A8_SRGB, out + at + z * out_slice, (size_t)l.width * 4);
+            } else if (h->desc.flags & TEXTURE_FLAG_LINEAR) {
                 for (uint32_t y = 0; y < l.hb; y++) memcpy(out + at + y * row, gptr(h->address + y * h->desc.stride), row);
             } else {
                 uint32_t region[6] = { 0, 0, 0, l.wb, l.hb, l.depth };
@@ -200,11 +277,74 @@ void render_upload(HostImage *h) {
             }
         }
     }
+    free(blocks);
     render_end_rendering();                          /* (copies can't happen while rendering) */
     VkCommandBuffer cmd = render_cmd();
     render_image_init_layout(cmd, h);
     vkCmdCopyBufferToImage(cmd, render_staging_buffer(), h->image, VK_IMAGE_LAYOUT_GENERAL, ncopies, copies);
     render_barrier(cmd);
+}
+
+void render_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height) {
+    HostImage *h = render_image(gptr(texture));
+    if (!h || h->width != width || h->height != height) return;
+    uint64_t size = (uint64_t)width * height * 4, offset;
+    uint8_t *dst = render_staging(size, &offset);
+    memcpy(dst, rgba, size);
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    render_image_init_layout(cmd, h);
+    VkBufferImageCopy copy = { .bufferOffset = offset, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                               .imageExtent = { width, height, 1 } };
+    vkCmdCopyBufferToImage(cmd, render_staging_buffer(), h->image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+    render_barrier(cmd);
+    h->needs_upload = 0;
+    h->gpu_written = 1;                              /* newer than guest memory */
+}
+
+/* The CPU wrote texels (nvnTextureWriteTexels) into the texture's guest memory: copy that
+ * region (in blocks: x, y, z, width, height, depth) into the images using this storage. */
+void render_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const uint32_t region[6]) {
+    const Texture *t = gptr(texture);
+    for (HostImage *h = buckets[bucket_of(t->address)]; h; h = h->next) {
+        if (h->address != t->address || !same_image(&h->desc, &t->d)) continue;
+        if (h->needs_upload) continue;               /* not uploaded yet: the full upload will see it */
+        if (h->astc_decode) { h->needs_upload = 1; continue; }   /* (decoded: simply upload it all again) */
+        TexShape s;
+        tex_shape(&h->desc, &s);
+        if (level >= s.levels || layer >= s.layers || (h->desc.flags & TEXTURE_FLAG_LINEAR)) continue;
+        LevelShape l = tex_level(&s, level);
+        if (region[0] >= l.wb || region[1] >= l.hb || region[2] >= l.depth) continue;
+        uint32_t r[6] = { region[0], region[1], region[2], region[3], region[4], region[5] };
+        if (r[3] > l.wb - r[0]) r[3] = l.wb - r[0];
+        if (r[4] > l.hb - r[1]) r[4] = l.hb - r[1];
+        if (r[5] > l.depth - r[2]) r[5] = l.depth - r[2];
+        uint64_t row = (uint64_t)r[3] * s.fmt->bytes, slice = row * r[4], offset;
+        uint8_t *out = render_staging(slice * r[5], &offset);
+        tex_copy_level(gptr(h->address + layer * tex_layer_size(&s) + l.offset), out, &s, &l, r, row, slice, 1);
+        uint32_t x = r[0] * s.fmt->bw, y = r[1] * s.fmt->bh;
+        VkBufferImageCopy copy = {
+            .bufferOffset = offset, .bufferRowLength = r[3] * s.fmt->bw, .bufferImageHeight = r[4] * s.fmt->bh,
+            .imageSubresource = { h->aspects & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_ASPECT_COLOR_BIT
+                                                                         : VK_IMAGE_ASPECT_DEPTH_BIT, level, layer, 1 },
+            .imageOffset = { (int32_t)x, (int32_t)y, (int32_t)r[2] },
+            .imageExtent = { r[3] * s.fmt->bw < l.width - x ? r[3] * s.fmt->bw : l.width - x,
+                             r[4] * s.fmt->bh < l.height - y ? r[4] * s.fmt->bh : l.height - y, r[5] },
+        };
+        render_end_rendering();
+        VkCommandBuffer cmd = render_cmd();
+        render_image_init_layout(cmd, h);
+        vkCmdCopyBufferToImage(cmd, render_staging_buffer(), h->image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        render_barrier(cmd);
+    }
+}
+
+/* Debugging (LAA_REUPLOAD=1, once per frame): upload every image the GPU hasn't drawn into
+ * again from guest memory, to tell missed CPU writes from other bugs. */
+void render_reupload_all(void) {
+    for (unsigned b = 0; b < BUCKETS; b++)
+        for (HostImage *h = buckets[b]; h; h = h->next)
+            if (!h->gpu_written) h->needs_upload = 1;
 }
 
 HostImage *render_image_find(uint64_t texture) {
@@ -216,6 +356,7 @@ HostImage *render_image_find(uint64_t texture) {
 
 HostImage *render_image_ready(uint64_t texture) {
     HostImage *h = texture ? render_image(gptr(texture)) : NULL;
+    if (h) check_cpu_writes(h);
     if (h && h->needs_upload) render_upload(h);
     return h;
 }
@@ -269,8 +410,9 @@ VkImageView render_image_view(HostImage *h, const TextureView *view, int dim, in
     else { type = h->desc.target == TARGET_1D || h->desc.target == TARGET_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D; layers = 1; }
     VkFormat format = h->format;
     if (view->set & VIEW_FORMAT) {
+        int decode;
         VkFormat f = render_vk_format(view->format);
-        if (f != VK_FORMAT_UNDEFINED) format = f;
+        if (f != VK_FORMAT_UNDEFINED) format = h->astc_decode ? host_format(f, &decode) : f;
     }
     const uint8_t *sw = view->set & VIEW_SWIZZLE ? view->swizzle : h->desc.swizzle;
     VkImageAspectFlags aspect = h->aspects;

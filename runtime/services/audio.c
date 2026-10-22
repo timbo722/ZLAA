@@ -15,7 +15,10 @@
  *   error info     0xB0: 10 error slots and a count
  *   renderer info  0x10 (REV5+): frames rendered
  *
- * There is no sound yet: voices report nothing played. Real playback (SDL3) is phase 5.
+ * There is no sound yet, but voices still "play" in real time: each one consumes its wave
+ * buffers (blocks of samples the game queues, 4 slots per voice) at its sample rate x pitch,
+ * and reports the samples and buffers played. Games use this as a clock (the movie player
+ * shows the frame matching its soundtrack's position). Real playback (SDL3) is phase 5.
  * Layouts follow Ryujinx (Ryujinx.Audio/Renderer, StateUpdater.cs); commands from
  * switchbrew.org/wiki/Audio_services.
  */
@@ -41,11 +44,24 @@ typedef struct {
     uint32_t revision;
 } RendererParams;
 
+/* The server side of one voice: which of its 4 wave buffer slots hold unplayed samples,
+ * the slot being played and how far into it we are. */
+enum { VOICE_STOPPED, VOICE_STARTED, VOICE_PAUSED };
+typedef struct {
+    uint8_t valid[4], loop[4], end_of_stream[4];
+    uint32_t length[4];                     /* samples in each slot */
+    int state, index;
+    uint64_t offset, played;
+    uint32_t consumed;
+    double fraction;                        /* part of a sample left over from the last advance */
+} Voice;
+
 typedef struct {
     RendererParams p;
     uint32_t pools;
     uint32_t *pool_state;
-    uint64_t elapsed_frames;
+    Voice *voices;
+    uint64_t elapsed_frames, updated_frames; /* frames rendered; value at the last update */
     int running;
     KEvent *event;
 } Renderer;
@@ -133,7 +149,76 @@ static void renderer_destroy(ServiceObject *self) {
     for (int k = 0; k < MAX_RENDERERS; k++) if (renderers[k] == r) renderers[k] = NULL;
     pthread_mutex_unlock(&renderers_lock);
     free(r->pool_state);
+    free(r->voices);
     free(r);
+}
+
+/* VoiceInParameter1 (0x170 bytes), the fields we use */
+#define VOICE_IN_SIZE 0x170
+enum { VIN_IS_NEW = 0x8, VIN_IN_USE = 0x9, VIN_PLAY_STATE = 0xA, VIN_SAMPLE_RATE = 0xC, VIN_PITCH = 0x1C,
+       VIN_WAVE_BUFFERS = 0x60, VIN_FLUSH_COUNT = 0x159 };
+/* its 4 wave buffers, 0x38 bytes each */
+enum { WB_SIZE = 0x38, WB_START = 0x10, WB_END = 0x14, WB_LOOP = 0x18, WB_END_OF_STREAM = 0x19,
+       WB_SENT_TO_SERVER = 0x1A };
+
+static void voice_finish_buffer(Voice *v) {          /* the current slot is done: move to the next */
+    if (v->end_of_stream[v->index]) v->played = 0;
+    v->valid[v->index] = 0;
+    v->index = (v->index + 1) % 4;
+    v->consumed++;
+    v->offset = 0;
+}
+
+/* Take in one voice's parameters, then play it for `frames` audio frames (5 ms each). */
+static void voice_update(Voice *v, const uint8_t *in, uint64_t frames) {
+    if (in[VIN_IS_NEW]) memset(v, 0, sizeof *v);
+    for (int i = 0; i < 4; i++) {                     /* buffers the game appended since last time */
+        const uint8_t *wb = in + VIN_WAVE_BUFFERS + WB_SIZE * i;
+        if (wb[WB_SENT_TO_SERVER]) continue;
+        uint32_t start, end;
+        memcpy(&start, wb + WB_START, 4);
+        memcpy(&end, wb + WB_END, 4);
+        v->valid[i] = 1;
+        v->length[i] = end > start ? end - start : 0;
+        v->loop[i] = wb[WB_LOOP];
+        v->end_of_stream[i] = wb[WB_END_OF_STREAM];
+    }
+    for (int n = in[VIN_FLUSH_COUNT]; n > 0 && v->valid[v->index]; n--) voice_finish_buffer(v);
+
+    switch (in[VIN_PLAY_STATE]) {                     /* 0 Start, 1 Stop, 2 Pause */
+    case 0: v->state = VOICE_STARTED; break;
+    case 2: v->state = VOICE_PAUSED; break;
+    case 1:
+        if (v->state != VOICE_STOPPED) {              /* stopping drops every queued buffer */
+            for (int i = 0; i < 4; i++)
+                if (v->valid[i]) { v->valid[i] = 0; v->index = (v->index + 1) % 4; v->consumed++; }
+            v->offset = v->played = 0;
+            v->fraction = 0;
+            v->state = VOICE_STOPPED;
+        }
+        break;
+    }
+    if (v->state != VOICE_STARTED) return;
+
+    uint32_t rate;
+    float pitch;
+    memcpy(&rate, in + VIN_SAMPLE_RATE, 4);
+    memcpy(&pitch, in + VIN_PITCH, 4);
+    if (!(pitch > 0 && pitch < 16)) pitch = 1;        /* also catches NaN */
+    double samples = v->fraction + (double)frames * rate * pitch / 200;
+    uint64_t left = (uint64_t)samples;
+    v->fraction = samples - left;
+    while (left && v->valid[v->index]) {
+        uint64_t len = v->length[v->index], n = len - v->offset < left ? len - v->offset : left;
+        v->offset += n;
+        v->played += n;
+        left -= n;
+        if (v->offset >= len) {
+            if (v->loop[v->index] && len) v->offset = 0;
+            else voice_finish_buffer(v);
+        }
+    }
+    if (!v->valid[v->index]) v->fraction = 0;         /* starved: nothing to carry over */
 }
 
 static void request_update(Renderer *r, IpcCall *call) {
@@ -149,6 +234,7 @@ static void request_update(Renderer *r, IpcCall *call) {
     /* inputs we look at: memory pool states, effect enable flags */
     uint64_t at = 0x40 + hdr[1];           /* skip header, behaviour */
     const uint8_t *pools_in = in + at;
+    const uint8_t *voices_in = in + at + hdr[2] + hdr[4];
     at += hdr[2] + hdr[4] + hdr[3];        /* pools, voice channel resources, voices */
     const uint8_t *effects_in = in + at;
     uint32_t effect_in_size = r->p.effects ? hdr[5] / r->p.effects : 0;
@@ -171,7 +257,22 @@ static void request_update(Renderer *r, IpcCall *call) {
         else if (state == POOL_REQUEST_DETACH) r->pool_state[k] = POOL_DETACHED;
         memcpy(o, &r->pool_state[k], 4);
     }
-    o += 0x10ull * r->p.voices;                                /* voices: nothing played yet */
+    pthread_mutex_lock(&renderers_lock);
+    uint64_t frames = r->elapsed_frames - r->updated_frames;   /* rendered since the last update */
+    r->updated_frames = r->elapsed_frames;
+    pthread_mutex_unlock(&renderers_lock);
+    uint32_t nvoices = hdr[3] / VOICE_IN_SIZE < r->p.voices ? hdr[3] / VOICE_IN_SIZE : r->p.voices;
+    for (uint32_t k = 0; k < nvoices; k++) {                   /* voices: samples, buffers played */
+        const uint8_t *vin = voices_in + (uint64_t)VOICE_IN_SIZE * k;
+        if (!vin[VIN_IN_USE]) continue;
+        Voice *v = &r->voices[k];
+        voice_update(v, vin, frames);
+        if (!vin[VIN_IS_NEW]) {
+            memcpy(o + 0x10 * k, &v->played, 8);
+            memcpy(o + 0x10 * k + 8, &v->consumed, 4);
+        }
+    }
+    o += 0x10ull * r->p.voices;
     for (uint32_t k = 0; k < r->p.effects; k++, o += effect_out_size)
         o[0] = effects_in[(uint64_t)effect_in_size * k + 2] ? EFFECT_ENABLED : EFFECT_DISABLED;
     o += 0x20ull * r->p.sinks + 0x10 + 0xB0;                   /* sinks, performance, error info */
@@ -257,8 +358,9 @@ static void audren_dispatch(ServiceObject *self, IpcCall *call) {
         read_params(call, &r->p);
         r->pools = r->p.effects + 4 * r->p.voices;
         r->pool_state = calloc(r->pools + 1, sizeof *r->pool_state);
+        r->voices = calloc(r->p.voices + 1, sizeof *r->voices);
         r->event = kevent_new("audren: renderer frame");
-        if (!r->pool_state) exit(1);
+        if (!r->pool_state || !r->voices) exit(1);
         pthread_mutex_lock(&renderers_lock);
         int k = 0;
         while (k < MAX_RENDERERS && renderers[k]) k++;

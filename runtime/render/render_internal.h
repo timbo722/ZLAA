@@ -22,6 +22,10 @@ typedef struct HostImage {
     int needs_upload;                /* guest memory has data the image doesn't */
     int layout_ready;                /* moved to VK_IMAGE_LAYOUT_GENERAL */
     int gpu_written;                 /* rendered into: the image is newer than guest memory */
+    int astc_decode;                 /* ASTC the GPU can't sample: decoded to RGBA8 on upload */
+    uint64_t hash;                   /* of its guest memory when last uploaded (CPU writes, image.c) */
+    uint64_t checked;                /* frame of the last hash check */
+    uint64_t hot_until;              /* changed recently: check every frame until this frame */
     struct ImageView *views;         /* views made for sampling it (image.c) */
 } HostImage;
 
@@ -29,6 +33,8 @@ VkFormat render_vk_format(uint32_t nvn_format);
 VkImageAspectFlags render_aspects(VkFormat f);
 HostImage *render_image(const Texture *t);       /* find or create; NULL for unsupported formats */
 HostImage *render_image_find(uint64_t texture);  /* find only */
+void render_reupload_all(void);
+void render_images_new_frame(void);              /* once per presented frame */
 void render_upload(HostImage *h);                /* guest memory -> image, recorded in render_cmd() */
 void render_image_init_layout(VkCommandBuffer cmd, HostImage *h);
 /* the image for a texture, ready to use: uploaded if the CPU's copy is newer */

@@ -6,6 +6,7 @@
  * records Vulkan commands for them.
  */
 #include "render_internal.h"
+#include "astc.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -36,6 +37,7 @@ static struct {
     float blend_color[4];
     uint32_t stencil_ref[2], stencil_mask[2], stencil_value_mask[2];
     float line_width, polygon_offset[3];
+    uint64_t copy_row_stride, copy_image_stride;     /* bytes; 0 = tightly packed */
     uint32_t primitive_restart, restart_index;
 } st = {
     .channel_mask = 0xFFFFFFFF, .viewport = { 0, 0, 1, 1 }, .depth_range = { 0, 1 },
@@ -159,8 +161,10 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
     HostImage *src = render_image_ready(src_ref->texture), *dst = render_image_ready(dst_ref->texture);
     if (!src || !dst) return;
     if (getenv("LAA_TRACE_PIPELINES"))
-        fprintf(stderr, "render: copy %ux%u fmt %d -> %ux%u fmt %d, flags %#x\n", src->width, src->height, src->format,
-                dst->width, dst->height, dst->format, flags);
+        fprintf(stderr, "render: copy %ux%u fmt %d -> %ux%u fmt %d, flags %#x, regions %d,%d %dx%d -> %d,%d %dx%d, views %#x %#x\n",
+                src->width, src->height, src->format, dst->width, dst->height, dst->format, flags, src_ref->region[0],
+                src_ref->region[1], src_ref->region[3], src_ref->region[4], dst_ref->region[0], dst_ref->region[1],
+                dst_ref->region[3], dst_ref->region[4], src_ref->view.set, dst_ref->view.set);
     render_end_rendering();
     VkCommandBuffer cmd = render_cmd();
     render_image_init_layout(cmd, src);
@@ -187,6 +191,63 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
     }
     render_barrier(cmd);
     dst->gpu_written = 1;
+}
+
+/* CopyBufferToTexture / CopyTextureToBuffer: between guest memory at `address` (rows
+ * st.copy_row_stride apart, 0 = packed) and a region of the image. For array textures the
+ * region's z / depth are layers. The buffer is the game's own memory when its pool is imported. */
+static void copy_buffer_image(uint64_t address, const ImageRef *ref, int to_buffer) {
+    HostImage *h = render_image_ready(ref->texture);
+    if (!h || !address) return;
+    TexShape s;
+    tex_shape(&h->desc, &s);
+    VkImageSubresourceLayers sub = subresource(h, ref);
+    if (!(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) sub.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;   /* (depth only) */
+    VkOffset3D box[2];
+    region_box(h, sub.mipLevel, ref->region, box);
+    if (h->depth == 1 && h->layers > 1 && !(ref->view.set & VIEW_LAYERS)) {
+        sub.baseArrayLayer = ref->region[2] > 0 ? (uint32_t)ref->region[2] : 0;
+        sub.layerCount = ref->region[5] > 0 ? (uint32_t)ref->region[5] : 1;
+    } else if (h->depth == 1) {
+        sub.layerCount = 1;
+    }
+    VkExtent3D ext = { (uint32_t)(box[1].x - box[0].x), (uint32_t)(box[1].y - box[0].y), (uint32_t)(box[1].z - box[0].z) };
+    uint32_t wb = (ext.width + s.fmt->bw - 1) / s.fmt->bw, hb = (ext.height + s.fmt->bh - 1) / s.fmt->bh;
+    uint64_t row = st.copy_row_stride ? st.copy_row_stride : (uint64_t)wb * s.fmt->bytes;
+    uint64_t image = st.copy_image_stride ? st.copy_image_stride : row * hb;
+    uint64_t total = image * (ext.depth > sub.layerCount ? ext.depth : sub.layerCount);
+    if (row % s.fmt->bytes) { warn_once("copy row stride that isn't whole texels", (int)row); return; }
+    VkBufferImageCopy c = { .bufferRowLength = (uint32_t)(row / s.fmt->bytes) * s.fmt->bw,
+                            .bufferImageHeight = (uint32_t)(image / row) * s.fmt->bh,
+                            .imageSubresource = sub, .imageOffset = box[0], .imageExtent = ext };
+    VkBuffer buffer;
+    VkDeviceSize offset;
+    uint8_t *staged = NULL;
+    if (h->astc_decode) {                            /* ASTC we decode: blocks from the buffer -> RGBA */
+        if (to_buffer) { warn_once("ASTC texture readback", 0); return; }
+        uint64_t out_row = (uint64_t)ext.width * 4, out_image = out_row * ext.height;
+        uint32_t images = ext.depth > sub.layerCount ? ext.depth : sub.layerCount;
+        staged = render_staging(out_image * images, &offset);
+        for (uint32_t i = 0; i < images; i++)
+            astc_decode(gptr(address + i * image), row, ext.width, ext.height, s.fmt->bw, s.fmt->bh,
+                        h->format == VK_FORMAT_R8G8B8A8_SRGB, staged + i * out_image, out_row);
+        buffer = render_staging_buffer();
+        c.bufferRowLength = ext.width;
+        c.bufferImageHeight = ext.height;
+    } else if (render_guest_buffer(address, &buffer, &offset) != 0 || offset % 4 || offset % s.fmt->bytes) {
+        if (to_buffer) { warn_once("texture readback into memory that isn't in a pool", 0); return; }
+        staged = render_staging(total, &offset);    /* not in an imported pool: copy through staging */
+        memcpy(staged, gptr(address), total);
+        buffer = render_staging_buffer();
+    }
+    c.bufferOffset = offset;
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    render_image_init_layout(cmd, h);
+    if (to_buffer) vkCmdCopyImageToBuffer(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &c);
+    else vkCmdCopyBufferToImage(cmd, buffer, h->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    render_barrier(cmd);
+    if (!to_buffer) h->gpu_written = 1;
 }
 
 /* ---- drawing ---- */
@@ -285,7 +346,8 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
             HostImage *h = e->texture ? render_image_ready(e->texture) : NULL;
             if (h) ii->imageView = render_image_view(h, &e->view, tx->dim, tx->array);
             if (h && getenv("LAA_TRACE_PIPELINES"))
-                fprintf(stderr, "render:   texture %u: id %u, %ux%u nvn format %#x vk %d view set %#x fmt %#x, levels %u layers %u\n", i, tex_id,
+                fprintf(stderr, "render:   texture %u: id %u, object %#llx storage %#llx %ux%u nvn format %#x vk %d view set %#x fmt %#x, levels %u layers %u\n", i, tex_id,
+                        (unsigned long long)e->texture, (unsigned long long)h->address,
                         h->width, h->height, h->desc.format, h->format, e->view.set, e->view.format, h->levels, h->layers),
                 fprintf(stderr, "render:     swizzle %u %u %u %u / view %u %u %u %u, image %p, target %p, sampler %u\n",
                         h->desc.swizzle[0], h->desc.swizzle[1], h->desc.swizzle[2], h->desc.swizzle[3], e->view.swizzle[0],
@@ -448,6 +510,8 @@ static void set_value(const Cmd *r) {
     case VALUE_PRIMITIVE_RESTART: st.primitive_restart = (uint32_t)r->a[0] & 1; st.restart_index = (uint32_t)r->a[1]; break;
     case VALUE_POLYGON_OFFSET_CLAMP: memcpy(st.polygon_offset, r->f, 12); break;   /* factor, units, clamp */
     case VALUE_LINE_WIDTH: st.line_width = r->f[0]; break;
+    case VALUE_COPY_ROW_STRIDE: st.copy_row_stride = r->a[0]; break;
+    case VALUE_COPY_IMAGE_STRIDE: st.copy_image_stride = r->a[0]; break;
     default: break;
     }
 }
@@ -523,6 +587,18 @@ void render_command(const Cmd *r) {
         if (!h) break;
         VkClearColorValue v = clear_value(r->extra + sizeof(ImageRef));
         if (h->aspects & VK_IMAGE_ASPECT_COLOR_BIT) clear_image(h, &v, NULL, VK_IMAGE_ASPECT_COLOR_BIT);
+        break;
+    }
+    case CMD_COPY_BUFFER_TO_TEXTURE: {             /* a = src address; extra = dst */
+        ImageRef dst;
+        memcpy(&dst, r->extra, sizeof dst);
+        copy_buffer_image(r->a[0], &dst, 0);
+        break;
+    }
+    case CMD_COPY_TEXTURE_TO_BUFFER: {             /* a = -, -, -, dst address; extra = src */
+        ImageRef src;
+        memcpy(&src, r->extra, sizeof src);
+        copy_buffer_image(r->a[3], &src, 1);
         break;
     }
     case CMD_COPY_TEXTURE_TO_TEXTURE: {            /* a[6] = flags; extra = { src, dst } */

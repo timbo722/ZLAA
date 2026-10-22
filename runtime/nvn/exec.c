@@ -93,7 +93,7 @@ static uint64_t frames;
 
 /* LAA_SCREENSHOT=dir: save every 300th frame (LAA_SCREENSHOT_EVERY=n) as dir/frame_NNNNNN.png.
  * The picture comes from the texture's guest memory. */
-static void screenshot(uint64_t texture) {
+static void screenshot(uint64_t texture, const int32_t crop[4]) {
     static const char *dir;
     static uint64_t every;
     if (!dir) {
@@ -119,15 +119,69 @@ static void screenshot(uint64_t texture) {
     for (size_t i = 3; i < (size_t)s.width * s.height * 4; i += 4) rgba[i] = 255;   /* opaque */
     char path[4096];
     snprintf(path, sizeof path, "%s/frame_%06" PRIu64 ".png", dir, frames);
-    /* row 0 is the bottom of the screen (NVN's default, as in OpenGL): write it last */
-    if (png_write(path, rgba + (size_t)(s.height - 1) * s.width * 4, s.width, s.height, -(int32_t)s.width * 4) == 0)
+    /* only the window's crop is shown; row 0 is the bottom of the screen (NVN's default, as in
+     * OpenGL), so rows are written upwards */
+    uint32_t x = 0, y = 0, w = s.width, h = s.height;
+    if (crop[2] > 0 && crop[3] > 0 && (uint32_t)(crop[0] + crop[2]) <= s.width && (uint32_t)(crop[1] + crop[3]) <= s.height) {
+        x = (uint32_t)crop[0]; y = (uint32_t)crop[1]; w = (uint32_t)crop[2]; h = (uint32_t)crop[3];
+    }
+    if (png_write(path, rgba + ((size_t)(y + h - 1) * s.width + x) * 4, w, h, -(int32_t)s.width * 4) == 0)
         fprintf(stderr, "nvn: wrote %s\n", path);
     free(rgba);
 }
 
 uint64_t nvn_frame_count(void) { return frames; }
 
+void nvn_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const uint32_t region[6]) {
+#ifdef LAA_HAVE_SDL
+    if (render_active()) {
+        pthread_mutex_lock(&gpu_lock);
+        render_texels_written(texture, level, layer, region);
+        pthread_mutex_unlock(&gpu_lock);
+    }
+#else
+    (void)texture; (void)level; (void)layer; (void)region;
+#endif
+}
+
+void nvn_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height) {
+#ifdef LAA_HAVE_SDL
+    if (render_active()) {
+        pthread_mutex_lock(&gpu_lock);
+        render_write_texture(texture, rgba, width, height);
+        pthread_mutex_unlock(&gpu_lock);
+        return;
+    }
+#endif
+    /* no GPU: into guest memory, in the texture's own layout */
+    const Texture *t = gptr(texture);
+    TexShape s;
+    tex_shape(&t->d, &s);
+    if (s.width != width || s.height != height || s.fmt->bytes != 4) return;
+    LevelShape l = tex_level(&s, 0);
+    uint32_t region[6] = { 0, 0, 0, width, height, 1 };
+    if (t->d.flags & TEXTURE_FLAG_LINEAR)
+        for (uint32_t y = 0; y < height; y++) memcpy(gptr(t->address + y * t->d.stride), rgba + (size_t)y * width * 4, (size_t)width * 4);
+    else
+        tex_copy_level(gptr(t->address), (uint8_t *)rgba, &s, &l, region, (uint64_t)width * 4, 0, 0);
+}
+
+int applet_handheld(void);
+
+/* What the display shows of the texture: the window's crop, or the screen's size (handheld:
+ * 1280x720 from the corner, which is what the game draws into) */
+static void display_rect(const Window *w, int32_t out[4]) {
+    memcpy(out, w->crop, 16);
+    if (out[2] <= 0 || out[3] <= 0) {
+        out[0] = out[1] = 0;
+        out[2] = applet_handheld() ? 1280 : 1920;
+        out[3] = applet_handheld() ? 720 : 1080;
+    }
+}
+
 void nvn_present(const Window *w, uint64_t texture) {
+    int32_t rect[4];
+    display_rect(w, rect);
     frames++;
     if (frames == 1 || frames % 300 == 0) {
         fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
@@ -135,11 +189,11 @@ void nvn_present(const Window *w, uint64_t texture) {
         if (render_active()) render_stats();
 #endif
     }
-    screenshot(texture);
+    screenshot(texture, rect);
 #ifdef LAA_HAVE_SDL
     if (render_active()) {                           /* the display's vsync paces us */
         pthread_mutex_lock(&gpu_lock);
-        render_present(texture);
+        render_present(texture, rect);
         pthread_mutex_unlock(&gpu_lock);
         return;
     }

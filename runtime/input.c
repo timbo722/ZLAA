@@ -2,8 +2,8 @@
  * input.c - the controller state the game sees.
  *
  * LAA_INPUT_SCRIPT presses buttons by itself, for testing without a person:
- *     LAA_INPUT_SCRIPT="2900:PLUS,3200:A,3400:A"
- * holds each button for 10 frames starting at that presented frame. Names: A B X Y L R ZL ZR
+ *     LAA_INPUT_SCRIPT="2900:L+R,3200:A,3400:A"
+ * holds each button (or buttons joined by +) for 10 frames starting at that presented frame. Names: A B X Y L R ZL ZR
  * PLUS MINUS UP DOWN LEFT RIGHT.
  */
 #include "input.h"
@@ -37,10 +37,18 @@ static void load_script(void) {
         char name[16] = { 0 };
         unsigned long long frame;
         int used = 0;
-        if (sscanf(s, "%llu:%15[A-Z]%n", &frame, name, &used) != 2) break;
-        for (size_t i = 0; i < sizeof names / sizeof *names; i++)
-            if (strcmp(names[i].name, name) == 0) { script[nscript].frame = frame; script[nscript++].buttons = names[i].bit; }
+        if (sscanf(s, "%llu:%n", &frame, &used) != 1 || !used) break;
         s += used;
+        script[nscript].frame = frame;
+        script[nscript].buttons = 0;
+        while (sscanf(s, "%15[A-Z]%n", name, &used) == 1) {          /* NAME, or NAME+NAME+... */
+            for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+                if (strcmp(names[i].name, name) == 0) script[nscript].buttons |= names[i].bit;
+            s += used;
+            if (*s != '+') break;
+            s++;
+        }
+        nscript++;
         if (*s == ',') s++;
     }
 }

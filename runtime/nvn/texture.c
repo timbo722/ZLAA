@@ -134,6 +134,7 @@ static void write_texels(CPU *c, uint64_t row_stride, uint64_t image_stride, int
     if (!image_stride) image_stride = row_stride * region[4];
     uint8_t *tiled = gptr(t->address + layer * tex_layer_size(&s) + l.offset);
     tex_copy_level(tiled, gptr(ARG(3)), &s, &l, region, row_stride, image_stride, to_linear);
+    if (!to_linear) nvn_texels_written(ARG(0), level, layer, region);   /* the GPU's copy is now stale */
 }
 static void nvnTextureWriteTexels(CPU *c)        { write_texels(c, 0, 0, 0); }
 static void nvnTextureWriteTexelsStrided(CPU *c) { write_texels(c, ARG(4), ARG(5), 0); }
