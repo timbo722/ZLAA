@@ -6,7 +6,8 @@
  * and round back to halves when the result is stored (PackHalf2x16).
  *
  * Each operand is read with a "swizzle": F16 (h0, h1 as they are), F32 (the register is one
- * 32-bit float, used for both), H0H0 or H1H1 (one half, used for both). The result is stored
+ * 32-bit float, used for both), H0H0 or H1H1 (one half, used for both). A constant buffer
+ * operand is always read as F32: one float constant, for both halves. The result is stored
  * as both halves (F16), one 32-bit float (F32), or into one half of Rd, keeping the other
  * (MRG_H0 / MRG_H1). Immediates are 10 bits per half: a half's top 10 bits.
  *
@@ -92,7 +93,7 @@ static int half_args(T *t, const Inst *in, HalfArgs *x) {
         return 1;
     case OP_HADD2C: case OP_HMUL2C:
         x->a = half_src(t, get_u(t, ra), aswz, bit(w, 43), bit(w, 44));
-        x->b = half_src(t, cbuf_operand(t, w), SWZ_F16, in->op == OP_HADD2C && bit(w, 56), bit(w, 54));
+        x->b = half_src(t, cbuf_operand(t, w), SWZ_F32, in->op == OP_HADD2C && bit(w, 56), bit(w, 54));
         x->sat = bit(w, 52);
         return 1;
     case OP_HADD232I: case OP_HMUL232I:              /* B: two halves in bits 20-51; result F16 */
@@ -115,14 +116,14 @@ static int half_args(T *t, const Inst *in, HalfArgs *x) {
         return 1;
     case OP_HFMA2C:
         x->a = half_src(t, get_u(t, ra), aswz, 0, 0);
-        x->b = half_src(t, cbuf_operand(t, w), SWZ_F16, bit(w, 56), 0);
+        x->b = half_src(t, cbuf_operand(t, w), SWZ_F32, bit(w, 56), 0);
         x->c = half_src(t, get_u(t, rc), (int)bits(w, 53, 2), bit(w, 51), 0);
         x->sat = bit(w, 52);
         return 1;
     case OP_HFMA2RC:                                 /* B is the register (bits 39-46), C the constant */
         x->a = half_src(t, get_u(t, ra), aswz, 0, 0);
         x->b = half_src(t, get_u(t, rc), (int)bits(w, 53, 2), bit(w, 56), 0);
-        x->c = half_src(t, cbuf_operand(t, w), SWZ_F16, bit(w, 51), 0);
+        x->c = half_src(t, cbuf_operand(t, w), SWZ_F32, bit(w, 51), 0);
         x->sat = bit(w, 52);
         return 1;
     case OP_HFMA232I:                                /* C is Rd */
@@ -155,8 +156,8 @@ static void half_compare_args(T *t, const Inst *in, HalfCompare *x) {
         x->cmp = (int)bits(w, 49, 4);
         x->flag = bit(w, 53);
         break;
-    default:                                         /* C forms */
-        x->b = half_src(t, cbuf_operand(t, w), SWZ_F16, bit(w, 56), bit(w, 54));
+    default:                                         /* C forms (HSET2C has no |B|) */
+        x->b = half_src(t, cbuf_operand(t, w), SWZ_F32, bit(w, 56), in->op == OP_HSETP2C && bit(w, 54));
         x->cmp = (int)bits(w, 49, 4);
         x->flag = bit(w, 53);
         break;

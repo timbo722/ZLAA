@@ -10,6 +10,7 @@
 #include "render_internal.h"
 #include "astc.h"
 #include "png.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -253,8 +254,46 @@ static void check_cpu_writes(HostImage *h) {
 
 /* Debugging: save a colour image as a PNG (blitted to RGBA8 first, so HDR values clamp to
  * 0..1). Finishes the GPU work recorded so far. */
+/* unsigned small floats of B10G11R11: 5-bit exponent, `mbits` mantissa bits */
+static float small_float(uint32_t v, int mbits) {
+    uint32_t e = v >> mbits & 31, m = v & ((1u << mbits) - 1);
+    if (e == 0) return ldexpf((float)m, -14 - mbits);
+    if (e == 31) return 65504.0f;
+    return ldexpf(1.0f + (float)m / (float)(1u << mbits), (int)e - 15);
+}
+
+/* HDR images (B10G11R11): read the raw texels, print the range of values, save x / (1 + x) */
+static int debug_dump_hdr(HostImage *h, const char *path) {
+    uint64_t n = (uint64_t)h->width * h->height, offset;
+    uint32_t *raw = (uint32_t *)render_staging(n * 4, &offset);
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    VkBufferImageCopy copy = { .bufferOffset = offset, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                               .imageExtent = { h->width, h->height, 1 } };
+    vkCmdCopyImageToBuffer(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, render_staging_buffer(), 1, &copy);
+    render_flush();
+    uint8_t *out = malloc(n * 4);
+    if (!out) return -1;
+    double sum = 0;
+    float lo = 1e30f, hi = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        float c[3] = { small_float(raw[i] & 0x7FF, 6), small_float(raw[i] >> 11 & 0x7FF, 6), small_float(raw[i] >> 22, 5) };
+        float l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+        sum += l;
+        if (l < lo) lo = l;
+        if (l > hi) hi = l;
+        for (int k = 0; k < 3; k++) out[i * 4 + k] = (uint8_t)(255.0f * c[k] / (1.0f + c[k]) + 0.5f);
+        out[i * 4 + 3] = 255;
+    }
+    fprintf(stderr, "render: %s: luminance min %g average %g max %g\n", path, lo, sum / (double)n, hi);
+    png_write(path, out + (n - h->width) * 4, h->width, h->height, -(int32_t)h->width * 4);
+    free(out);
+    return 0;
+}
+
 void render_debug_dump(HostImage *h, const char *path) {
     if (!(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) return;
+    if (h->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) { debug_dump_hdr(h, path); return; }
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
         .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { h->width, h->height, 1 }, .mipLevels = 1, .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
