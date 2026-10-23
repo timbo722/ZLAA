@@ -50,7 +50,8 @@ typedef struct {
  * are in the control section, see shader_constants()). control: the NVN control section
  * (compute: the workgroup size is there), or NULL. Returns 0 on success; on failure
  * info->error says why. */
-enum { SHADER_GL_DEPTH = 1 };        /* vertex: clip-space z is -w..w (OpenGL/NVN default) -> 0..w */
+enum { SHADER_GL_DEPTH = 1,         /* vertex: clip-space z is -w..w (OpenGL/NVN default) -> 0..w */
+       SHADER_DEBUG_CONST = 2 };     /* fragment (debugging): every colour output is 0.5 */
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
                      uint32_t constants_size, const uint8_t *control, int options, ShaderInfo *info);
 /* Where a shader's constants are, from its NVN control section: offset from the start of the

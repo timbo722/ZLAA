@@ -227,7 +227,15 @@ uint32_t operand_c(T *t, const Inst *in) {
 
 static uint32_t io_var(T *t, SpvStorageClass sc, uint32_t type) {
     uint32_t id = spv_id(&t->s);
-    spv_op(&t->s, SEC_TYPES, SpvOpVariable, 3, ptr_type(t, sc, type), id, sc);
+    if (sc == SpvStorageClassOutput && t->stage == SHADER_VERTEX && type == t->t_v4f) {
+        /* vertex outputs start as (0, 0, 0, 1), as on the GPU: shaders often write only some
+         * components (e.g. a full-screen pass sets position x, y and leaves w = 1) */
+        uint32_t c[4] = { cf(t, 0.0f), cf(t, 0.0f), cf(t, 0.0f), cf(t, 1.0f) };
+        spv_op(&t->s, SEC_TYPES, SpvOpVariable, 4, ptr_type(t, sc, type), id, sc,
+               spv_composite_constant(&t->s, t->t_v4f, c, 4));
+    } else {
+        spv_op(&t->s, SEC_TYPES, SpvOpVariable, 3, ptr_type(t, sc, type), id, sc);
+    }
     if (t->ninterface < 64) t->interface[t->ninterface++] = id;
     return id;
 }
@@ -458,7 +466,8 @@ void emit_outputs_at_exit(T *t) {
         }
         for (int c = 0; c < 4; c++)
             if (omap >> (4 * rt + c) & 1)
-                store(t, component_ptr(t, SpvStorageClassOutput, t->out_color[rt], (uint32_t)c), get_f(t, base + c));
+                store(t, component_ptr(t, SpvStorageClassOutput, t->out_color[rt], (uint32_t)c),
+                      t->options & SHADER_DEBUG_CONST ? cf(t, 0.5f) : get_f(t, base + c));
         base += 4;
     }
     if (t->sph[19] & 2) {

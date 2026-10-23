@@ -36,8 +36,10 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage) {
         if (control) shader_constants(gptr(control), &c_off, &c_size);
         if (c_off > avail || c_size > avail - c_off) c_off = c_size = 0;
         const uint8_t *p = gptr(code);
-        if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, SHADER_GL_DEPTH,
-                             &s->info) == 0) {
+        /* LAA_DEBUG_FS=address: that fragment shader outputs 0.5 (is it drawing at all?) */
+        int options = SHADER_GL_DEPTH;
+        if (getenv("LAA_DEBUG_FS") && strtoull(getenv("LAA_DEBUG_FS"), NULL, 0) == code) options |= SHADER_DEBUG_CONST;
+        if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, &s->info) == 0) {
             VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                             .codeSize = s->info.words * 4, .pCode = s->info.spirv };
             VK_CHECK(vkCreateShaderModule(vk.device, &ci, NULL, &s->module));

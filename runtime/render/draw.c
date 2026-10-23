@@ -537,20 +537,24 @@ static void draw(const Cmd *r, int indexed) {
     if (render_tracing()) {                          /* one line per draw: shaders, targets, storage buffers */
         fprintf(stderr, "render: draw vs %#llx fs %#llx ->", (unsigned long long)vs->code, (unsigned long long)fs->code);
         for (uint32_t i = 0; i < st.rt.count; i++)
-            if (st.color[i]) fprintf(stderr, " rt%u %ux%u fmt %d", i, st.color[i]->width, st.color[i]->height, st.color[i]->format);
+            if (st.color[i]) fprintf(stderr, " rt%u %ux%u fmt %d @%#llx", i, st.color[i]->width, st.color[i]->height, st.color[i]->format,
+                                     (unsigned long long)st.color[i]->address);
         if (st.depth) fprintf(stderr, " depth %ux%u", st.depth->width, st.depth->height);
+        fprintf(stderr, " vp %g,%g %gx%g sc %d,%d %dx%d", st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3],
+                st.scissor[0], st.scissor[1], st.scissor[2], st.scissor[3]);
         for (int s = 0; s < 6; s++)
             for (int i = 0; i < 16; i++)
                 if (st.storage[s][i].address)
                     fprintf(stderr, " sb%d.%d %#llx+%#llx", s, i, (unsigned long long)st.storage[s][i].address,
                             (unsigned long long)st.storage[s][i].size);
-        for (int i = 0; i < 14; i++)                 /* fragment uniform buffers: address, first word */
-            if (st.uniform[SHADER_FRAGMENT][i].address) {
-                uint32_t v = g_ld32(st.uniform[SHADER_FRAGMENT][i].address);
-                float f;
-                memcpy(&f, &v, 4);
-                fprintf(stderr, " ub%d %#llx=%g", i, (unsigned long long)st.uniform[SHADER_FRAGMENT][i].address, f);
-            }
+        for (int s = 0; s < 2; s++)                  /* uniform buffers: address, first 4 words as floats */
+            for (int i = 0; i < 14; i++)
+                if (st.uniform[s][i].address) {
+                    float f[4];
+                    memcpy(f, gptr(st.uniform[s][i].address), 16);
+                    fprintf(stderr, " %cub%d %#llx=%g,%g,%g,%g", s ? 'f' : 'v', i, (unsigned long long)st.uniform[s][i].address,
+                            f[0], f[1], f[2], f[3]);
+                }
         fprintf(stderr, "\n");
     }
 
@@ -649,15 +653,16 @@ static void draw(const Cmd *r, int indexed) {
     stats.done++;
     for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) render_image_gpu_wrote(st.color[i]);
     if (st.depth) render_image_gpu_wrote(st.depth);
-    /* LAA_DUMP_DRAWS_AT=frame (+ LAA_DUMP_DIR): after each full-screen pass of that frame (no depth
-     * buffer, at least 960 wide), save its render target */
+    /* LAA_DUMP_DRAWS_AT=frame (+ LAA_DUMP_DIR): after each pass of that frame that isn't scene
+     * geometry (no depth buffer, or smaller than full screen; at least 200 wide), save its render target */
     static int64_t dump_draws = -2;
     static int draw_no;
     if (dump_draws == -2) dump_draws = getenv("LAA_DUMP_DRAWS_AT") ? strtoll(getenv("LAA_DUMP_DRAWS_AT"), NULL, 0) : -1;
-    if (dump_draws >= 0 && nvn_frame_count() == (uint64_t)dump_draws && !st.depth && st.color[0] && st.color[0]->width >= 960) {
+    if (dump_draws >= 0 && nvn_frame_count() == (uint64_t)dump_draws && st.color[0] && st.color[0]->width >= 200 &&
+        (!st.depth || st.color[0]->width < 1920)) {
         char path[512];
-        snprintf(path, sizeof path, "%s/draw%03d_fs%llx.png", getenv("LAA_DUMP_DIR") ? getenv("LAA_DUMP_DIR") : ".", draw_no++,
-                 (unsigned long long)fs->code);
+        snprintf(path, sizeof path, "%s/draw%03d_fs%llx_%ux%u.png", getenv("LAA_DUMP_DIR") ? getenv("LAA_DUMP_DIR") : ".", draw_no++,
+                 (unsigned long long)fs->code, st.color[0]->width, st.color[0]->height);
         render_debug_dump(st.color[0], path);
     }
     static int each = -1;                            /* LAA_FLUSH_EACH_DRAW: find which draw breaks the GPU */

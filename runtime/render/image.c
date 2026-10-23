@@ -173,6 +173,14 @@ HostImage *render_image(const Texture *t) {
     unsigned b = bucket_of(t->address);
     for (HostImage *h = buckets[b]; h; h = h->next)
         if (h->address == t->address && same_image(&h->desc, &t->d)) return h;
+    if (render_tracing() || getenv("LAA_TRACE_ALIASES"))
+        for (HostImage *o = buckets[b]; o; o = o->next)
+            if (o->address == t->address)
+                fprintf(stderr, "render: second image at %#llx: fmt %#x/%#x target %u/%u %ux%ux%u/%ux%ux%u levels %u/%u "
+                        "flags %#x/%#x bh %d/%d (old/new)\n", (unsigned long long)t->address, o->desc.format, t->d.format,
+                        o->desc.target, t->d.target, o->desc.width, o->desc.height, o->desc.depth, t->d.width, t->d.height,
+                        t->d.depth, o->desc.levels, t->d.levels, o->desc.flags, t->d.flags,
+                        (int)o->desc.block_height_log2, (int)t->d.block_height_log2);
     HostImage *h = calloc(1, sizeof *h);
     h->address = t->address;
     h->desc = t->d;
