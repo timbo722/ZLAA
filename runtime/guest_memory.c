@@ -75,6 +75,15 @@ int gmem_map_fd(uint64_t addr, uint64_t size, int fd, int writable) {
     return 0;
 }
 
+int gmem_place(uint64_t addr, uint64_t size, void *pages) {
+    if (addr + size > guest_mem_size || addr + size < addr) return -1;
+    if (mremap(pages, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, guest_mem + addr) == MAP_FAILED) {
+        perror("gmem_place: mremap");
+        return -1;
+    }
+    return 0;
+}
+
 int gmem_move(uint64_t dst, uint64_t src, uint64_t size) {
     uint64_t hp = (uint64_t)sysconf(_SC_PAGESIZE);
     if (dst + size > guest_mem_size || src + size > guest_mem_size || dst + size < dst || src + size < src)

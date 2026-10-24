@@ -346,6 +346,7 @@ uint64_t nvn_frame_count(void);      /* frames presented so far */
 /* Put RGBA8 pixels (rows of width * 4 bytes) into a texture's level 0, e.g. a movie frame */
 void nvn_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
 void nvn_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const uint32_t region[6]);  /* CPU wrote texels */
+void nvn_pool_changed(uint64_t storage, uint64_t size, int created);   /* a memory pool was made / is going */
 uint64_t nvn_gpu_ticks(void);       /* GPU timestamp counter, in units of 625/384 ns */
 
 #endif

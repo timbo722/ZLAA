@@ -48,12 +48,15 @@ typedef struct {
  * with a 0x80-byte header; compute code starts at once), `size` bytes are readable.
  * constants: the shader's own constant data (what the driver binds as c1; its offset and size
  * are in the control section, see shader_constants()). control: the NVN control section
- * (compute: the workgroup size is there), or NULL. Returns 0 on success; on failure
- * info->error says why. */
+ * (compute: the workgroup size is there), or NULL. extra_outputs (vertex): also declare these
+ * generic outputs (bit i: location i) even if the shader never writes them, because the
+ * fragment shader reads them and Vulkan requires a matching output. Returns 0 on success; on
+ * failure info->error says why. */
 enum { SHADER_GL_DEPTH = 1,         /* vertex: clip-space z is -w..w (OpenGL/NVN default) -> 0..w */
        SHADER_DEBUG_CONST = 2 };     /* fragment (debugging): every colour output is 0.5 */
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
-                     uint32_t constants_size, const uint8_t *control, int options, ShaderInfo *info);
+                     uint32_t constants_size, const uint8_t *control, int options, uint32_t extra_outputs,
+                     ShaderInfo *info);
 /* Where a shader's constants are, from its NVN control section: offset from the start of the
  * code and size in bytes. */
 void shader_constants(const uint8_t *control, uint32_t *offset, uint32_t *size);

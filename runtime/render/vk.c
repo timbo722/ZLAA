@@ -131,9 +131,13 @@ static int create_device(void) {
                                   .pQueuePriorities = &priority };
     const char *ext[4] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     uint32_t next = 1;
-    if (has_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+    /* how the GPU gets at the game's memory pools (buffer.c); LAA_POOL_EXPORT=1 tries Android's way on desktop */
+    if (has_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && !getenv("LAA_POOL_EXPORT")) {
         ext[next++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
         vk.host_import = 1;
+    } else if (has_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+        ext[next++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+        vk.fd_export = 1;
     }
     /* Vulkan 1.3 features we rely on: rendering without render pass objects */
     VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -171,7 +175,9 @@ static int create_device(void) {
                 subgroup.supportedOperations, subgroup.supportedStages, subgroup.quadOperationsInAllStages);
     vk.limits = props.properties.limits;
     vk.import_alignment = vk.host_import ? host.minImportedHostPointerAlignment : 0;
-    if (!vk.host_import) fprintf(stderr, "vulkan: no VK_EXT_external_memory_host; drawing needs it for now\n");
+    if (vk.fd_export) fprintf(stderr, "vulkan: memory pools are exported GPU memory mapped at their guest addresses\n");
+    else if (!vk.host_import)
+        fprintf(stderr, "vulkan: neither VK_EXT_external_memory_host nor VK_KHR_external_memory_fd: nothing can draw\n");
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                                     .queueFamilyIndex = vk.queue_family };
@@ -193,13 +199,21 @@ int vk_create_swapchain(uint32_t width, uint32_t height) {
             break;
         }
     vk.extent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){ width, height };
+    /* The Thor's panel is natively portrait, so for our landscape window Android reports a
+     * 90 degree transform. We don't render rotated ourselves: we ask for none (IDENTITY) and
+     * the compositor rotates. (Present then returns VK_SUBOPTIMAL_KHR every time: render.c
+     * ignores it.) */
+    VkSurfaceTransformFlagBitsKHR transform = caps.currentTransform;
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    fprintf(stderr, "vulkan: swapchain %ux%u, transform %#x (display's %#x)\n", vk.extent.width, vk.extent.height,
+            transform, caps.currentTransform);
     uint32_t count = caps.minImageCount + 1;
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk.surface, .minImageCount = count,
         .imageFormat = chosen.format, .imageColorSpace = chosen.colorSpace, .imageExtent = vk.extent,
         .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = transform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = VK_PRESENT_MODE_FIFO_KHR,               /* wait for the display: always available */
         .clipped = VK_TRUE, .oldSwapchain = vk.swapchain,

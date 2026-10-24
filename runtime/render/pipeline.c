@@ -17,13 +17,14 @@
 #define SHADER_BUCKETS 1024
 static HostShader *shader_buckets[SHADER_BUCKETS];
 
-HostShader *render_shader(uint64_t code, uint64_t control, int stage) {
+HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs) {
     unsigned b = (unsigned)((code >> 6) * 0x9E3779B1u >> 22) & (SHADER_BUCKETS - 1);
     for (HostShader *s = shader_buckets[b]; s; s = s->next)
-        if (s->code == code && s->stage == stage) return s;
+        if (s->code == code && s->stage == stage && s->extra_outputs == extra_outputs) return s;
     HostShader *s = calloc(1, sizeof *s);
     s->code = code;
     s->stage = stage;
+    s->extra_outputs = extra_outputs;
     s->next = shader_buckets[b];
     shader_buckets[b] = s;
 
@@ -39,7 +40,7 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage) {
         /* LAA_DEBUG_FS=address: that fragment shader outputs 0.5 (is it drawing at all?) */
         int options = SHADER_GL_DEPTH;
         if (getenv("LAA_DEBUG_FS") && strtoull(getenv("LAA_DEBUG_FS"), NULL, 0) == code) options |= SHADER_DEBUG_CONST;
-        if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, &s->info) == 0) {
+        if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, &s->info) == 0) {
             VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                             .codeSize = s->info.words * 4, .pCode = s->info.spirv };
             VK_CHECK(vkCreateShaderModule(vk.device, &ci, NULL, &s->module));
@@ -299,7 +300,12 @@ static VkPipeline create(const PipelineKey *k) {
                     attrs[i].location, attrs[i].format, k->attr[attrs[i].location].format, attrs[i].binding,
                     attrs[i].offset, k->stream[attrs[i].binding].stride, k->color_format[0]);
     VkPipeline p;
-    VK_CHECK(vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &p));
+    VkResult r = vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+    if (r != VK_SUCCESS) {           /* the driver refused it: its draws are skipped (counted as "other") */
+        fprintf(stderr, "render: pipeline vs %#llx fs %#llx: vkCreateGraphicsPipelines %s\n",
+                (unsigned long long)k->vs_code, (unsigned long long)k->fs_code, vk_result_name(r));
+        return VK_NULL_HANDLE;
+    }
     return p;
 }
 

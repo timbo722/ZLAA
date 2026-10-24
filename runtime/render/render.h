@@ -25,5 +25,8 @@ void render_stats(void);             /* print and reset draw statistics */
 void render_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
 /* The CPU wrote texels into a texture's guest memory (region in blocks: x, y, z, w, h, d). */
 void render_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const uint32_t region[6]);
+/* The game made a memory pool, or is about to finalize one (buffer.c: its pages may become GPU memory) */
+void render_pool_created(uint64_t storage, uint64_t size);
+void render_pool_destroyed(uint64_t storage, uint64_t size);
 
 #endif

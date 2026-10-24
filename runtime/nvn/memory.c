@@ -68,9 +68,14 @@ static void nvnMemoryPoolInitialize(CPU *c) {
     MemoryPoolBuilder *b = gptr(ARG(1));
     *(MemoryPool *)gptr(ARG(0)) = (MemoryPool){ b->storage, b->size, b->flags };
     pool_register(b->storage, b->size);
+    nvn_pool_changed(b->storage, b->size, 1);
     RET(1);
 }
-static void nvnMemoryPoolFinalize(CPU *c) { pool_unregister(((MemoryPool *)gptr(ARG(0)))->storage); }
+static void nvnMemoryPoolFinalize(CPU *c) {
+    MemoryPool *p = gptr(ARG(0));
+    nvn_pool_changed(p->storage, p->size, 0);
+    pool_unregister(p->storage);
+}
 #define MP ((MemoryPool *)gptr(ARG(0)))
 static void nvnMemoryPoolMap(CPU *c)              { RET(MP->storage); }
 static void nvnMemoryPoolGetBufferAddress(CPU *c) { RET(MP->storage); }

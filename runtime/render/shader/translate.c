@@ -377,34 +377,35 @@ int emit_io(T *t, const Inst *in) {
 
 /* ---- global memory: LDG / STG ----
  * Addresses are 64-bit GPU addresses (from c0, where the renderer puts the device address of
- * each storage buffer the game bound). We read and write through SPIR-V physical pointers. */
+ * each storage buffer the game bound). We read and write through SPIR-V physical pointers.
+ * An address is kept as a uvec2 (low word, high word), not a 64-bit integer: some GPUs (the
+ * Thor's) have no 64-bit integers in shaders, and a uvec2 can be bitcast to a pointer directly. */
+
+/* the 64-bit address a + (hi:lo), with the carry from the low word into the high word */
+static uint32_t add64(T *t, uint32_t a, uint32_t lo, uint32_t hi) {
+    uint32_t t_carry = spv_type(&t->s, SpvOpTypeStruct, (uint32_t[]){ t->t_u32, t->t_u32 }, 2);
+    uint32_t sum = op2(t, SpvOpIAddCarry, t_carry, op2(t, SpvOpCompositeExtract, t->t_u32, a, 0), lo);
+    uint32_t new_lo = op2(t, SpvOpCompositeExtract, t->t_u32, sum, 0);
+    uint32_t carry = op2(t, SpvOpCompositeExtract, t->t_u32, sum, 1);
+    uint32_t new_hi = op2(t, SpvOpIAdd, t->t_u32, op2(t, SpvOpCompositeExtract, t->t_u32, a, 1),
+                          op2(t, SpvOpIAdd, t->t_u32, hi, carry));
+    return op2(t, SpvOpCompositeConstruct, t->t_v2u, new_lo, new_hi);
+}
+
 static uint32_t address(T *t, const Inst *in) {
     int generic = in->op == OP_LD || in->op == OP_ST;   /* LD/ST: 32-bit offset, E at bit 52 */
     int ra = (int)bits(in->w, 8, 8), wide = bit(in->w, generic ? 52 : 45);
-    uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
-    uint32_t lo = op1(t, SpvOpUConvert, t_u64, get_u(t, ra));
-    uint32_t a = lo;
-    if (wide && ra != RZ) {
-        uint32_t hi = op1(t, SpvOpUConvert, t_u64, get_u(t, ra + 1));
-        a = op2(t, SpvOpBitwiseOr, t_u64, lo, op2(t, SpvOpShiftLeftLogical, t_u64, hi, cu(t, 32)));
-    }
+    uint32_t hi = wide && ra != RZ ? get_u(t, ra + 1) : cu(t, 0);
+    uint32_t a = op2(t, SpvOpCompositeConstruct, t->t_v2u, get_u(t, ra), hi);
     int32_t off = generic ? (int32_t)bits(in->w, 20, 32) : sext(bits(in->w, 20, 24), 24);
-    uint64_t off64 = (uint64_t)(int64_t)off;
-    uint32_t c = spv_id(&t->s);
-    spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, c, (uint32_t)off64, (uint32_t)(off64 >> 32));
     t->uses_pointers = 1;
-    return op2(t, SpvOpIAdd, t_u64, a, c);
+    return add64(t, a, cu(t, (uint32_t)off), cu(t, off < 0 ? 0xFFFFFFFFu : 0));   /* offset sign-extended */
 }
 
 /* pointer to the uint at a 64-bit address (+ byte offset) */
 static uint32_t word_ptr(T *t, uint32_t addr, uint32_t byte_offset) {
-    uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
-    if (byte_offset) {
-        uint32_t c = spv_id(&t->s);
-        spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, c, byte_offset, 0);
-        addr = op2(t, SpvOpIAdd, t_u64, addr, c);
-    }
-    return op1(t, SpvOpConvertUToPtr, ptr_type(t, SpvStorageClassPhysicalStorageBuffer, t->t_u32), addr);
+    if (byte_offset) addr = add64(t, addr, cu(t, byte_offset), cu(t, 0));
+    return op1(t, SpvOpBitcast, ptr_type(t, SpvStorageClassPhysicalStorageBuffer, t->t_u32), addr);
 }
 
 int emit_memory(T *t, const Inst *in) {
@@ -420,14 +421,12 @@ int emit_memory(T *t, const Inst *in) {
     int words = size == 5 ? 2 : size == 6 || size == 7 ? 4 : 1;
     if (load_op) {
         if (size < 4) {                                  /* small: the aligned word, then the bits */
-            uint32_t t_u64 = spv_type(&t->s, SpvOpTypeInt, (uint32_t[]){ 64, 0 }, 2);
-            uint32_t mask = spv_id(&t->s);
-            spv_op(&t->s, SEC_TYPES, SpvOpConstant, 4, t_u64, mask, 0xFFFFFFFCu, 0xFFFFFFFFu);
-            uint32_t aligned = op2(t, SpvOpBitwiseAnd, t_u64, a, mask);
+            uint32_t lo = op2(t, SpvOpCompositeExtract, t->t_u32, a, 0);
+            uint32_t aligned = op2(t, SpvOpCompositeConstruct, t->t_v2u, op2(t, SpvOpBitwiseAnd, t->t_u32, lo, cu(t, ~3u)),
+                                   op2(t, SpvOpCompositeExtract, t->t_u32, a, 1));
             uint32_t v = spv_id(&t->s);
             spv_op(&t->s, SEC_BODY, SpvOpLoad, 5, t->t_u32, v, word_ptr(t, aligned, 0), SpvMemoryAccessAlignedMask, 4);
-            uint32_t shift = op2(t, SpvOpShiftLeftLogical, t->t_u32, op2(t, SpvOpBitwiseAnd, t->t_u32,
-                                 op1(t, SpvOpUConvert, t->t_u32, a), cu(t, 3)), cu(t, 3));
+            uint32_t shift = op2(t, SpvOpShiftLeftLogical, t->t_u32, op2(t, SpvOpBitwiseAnd, t->t_u32, lo, cu(t, 3)), cu(t, 3));
             v = op3(t, size & 1 ? SpvOpBitFieldSExtract : SpvOpBitFieldUExtract, t->t_u32, v, shift, cu(t, size < 2 ? 8 : 16));
             set_u(t, rd, v);
             return 1;
@@ -830,7 +829,8 @@ void shader_constants(const uint8_t *control, uint32_t *offset, uint32_t *size) 
 }
 
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
-                     uint32_t constants_size, const uint8_t *control, int options, ShaderInfo *info) {
+                     uint32_t constants_size, const uint8_t *control, int options, uint32_t extra_outputs,
+                     ShaderInfo *info) {
     memset(info, 0, sizeof *info);
     info->stage = stage;
     for (int i = 0; i < 3; i++) info->local_size[i] = 1;
@@ -867,13 +867,14 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
         spv_op(s, SEC_FUNC, SpvOpFunction, 4, t->t_void, main_fn, SpvFunctionControlMaskNone, fn_type);
         spv_op(s, SEC_FUNC, SpvOpLabel, 1, spv_id(s));
         emit_program(t);
+        if (stage == SHADER_VERTEX)                       /* never written: they keep (0, 0, 0, 1) */
+            for (uint32_t m = extra_outputs & ~info->outputs; m; m &= m - 1) attr_var(t, 1, __builtin_ctz(m));
         spv_op(s, SEC_BODY, SpvOpFunctionEnd, 0);
         if (t->in_lane || t->uses_quad || t->uses_shuffle)
             spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniform);
         if (t->uses_quad) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniformQuad);
         if (t->uses_shuffle) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniformShuffle);
         if (t->uses_pointers) {                           /* (decided while translating) */
-            spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityInt64);
             spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityPhysicalStorageBufferAddresses);
             spv_inst_str(s, SEC_EXT, SpvOpExtension, NULL, 0, "SPV_KHR_physical_storage_buffer", NULL, 0);
             spv_op(s, SEC_MEMMODEL, SpvOpMemoryModel, 2, SpvAddressingModelPhysicalStorageBuffer64, SpvMemoryModelGLSL450);

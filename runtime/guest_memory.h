@@ -32,6 +32,9 @@ int gmem_decommit(uint64_t addr, uint64_t size);   /* give the RAM back; reads 0
 /* Map a shared-memory file (memfd) at addr: the same RAM is then visible there and wherever
  * else the file is mapped (e.g. by a service). Undo with gmem_decommit. */
 int gmem_map_fd(uint64_t addr, uint64_t size, int fd, int writable);
+/* Move host pages (size bytes mapped at `pages`, outside guest memory) to guest address addr,
+ * replacing what was there in one step: the range is never a hole. Sizes in host pages. */
+int gmem_place(uint64_t addr, uint64_t size, void *pages);
 /* Move the pages at src to dst (contents included); src is left reserved with no access. */
 int gmem_move(uint64_t dst, uint64_t src, uint64_t size);
 

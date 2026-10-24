@@ -15,8 +15,10 @@
  * game asks for it, has it written into an NVN texture (GetOutputBuffer), shows it, and
  * releases it. nn::os events tell the game when input space or output frames are available.
  *
- * Frames are decoded with libvpx (desktop) and converted from YUV to RGBA here; without
- * libvpx, frames keep their timing but have no picture. (Android will use MediaCodec.)
+ * Frames are decoded with libvpx (desktop) or Android's MediaCodec (usually the hardware
+ * decoder) and converted from YUV to RGBA here; without a decoder, frames keep their timing
+ * but have no picture. MediaCodec gives frames back a few packets after it gets them, so its
+ * finished frames are collected whenever the game sends input or gives back an output slot.
  */
 #include "movie.h"
 #include "hle.h"
@@ -30,6 +32,10 @@
 #ifdef LAA_HAVE_VPX
 #include <vpx/vpx_decoder.h>
 #include <vpx/vp8dx.h>
+#endif
+#ifdef __ANDROID__
+#include <media/NdkMediaCodec.h>
+#include <time.h>
 #endif
 
 #define NIN  4                       /* input buffers */
@@ -57,6 +63,14 @@ typedef struct {
     vpx_codec_ctx_t codec;
     int      codec_open;
 #endif
+#ifdef __ANDROID__
+    AMediaCodec *mc;
+    pthread_mutex_t mc_lock;         /* one thread at a time in the codec */
+    int32_t  mc_color, mc_stride, mc_slice;   /* output layout (from its output format) */
+    int      mc_pending;             /* packets queued whose frames haven't come out yet */
+    int      mc_eos;                 /* end of stream queued, its frame not out yet */
+    uint8_t *mc_picture;             /* one converted frame */
+#endif
 } VideoDecoder;
 
 #define MAX_DECODERS 16
@@ -71,16 +85,18 @@ static struct {
     uint64_t md_clear, md_set_string, md_set_int32, md_find_int32;
 } fn;
 
-/* YUV 4:2:0 -> RGBA, limited range, BT.709 (HD video) or BT.601 coefficients, in 16.16 fixed point */
+/* YUV 4:2:0 -> RGBA, limited range, BT.709 (HD video) or BT.601 coefficients, in 16.16 fixed point.
+ * cstep: bytes from one chroma sample to the next, 1 for separate U and V planes (I420), 2 when
+ * they are interleaved (NV12: u = the UV plane, v = u + 1). */
 static void yuv_to_rgba(uint8_t *out, int w, int h, const uint8_t *y, int ys, const uint8_t *u, int us,
-                        const uint8_t *v, int vs, int bt709) {
+                        const uint8_t *v, int vs, int cstep, int bt709) {
     const int cy = 76309, crv = bt709 ? 117489 : 104597, cgu = bt709 ? 13975 : 25675, cgv = bt709 ? 34925 : 53279,
               cbu = bt709 ? 138438 : 132201;
     for (int j = 0; j < h; j++) {
         const uint8_t *yr = y + (size_t)j * ys, *ur = u + (size_t)(j / 2) * us, *vr = v + (size_t)(j / 2) * vs;
         uint8_t *o = out + (size_t)j * w * 4;
         for (int i = 0; i < w; i++) {
-            int Y = (yr[i] - 16) * cy, U = ur[i / 2] - 128, V = vr[i / 2] - 128;
+            int Y = (yr[i] - 16) * cy, U = ur[i / 2 * cstep] - 128, V = vr[i / 2 * cstep] - 128;
             int r = (Y + crv * V) >> 16, g = (Y - cgu * U - cgv * V) >> 16, b = (Y + cbu * U) >> 16;
             o[0] = (uint8_t)(r < 0 ? 0 : r > 255 ? 255 : r);
             o[1] = (uint8_t)(g < 0 ? 0 : g > 255 ? 255 : g);
@@ -119,6 +135,10 @@ static void signal_event(CPU *c, VideoDecoder *d, int which) {
 
 /* ---- the methods, in vtable order ---- */
 
+#ifdef __ANDROID__
+static void mc_open(VideoDecoder *d);                /* (MediaCodec, below) */
+#endif
+
 /* Configure(MediaData *format): the track's format from the extractor */
 static void configure(CPU *c, VideoDecoder *d) {
     uint64_t out = d->in_mem[0];                     /* scratch for FindInt32's result */
@@ -130,6 +150,9 @@ static void configure(CPU *c, VideoDecoder *d) {
     vpx_codec_iface_t *iface = d->type == 3 ? vpx_codec_vp9_dx() : d->type == 2 ? vpx_codec_vp8_dx() : NULL;
     if (iface && !d->codec_open) d->codec_open = vpx_codec_dec_init(&d->codec, iface, &cfg, 0) == VPX_CODEC_OK;
     if (!d->codec_open) fprintf(stderr, "movie: no decoder for this video type\n");
+#endif
+#ifdef __ANDROID__
+    if (!d->mc) mc_open(d);
 #endif
     c->x[0] = 0;
 }
@@ -176,6 +199,12 @@ static void stop(CPU *c, VideoDecoder *d) {
 }
 
 static void flush(CPU *c, VideoDecoder *d) {
+#ifdef __ANDROID__
+    pthread_mutex_lock(&d->mc_lock);
+    if (d->mc) AMediaCodec_flush(d->mc);
+    d->mc_pending = d->mc_eos = 0;
+    pthread_mutex_unlock(&d->mc_lock);
+#endif
     pthread_mutex_lock(&d->lock);
     memset(d->in_busy, 0, sizeof d->in_busy);
     memset(d->out_busy, 0, sizeof d->out_busy);
@@ -228,14 +257,146 @@ static int emit(VideoDecoder *d, int64_t time, uint32_t flags, const uint8_t *rg
     return 1;
 }
 
+#ifdef __ANDROID__
+/* ---- Android: MediaCodec ---- */
+#define COLOR_I420 19                /* COLOR_FormatYUV420Planar; other formats: NV12-like (Y, then UV pairs) */
+
+static void mc_open(VideoDecoder *d) {
+    const char *mime = d->type == 3 ? "video/x-vnd.on2.vp9" : d->type == 2 ? "video/x-vnd.on2.vp8" : "video/avc";
+    d->mc = AMediaCodec_createDecoderByType(mime);
+    if (!d->mc) { fprintf(stderr, "movie: no MediaCodec decoder for %s\n", mime); return; }
+    AMediaFormat *f = AMediaFormat_new();
+    AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, mime);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, d->width);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, d->height);
+    media_status_t s = AMediaCodec_configure(d->mc, f, NULL, NULL, 0);
+    AMediaFormat_delete(f);
+    if (s == AMEDIA_OK) s = AMediaCodec_start(d->mc);
+    if (s != AMEDIA_OK) {
+        fprintf(stderr, "movie: MediaCodec %s: error %d\n", mime, (int)s);
+        AMediaCodec_delete(d->mc);
+        d->mc = NULL;
+        return;
+    }
+    char *name = NULL;
+    if (AMediaCodec_getName(d->mc, &name) == AMEDIA_OK && name) {
+        fprintf(stderr, "movie: decoding with %s\n", name);
+        AMediaCodec_releaseName(d->mc, name);
+    }
+    d->mc_picture = malloc((size_t)d->width * d->height * 4);
+}
+
+/* The decoder's output layout: pixel format, bytes per row, rows before the chroma plane */
+static void mc_read_format(VideoDecoder *d) {
+    AMediaFormat *f = AMediaCodec_getOutputFormat(d->mc);
+    if (!f) return;
+    if (!AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, &d->mc_color)) d->mc_color = 0;
+    if (!AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_STRIDE, &d->mc_stride) || d->mc_stride < d->width) d->mc_stride = d->width;
+    if (!AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SLICE_HEIGHT, &d->mc_slice) || d->mc_slice < d->height) d->mc_slice = d->height;
+    AMediaFormat_delete(f);
+    fprintf(stderr, "movie: MediaCodec output: color format %#x, stride %d, slice height %d\n", d->mc_color,
+            d->mc_stride, d->mc_slice);
+}
+
+/* YUV at p (cap bytes) -> d->mc_picture; 0 if the frame doesn't fit the layout we know */
+static int mc_convert(VideoDecoder *d, const uint8_t *p, size_t cap) {
+    if (!d->mc_stride) mc_read_format(d);
+    size_t ys = (size_t)d->mc_stride, luma = ys * (size_t)d->mc_slice;
+    int planar = d->mc_color == COLOR_I420;
+    size_t cs = planar ? ys / 2 : ys, chroma = cs * (size_t)((d->height + 1) / 2);
+    if (!d->mc_picture || luma + (planar ? 2 * chroma : chroma) > cap) return 0;
+    const uint8_t *u = p + luma, *v = planar ? u + cs * (size_t)(d->mc_slice / 2) : u + 1;
+    yuv_to_rgba(d->mc_picture, d->width, d->height, p, (int)ys, u, (int)cs, v, (int)cs, planar ? 1 : 2, d->height >= 720);
+    return 1;
+}
+
+/* Hand the game the frames MediaCodec has finished (waiting up to wait_us for the first one).
+ * Takes frames only while the game has 2 free output slots (a frame and an end-of-stream mark).
+ * Returns whether it queued any. */
+static int mc_drain(VideoDecoder *d, int64_t wait_us) {
+    int produced = 0;
+    pthread_mutex_lock(&d->mc_lock);
+    while (d->mc) {
+        pthread_mutex_lock(&d->lock);
+        int out_free = 0;
+        for (int i = 0; i < NOUT; i++) out_free += !d->out_busy[i];
+        pthread_mutex_unlock(&d->lock);
+        if (out_free < 2) break;
+        AMediaCodecBufferInfo info;
+        ssize_t i = AMediaCodec_dequeueOutputBuffer(d->mc, &info, produced ? 0 : wait_us);
+        if (i == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) { mc_read_format(d); continue; }
+        if (i == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) continue;
+        if (i < 0) break;                            /* nothing finished yet */
+        size_t cap = 0;
+        uint8_t *p = AMediaCodec_getOutputBuffer(d->mc, (size_t)i, &cap);
+        int picture = p && info.size > 0 && info.offset >= 0 && (size_t)info.offset < cap &&
+                      mc_convert(d, p + info.offset, cap - (size_t)info.offset);
+        int eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
+        AMediaCodec_releaseOutputBuffer(d->mc, (size_t)i, false);
+        pthread_mutex_lock(&d->lock);
+        if (info.size > 0) produced |= emit(d, info.presentationTimeUs, 0, picture ? d->mc_picture : NULL);
+        if (eos) produced |= emit(d, info.presentationTimeUs, FLAG_EOS, NULL);
+        pthread_mutex_unlock(&d->lock);
+        if (info.size > 0 && d->mc_pending > 0) d->mc_pending--;
+        if (eos) { d->mc_eos = 0; d->mc_pending = 0; break; }
+    }
+    pthread_mutex_unlock(&d->mc_lock);
+    return produced;
+}
+
+/* One compressed packet (or just the end of the stream) into the decoder */
+static void mc_queue(VideoDecoder *d, const uint8_t *data, int size, int64_t time, int eos) {
+    pthread_mutex_lock(&d->mc_lock);
+    ssize_t i = d->mc ? AMediaCodec_dequeueInputBuffer(d->mc, 100000) : -1;   /* waits 0.1 s at most */
+    if (i >= 0) {
+        size_t cap = 0;
+        uint8_t *p = AMediaCodec_getInputBuffer(d->mc, (size_t)i, &cap);
+        if ((size_t)size > cap) { fprintf(stderr, "movie: packet of %d bytes cut to %zu\n", size, cap); size = (int)cap; }
+        if (p && size > 0) memcpy(p, data, (size_t)size);
+        AMediaCodec_queueInputBuffer(d->mc, (size_t)i, 0, (size_t)size, (uint64_t)time,
+                                     eos ? AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM : 0);
+        if (size > 0) d->mc_pending++;
+        if (eos) d->mc_eos = 1;
+    } else if (d->mc) {
+        fprintf(stderr, "movie: MediaCodec has no free input buffer: packet dropped\n");
+    }
+    pthread_mutex_unlock(&d->mc_lock);
+}
+
+/* Send a packet; returns whether frames came out for the game */
+static int mc_send(VideoDecoder *d, const uint8_t *data, int size, int64_t time, int eos) {
+    int produced = mc_drain(d, 0);                   /* (frees the codec's output space first) */
+    mc_queue(d, data, size, time, eos);
+    /* A hardware decoder holds a few packets before its first frame: once several wait, give
+     * it a moment. At the end of the stream, collect everything (1 s at most); if the decoder
+     * never says "end", we say it, or the game would wait for the movie forever. */
+    produced |= mc_drain(d, d->mc_pending >= 3 ? 30000 : 0);
+    if (eos) {
+        struct timespec t0, t;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        do {
+            produced |= mc_drain(d, 20000);
+            clock_gettime(CLOCK_MONOTONIC, &t);
+        } while (d->mc_eos && (t.tv_sec - t0.tv_sec) * 1000000000LL + (t.tv_nsec - t0.tv_nsec) < 1000000000LL);
+        if (d->mc_eos) {
+            pthread_mutex_lock(&d->lock);
+            produced |= emit(d, time, FLAG_EOS, NULL);
+            pthread_mutex_unlock(&d->lock);
+            d->mc_eos = 0;
+        }
+    }
+    return produced;
+}
+#endif
+
 /* SendInputBufferForDecode(int index, int offset, int size, int64 time, uint32 flags) */
 static void send_input(CPU *c, VideoDecoder *d) {
     int idx = (int)c->x[1], off = (int)c->x[2], size = (int)c->x[3];
     int64_t time = (int64_t)c->x[4];
     uint32_t flags = (uint32_t)c->x[5];
     int produced = 0;
-    static uint8_t *picture;                         /* (one converted frame at a time) */
 #ifdef LAA_HAVE_VPX
+    static uint8_t *picture;                         /* (one converted frame at a time) */
     if (size > 0 && idx >= 0 && idx < NIN && d->codec_open) {
         if (vpx_codec_decode(&d->codec, guest_mem + d->in_mem[idx] + off, (unsigned)size, NULL, 0) != VPX_CODEC_OK)
             fprintf(stderr, "movie: VP9 decode error: %s\n", vpx_codec_error(&d->codec));
@@ -245,12 +406,19 @@ static void send_input(CPU *c, VideoDecoder *d) {
             if ((int)img->d_w != d->width || (int)img->d_h != d->height || img->fmt != VPX_IMG_FMT_I420) continue;
             if (!picture) picture = malloc((size_t)d->width * d->height * 4);
             yuv_to_rgba(picture, d->width, d->height, img->planes[0], img->stride[0], img->planes[1], img->stride[1],
-                        img->planes[2], img->stride[2], img->cs != VPX_CS_BT_601);
+                        img->planes[2], img->stride[2], 1, img->cs != VPX_CS_BT_601);
             pthread_mutex_lock(&d->lock);
             produced |= emit(d, time, 0, picture);
             pthread_mutex_unlock(&d->lock);
         }
         size = 0;                                    /* (frames emitted above) */
+    }
+#endif
+#ifdef __ANDROID__
+    if (d->mc && idx >= 0 && idx < NIN && (size > 0 || (flags & FLAG_EOS))) {
+        produced |= mc_send(d, guest_mem + d->in_mem[idx] + off, size > 0 ? size : 0, time, (flags & FLAG_EOS) != 0);
+        size = 0;                                    /* (frames and the end were emitted by mc_send) */
+        flags &= ~FLAG_EOS;
     }
 #endif
     pthread_mutex_lock(&d->lock);
@@ -300,6 +468,9 @@ static void release_output(CPU *c, VideoDecoder *d) {
     pthread_mutex_lock(&d->lock);
     if (i >= 0 && i < NOUT) d->out_busy[i] = 0;
     pthread_mutex_unlock(&d->lock);
+#ifdef __ANDROID__
+    if (mc_drain(d, 0)) signal_event(c, d, EVENT_OUTPUT);   /* frames that waited for a free slot */
+#endif
     signal_event(c, d, EVENT_INPUT);                 /* there may be room for input again */
     c->x[0] = 0;
 }
@@ -321,6 +492,14 @@ static void destroy(CPU *c, VideoDecoder *d) {
 #ifdef LAA_HAVE_VPX
     if (d->codec_open) vpx_codec_destroy(&d->codec);
     d->codec_open = 0;
+#endif
+#ifdef __ANDROID__
+    pthread_mutex_lock(&d->mc_lock);
+    if (d->mc) { AMediaCodec_stop(d->mc); AMediaCodec_delete(d->mc); }
+    d->mc = NULL;
+    free(d->mc_picture);
+    d->mc_picture = NULL;
+    pthread_mutex_unlock(&d->mc_lock);
 #endif
     for (int i = 0; i < NOUT; i++) { free(d->rgba[i]); d->rgba[i] = NULL; }
     c->x[0] = 0;
@@ -384,6 +563,9 @@ static void decoder_ctor(CPU *c) {
     d->self = c->x[0];
     d->type = type;
     pthread_mutex_init(&d->lock, NULL);
+#ifdef __ANDROID__
+    pthread_mutex_init(&d->mc_lock, NULL);
+#endif
     for (int i = 0; i < NIN; i++) {
         d->in_mem[i] = spare_in_mem[i] ? spare_in_mem[i] : hle_alloc(IN_SIZE);
         spare_in_mem[i] = d->in_mem[i];

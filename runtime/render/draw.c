@@ -476,7 +476,7 @@ static void fill_buffer(uint64_t dst, uint64_t size, uint32_t value) {
 static void dispatch(const Cmd *r, int indirect) {
     const Program *p = &st.program;
     if (!(p->stages >> STAGE_COMPUTE & 1)) { warn_once("dispatch without a compute shader", p->stages); return; }
-    HostShader *cs = render_shader(p->code[STAGE_COMPUTE], p->control[STAGE_COMPUTE], SHADER_COMPUTE);
+    HostShader *cs = render_shader(p->code[STAGE_COMPUTE], p->control[STAGE_COMPUTE], SHADER_COMPUTE, 0);
     VkPipeline pipeline = render_compute_pipeline(cs);
     if (!pipeline) { stats.failed_shader++; return; }
     if (indirect) memcpy(st.groups, gptr(r->a[0]), 12);   /* (as the CPU sees them now) */
@@ -528,9 +528,16 @@ static void draw(const Cmd *r, int indexed) {
         stats.no_shader++;
         return;
     }
-    HostShader *vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX);
-    HostShader *fs = render_shader(p->code[STAGE_FRAGMENT], p->control[STAGE_FRAGMENT], SHADER_FRAGMENT);
+    HostShader *vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX, 0);
+    HostShader *fs = render_shader(p->code[STAGE_FRAGMENT], p->control[STAGE_FRAGMENT], SHADER_FRAGMENT, 0);
     if (!vs->module || !fs->module) { stats.failed_shader++; return; }
+    /* Vulkan wants every input the fragment shader reads to be an output of the vertex shader
+     * (the Adreno driver refuses the pipeline otherwise): a vertex shader variant adds them */
+    uint32_t missing = fs->info.inputs & ~vs->info.outputs;
+    if (missing) {
+        vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX, missing);
+        if (!vs->module) { stats.failed_shader++; return; }
+    }
     stats.other++;                                   /* (until it is done, below) */
     if (r->a[0] == 7 || r->a[0] == 8 || r->a[0] == 9 || r->a[0] == 2) { warn_once("quads/polygons/line loops", r->a[0]); return; }
 
@@ -607,6 +614,7 @@ static void draw(const Cmd *r, int indexed) {
     }
     k.depth_format = st.depth ? st.depth->format : VK_FORMAT_UNDEFINED;
     VkPipeline pipeline = render_pipeline(&k);
+    if (!pipeline) return;
 
     VkCommandBuffer cmd = render_cmd();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

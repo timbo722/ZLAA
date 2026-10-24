@@ -25,7 +25,7 @@
     X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
-    X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceProperties2)
+    X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceExternalBufferProperties)
 
 /* loaded with vkGetDeviceProcAddr(device, ...) */
 #define VK_DEVICE_FUNCTIONS(X) \
@@ -51,7 +51,8 @@
     X(vkCmdBindIndexBuffer) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdSetViewport) X(vkCmdSetScissor) \
     X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetStencilCompareMask) \
     X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias) X(vkCmdSetLineWidth) X(vkCmdUpdateBuffer) \
-    X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments) X(vkGetBufferDeviceAddress)
+    X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments) X(vkGetBufferDeviceAddress) \
+    X(vkGetMemoryFdKHR)
 
 #define VK_DECLARE(name) extern PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DECLARE)
@@ -75,6 +76,7 @@ typedef struct {
     VkCommandPool pool;
     int host_import;                 /* VK_EXT_external_memory_host: GPU access to guest memory */
     VkDeviceSize import_alignment;
+    int fd_export;                   /* otherwise VK_KHR_external_memory_fd: pools become exported memory (buffer.c) */
     VkPhysicalDeviceLimits limits;
 } Vk;
 extern Vk vk;

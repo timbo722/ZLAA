@@ -232,6 +232,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "No window: %s\n", SDL_GetError());
         } else {
 #ifdef __ANDROID__
+            /* SDL's activity sets the screen orientation from the window's size, and a 0x0 window
+             * isn't wider than tall: without this hint it turns the app to portrait */
+            SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
             window = SDL_CreateWindow("LAARecomp", 0, 0, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
 #else
             window = SDL_CreateWindow("LAARecomp", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);

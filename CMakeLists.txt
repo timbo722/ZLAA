@@ -76,10 +76,13 @@ if(LAA_DEPS_ROOT)
     set(CMAKE_BUILD_RPATH ${_dep_lib_dirs})
     add_link_options(-Wl,--disable-new-dtags)     # RPATH, which the libraries' own dependencies also use
 endif()
-# Movies: VP9 decoding with libvpx (optional; without it movies have no picture)
+# Movies: VP9 decoding with libvpx on desktop (optional; without it movies have no picture),
+# Android's own decoders (MediaCodec, in libmediandk) on Android
 find_path(VPX_INCLUDE vpx/vp8dx.h)
 find_library(VPX_LIBRARY vpx)
-if(VPX_INCLUDE AND VPX_LIBRARY)
+if(ANDROID)
+    target_link_libraries(recomp_runtime PRIVATE mediandk)
+elseif(VPX_INCLUDE AND VPX_LIBRARY)
     target_include_directories(recomp_runtime PRIVATE ${VPX_INCLUDE})
     target_link_libraries(recomp_runtime PRIVATE ${VPX_LIBRARY})
     target_compile_definitions(recomp_runtime PRIVATE LAA_HAVE_VPX=1)

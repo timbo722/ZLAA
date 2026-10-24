@@ -154,6 +154,19 @@ void nvn_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const 
 #endif
 }
 
+void nvn_pool_changed(uint64_t storage, uint64_t size, int created) {
+#ifdef LAA_HAVE_SDL
+    if (render_active()) {
+        pthread_mutex_lock(&gpu_lock);
+        if (created) render_pool_created(storage, size);
+        else render_pool_destroyed(storage, size);
+        pthread_mutex_unlock(&gpu_lock);
+    }
+#else
+    (void)storage; (void)size; (void)created;
+#endif
+}
+
 void nvn_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height) {
 #ifdef LAA_HAVE_SDL
     if (render_active()) {

@@ -76,13 +76,14 @@ typedef struct HostShader {
     struct HostShader *next;
     uint64_t code;
     int stage;
+    uint32_t extra_outputs;          /* vertex: generic outputs added for the fragment shader (shader_translate) */
     VkShaderModule module;           /* 0: translation failed (info.error says why) */
     ShaderInfo info;
     uint64_t constants;              /* guest address and size of its c1 data */
     uint32_t constants_size;
     VkPipeline compute;              /* compute shaders: their pipeline (made on first use) */
 } HostShader;
-HostShader *render_shader(uint64_t code, uint64_t control, int stage);
+HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs);
 
 typedef struct { uint8_t src_color, dst_color, src_alpha, dst_alpha, eq_color, eq_alpha; } BlendKey;
 

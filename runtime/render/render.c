@@ -195,6 +195,7 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
                             .pWaitSemaphores = &frame.rendered[index], .swapchainCount = 1,
                             .pSwapchains = &vk.swapchain, .pImageIndices = &index };
     r = vkQueuePresentKHR(vk.queue, &pi);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) resized = 1;
-    else if (r != VK_SUCCESS) vk_fail("vkQueuePresentKHR", r);
+    /* (SUBOPTIMAL is fine: Android says it whenever it rotates for us; resizes come as SDL events) */
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
+    else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkQueuePresentKHR", r);
 }

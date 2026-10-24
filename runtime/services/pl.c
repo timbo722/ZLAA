@@ -5,7 +5,9 @@
  * never ships them. The font for each of the 6 slots comes from, in order:
  *   1. the player's own dump of that system font, in $LAA_FONT_DIR or
  *      ~/.local/share/LAARecomp/fonts (the .bfttf files from the console's system data)
- *   2. a font already installed on the host (DejaVu Sans on Linux, Roboto on Android)
+ *   2. a font already installed on the host: $LAA_HOST_FONT, or DejaVu Sans on Linux, or
+ *      Noto Serif on Android. It must have U+25A1 (white square): the game puts that glyph
+ *      in its cache at startup and crashes if the font lacks it. Roboto doesn't have it.
  *
  * In shared memory each font is an 8-byte header (magic, size XOR key) then the TrueType
  * data. A .bfttf file is the same TrueType data with every 32-bit word byte-swapped and
@@ -30,9 +32,10 @@ static const char *const bfttf_names[FONT_TYPES] = {
     "nintendo_udsg-r_ext_zh-cn_003.bfttf", "nintendo_udjxh-db_zh-tw_003.bfttf",
     "nintendo_udsg-r_ko_003.bfttf", "nintendo_ext_003.bfttf",
 };
-static const char *const host_fonts[] = {
+static const char *host_fonts[] = {
+    NULL,                                        /* $LAA_HOST_FONT */
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/system/fonts/Roboto-Regular.ttf",
+    "/system/fonts/NotoSerif-Regular.ttf",       /* Android: the only Latin font there with U+25A1 */
 };
 
 static KSharedMemory *font_shm;
@@ -77,6 +80,8 @@ static void load_fonts(void) {
     if (env) snprintf(dir, sizeof dir, "%s", env);
     else snprintf(dir, sizeof dir, "%s/.local/share/LAARecomp/fonts", home ? home : ".");
 
+    host_fonts[0] = getenv("LAA_HOST_FONT");
+
     uint32_t at = 0;
     int fallback_type = -1;                      /* slot already holding the host font */
     for (int t = 0; t < FONT_TYPES; t++) {
@@ -94,7 +99,7 @@ static void load_fonts(void) {
                 continue;
             }
             for (size_t k = 0; !buf && k < sizeof host_fonts / sizeof *host_fonts; k++) {
-                buf = read_all(host_fonts[k], &len);
+                buf = host_fonts[k] ? read_all(host_fonts[k], &len) : NULL;
                 if (buf) { snprintf(path, sizeof path, "%s", host_fonts[k]); size = len; }
             }
             if (!buf) { fprintf(stderr, "pl: no font found for slot %d\n", t); continue; }
