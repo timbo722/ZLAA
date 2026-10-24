@@ -1,8 +1,15 @@
 /*
- * host/main.c - desktop (Linux) host program.
+ * host/main.c - the host program: desktop (Linux) and Android.
  *
  *   laa_host <exefs dir> [--romfs DIR] [--headless] [--dump-image FILE]
  *
+ * On Android this is libmain.so: SDL's Java activity loads it and calls main() (SDL renames
+ * it SDL_main). There is no command line there; everything lives in the app's own folder,
+ * /storage/emulated/0/Android/data/<package>/files ("the app folder", adb can push to it):
+ *   exefs/, romfs/   the player's own dump
+ *   env.txt          KEY=VALUE lines, set as environment variables (LAA_* options)
+ *   log.txt          everything the runtime prints (also sent to logcat, tag LAARecomp)
+ *   save/            the game's saves
  * Reserves guest memory, loads the game's modules from the player's own dump, opens a window
  * (SDL3 + Vulkan; --headless: none), then starts the game the way the Switch kernel would.
  * The game runs on its own threads; this thread handles the window's events.
@@ -83,6 +90,83 @@ static void read_input(void) {
 }
 #endif
 
+#ifdef __ANDROID__
+#include <SDL3/SDL_main.h>
+#include <android/log.h>
+#include <pthread.h>
+#include <unistd.h>
+
+static FILE *log_file;
+
+/* Native stdout/stderr go nowhere on Android: they are pointed at a pipe, and this thread
+ * copies each line to logcat and to the app folder's log.txt. */
+static void log_line(const char *line) {
+    __android_log_write(ANDROID_LOG_INFO, "LAARecomp", line);
+    if (log_file) { fprintf(log_file, "%s\n", line); fflush(log_file); }
+}
+
+static void *log_pump(void *arg) {
+    int fd = (int)(intptr_t)arg;
+    char buf[4096];
+    size_t used = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf + used, sizeof buf - 1 - used);
+        if (n <= 0) break;
+        used += (size_t)n;
+        char *start = buf, *nl;
+        while ((nl = memchr(start, '\n', used - (size_t)(start - buf)))) {
+            *nl = 0;
+            log_line(start);
+            start = nl + 1;
+        }
+        used -= (size_t)(start - buf);
+        memmove(buf, start, used);
+        if (used == sizeof buf - 1) { buf[used] = 0; log_line(buf); used = 0; }   /* a very long line */
+    }
+    return NULL;
+}
+
+/* The app folder's paths; logging; env.txt */
+static void android_setup(const char **exefs, const char **romfs) {
+    static char exefs_path[1024], romfs_path[1024];
+    const char *base = SDL_GetAndroidExternalStoragePath();
+    if (!base) base = SDL_GetAndroidInternalStoragePath();
+    char path[1024];
+    snprintf(path, sizeof path, "%s/log.txt", base);
+    log_file = fopen(path, "w");
+    int p[2];
+    if (pipe(p) == 0) {
+        dup2(p[1], 1);
+        dup2(p[1], 2);
+        setvbuf(stdout, NULL, _IOLBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0);
+        pthread_t t;
+        pthread_create(&t, NULL, log_pump, (void *)(intptr_t)p[0]);
+    }
+    snprintf(path, sizeof path, "%s/env.txt", base);
+    FILE *env = fopen(path, "r");
+    char line[8192];
+    while (env && fgets(line, sizeof line, env)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *eq = strchr(line, '=');
+        if (line[0] == '#' || !eq) continue;
+        *eq = 0;
+        setenv(line, eq + 1, 1);
+        printf("env: %s=%s\n", line, eq + 1);
+    }
+    if (env) fclose(env);
+    snprintf(path, sizeof path, "%s/save", base);
+    setenv("LAA_SAVE_DIR", path, 0);
+    snprintf(path, sizeof path, "%s/fonts", base);
+    setenv("LAA_FONT_DIR", path, 0);
+    snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
+    snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
+    *exefs = exefs_path;
+    *romfs = romfs_path;
+    printf("app folder: %s\n", base);
+}
+#endif
+
 #define LOAD_BASE 0x8000000ull   /* must match recomp.py --base (same as yuzu/Ryujinx) */
 
 static int dump_image(const GameImage *img, const char *path) {
@@ -109,6 +193,9 @@ int main(int argc, char **argv) {
         else if (!exefs && argv[k][0] != '-') exefs = argv[k];
         else exefs = NULL, k = argc;   /* anything else: show usage */
     }
+#ifdef __ANDROID__
+    android_setup(&exefs, &romfs);
+#endif
     if (!exefs) {
         fprintf(stderr, "usage: %s <exefs dir> [--romfs DIR] [--headless] [--dump-image FILE]\n", argv[0]);
         return 2;
@@ -144,7 +231,11 @@ int main(int argc, char **argv) {
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
             fprintf(stderr, "No window: %s\n", SDL_GetError());
         } else {
+#ifdef __ANDROID__
+            window = SDL_CreateWindow("LAARecomp", 0, 0, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
+#else
             window = SDL_CreateWindow("LAARecomp", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+#endif
             if (!window) fprintf(stderr, "No window: %s\n", SDL_GetError());
             else if (render_init(window) != 0) { SDL_DestroyWindow(window); window = NULL; }
         }

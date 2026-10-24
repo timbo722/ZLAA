@@ -17,6 +17,9 @@
 #include <unistd.h>
 #if defined(__GLIBC__)
 #include <execinfo.h>
+#else
+#include <dlfcn.h>
+#include <unwind.h>
 #endif
 
 KProcess kproc;
@@ -218,6 +221,15 @@ uint64_t ktls_alloc(void) {
 }
 
 /* ================================================================ crash reports */
+#if !defined(__GLIBC__)
+static _Unwind_Reason_Code unwind_frame(struct _Unwind_Context *ctx, void *arg) {
+    struct { void *pc[48]; int n; } *bt = arg;
+    uintptr_t pc = _Unwind_GetIP(ctx);
+    if (pc && bt->n < 48) bt->pc[bt->n++] = (void *)pc;
+    return bt->n < 48 ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+#endif
+
 static void print_backtrace(void) {
 #if defined(__GLIBC__)
     /* Recompiled functions are named f_<guest address>, so the host backtrace says
@@ -227,6 +239,18 @@ static void print_backtrace(void) {
     fprintf(stderr, "host backtrace (f_XXXX = guest function at 0xXXXX):\n");
     fflush(stderr);
     backtrace_symbols_fd(frames, n, 2);
+#else
+    /* Android (bionic): walk the stack with the unwinder, name each frame with dladdr */
+    struct { void *pc[48]; int n; } bt = { { 0 }, 0 };
+    _Unwind_Backtrace(unwind_frame, &bt);
+    fprintf(stderr, "host backtrace (f_XXXX = guest function at 0xXXXX):\n");
+    for (int i = 0; i < bt.n; i++) {
+        Dl_info info;
+        if (dladdr(bt.pc[i], &info) && info.dli_sname)
+            fprintf(stderr, "  %s+%#lx\n", info.dli_sname, (unsigned long)((char *)bt.pc[i] - (char *)info.dli_saddr));
+        else
+            fprintf(stderr, "  %p\n", bt.pc[i]);
+    }
 #endif
 }
 
