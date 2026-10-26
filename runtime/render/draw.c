@@ -7,6 +7,7 @@
  */
 #include "render_internal.h"
 #include "astc.h"
+#include "png.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -322,6 +323,37 @@ static int begin_rendering(void) {
     return 0;
 }
 
+/* LAA_DUMP_TEXTURE=storage address (+ LAA_DUMP_DRAWS_AT=frame, LAA_DUMP_DIR): when that texture is
+ * sampled in that frame, save our image of it and (1-, 2- and 4-byte formats) its guest memory */
+static void dump_texture_if_asked(HostImage *h) {
+    static uint64_t want = 1, done_frame = ~0ull;
+    static int64_t frame;
+    if (want == 1) {
+        want = getenv("LAA_DUMP_TEXTURE") ? strtoull(getenv("LAA_DUMP_TEXTURE"), NULL, 0) : 0;
+        frame = getenv("LAA_DUMP_DRAWS_AT") ? strtoll(getenv("LAA_DUMP_DRAWS_AT"), NULL, 0) : -1;
+    }
+    if (!want || h->address != want || nvn_frame_count() != (uint64_t)frame || done_frame == (uint64_t)frame) return;
+    done_frame = (uint64_t)frame;
+    const char *dir = getenv("LAA_DUMP_DIR") ? getenv("LAA_DUMP_DIR") : ".";
+    char path[512];
+    snprintf(path, sizeof path, "%s/texture_%llx_gpu.png", dir, (unsigned long long)h->address);
+    render_debug_dump(h, path);
+    TexShape s;
+    tex_shape(&h->desc, &s);
+    if (s.fmt->bw != 1 || s.fmt->bytes == 3 || s.fmt->bytes > 4 || (h->desc.flags & TEXTURE_FLAG_LINEAR)) return;
+    LevelShape l = tex_level(&s, 0);
+    uint8_t *raw = malloc((size_t)s.width * s.height * s.fmt->bytes), *rgba = malloc((size_t)s.width * s.height * 4);
+    uint32_t region[6] = { 0, 0, 0, l.wb, l.hb, 1 };
+    tex_copy_level(gptr(h->address), raw, &s, &l, region, (uint64_t)s.width * s.fmt->bytes, 0, 1);
+    for (size_t i = 0; i < (size_t)s.width * s.height; i++)
+        for (int c = 0; c < 4; c++)                  /* (1 byte: grey; 2 bytes: red and green) */
+            rgba[4 * i + c] = c == 3 ? 255 : s.fmt->bytes == 1 ? raw[i] : c < (int)s.fmt->bytes ? raw[s.fmt->bytes * i + c] : 0;
+    snprintf(path, sizeof path, "%s/texture_%llx_guest.png", dir, (unsigned long long)h->address);
+    if (png_write(path, rgba, s.width, s.height, (int32_t)s.width * 4) == 0) fprintf(stderr, "render: wrote %s\n", path);
+    free(raw);
+    free(rgba);
+}
+
 /* Bind the constant buffers and textures one shader stage uses */
 /* A table of buffers for shaders that reach them through pointers: 16 bytes each, the
  * device address (what LDG uses) and the size */
@@ -388,6 +420,7 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
         if (handle && st.texture_pool.entries && tex_id < st.texture_pool.count) {
             const TexturePoolEntry *e = &((TexturePoolEntry *)st.texture_pool.entries)[tex_id];
             HostImage *h = e->texture ? render_image_ready(e->texture) : NULL;
+            if (h) dump_texture_if_asked(h);
             if (h) ii->imageView = render_image_view(h, &e->view, tx->dim, tx->array);
             if (h && render_tracing())
                 fprintf(stderr, "render:   texture %u: id %u, object %#llx storage %#llx %ux%u nvn format %#x vk %d view set %#x fmt %#x, levels %u layers %u, gpu written %d\n", i, tex_id,
@@ -406,6 +439,9 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
                     d->reduction, d->lod_min, d->lod_max, d->lod_bias, d->max_anisotropy);
         }
         if (!ii->sampler) { SamplerDesc d = { .wrap = { 1, 1, 1 }, .lod_max = 1000 }; ii->sampler = render_sampler(&d); }
+        if (!ii->imageView && render_tracing())
+            fprintf(stderr, "render:   texture %u: NOT FOUND (handle %#llx: id %u of %u, sampler %u; offset %#x)\n", i,
+                    (unsigned long long)handle, tex_id, st.texture_pool.count, smp_id, tx->handle_offset);
         if (!ii->imageView) ii->imageView = render_dummy_view(tx->dim, tx->array);
         writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
             .dstBinding = base + SHADER_TEXTURE_BINDING + i, .descriptorCount = 1,
@@ -556,6 +592,7 @@ static void draw(const Cmd *r, int indexed) {
         if (st.depth) fprintf(stderr, " depth %ux%u", st.depth->width, st.depth->height);
         fprintf(stderr, " vp %g,%g %gx%g sc %d,%d %dx%d", st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3],
                 st.scissor[0], st.scissor[1], st.scissor[2], st.scissor[3]);
+        fprintf(stderr, " logic %u blend %#x", st.color_state.logic_op, st.color_state.blend_enable);
         for (int s = 0; s < 6; s++)
             for (int i = 0; i < 16; i++)
                 if (st.storage[s][i].address)
