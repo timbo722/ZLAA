@@ -10,8 +10,9 @@
  *      in its cache at startup and crashes if the font lacks it. Roboto doesn't have it.
  *
  * In shared memory each font is an 8-byte header (magic, size XOR key) then the TrueType
- * data. A .bfttf file is the same TrueType data with every 32-bit word byte-swapped and
- * XOR'd with a key; we decode it. switchbrew.org/wiki/Shared_Database_services
+ * data. A .bfttf file is an 8-byte header (magic, size) then the TrueType data, every 32-bit
+ * word read big-endian and XOR'd with a key; we decode it. switchbrew.org/wiki/Shared_Database_services
+ * (tools/extract_fonts.py takes the .bfttf files out of your own firmware dump)
  */
 #include "services.h"
 #include "kernel.h"
@@ -60,14 +61,18 @@ static size_t decode_bfttf(uint8_t *buf, size_t len) {
     if (len < 8) return 0;
     memcpy(&w0, buf, 4);
     memcpy(&w1, buf + 4, 4);
+    w0 = __builtin_bswap32(w0);                      /* the file's words are big-endian */
+    w1 = __builtin_bswap32(w1);
     if (w0 != BFTTF_MAGIC) return 0;
     uint32_t key = w0 ^ TTF_MARK;
-    size_t size = __builtin_bswap32(w1 ^ key);
+    size_t size = w1 ^ key;
     if (size > len - 8) return 0;
+    /* XOR each word with the key, in the file's byte order: the TrueType data comes out as is */
+    uint32_t key_bytes = __builtin_bswap32(key);
     for (size_t k = 8; k + 4 <= len; k += 4) {
         uint32_t w;
         memcpy(&w, buf + k, 4);
-        w = __builtin_bswap32(w ^ key);
+        w ^= key_bytes;
         memcpy(buf + k - 8, &w, 4);
     }
     return size;
