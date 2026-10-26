@@ -126,11 +126,12 @@ static void nvnQueueSubmitCommands(CPU *c) {
 /* ---- sync ---- */
 
 static void nvnSyncInitialize(CPU *c) { *(Sync *)gptr(ARG(0)) = (Sync){ 0 }; RET(1); }
-/* (queue, sync, condition, flags): the work before it has already run */
-static void nvnQueueFenceSync(CPU *c) { ((Sync *)gptr(ARG(1)))->signaled = 1; }
-static void nvnQueueWaitSync(CPU *c)  { RET(1); }
+/* (queue, sync, condition, flags): signalled when the GPU has done the work submitted before it */
+static void nvnQueueFenceSync(CPU *c) { nvn_sync_fence(gptr(ARG(1))); }
+static void nvnQueueWaitSync(CPU *c)  { RET(1); }   /* (one GPU queue: its work is in order anyway) */
 /* (sync, timeout ns) -> NVNsyncWaitResult; 0 = already signalled, 2 = timeout expired */
-static void nvnSyncWait(CPU *c) { RET(((Sync *)gptr(ARG(0)))->signaled ? 0 : 2); }
+static void nvnSyncWait(CPU *c) { RET(nvn_sync_wait(gptr(ARG(0)), ARG(1)) == 0 ? 0 : 2); }
+static void nvnQueueFinish(CPU *c) { (void)c; nvn_queue_finish(); }
 
 /* ---- event: a u32 in a memory pool ---- */
 
@@ -188,7 +189,7 @@ const NvnEntry nvn_device_functions[] = {
     NVN_ENTRY(nvnQueueGetError), { "nvnQueueGetTotalCommandMemoryUsed", nvn_zero },
     { "nvnQueueGetTotalControlMemoryUsed", nvn_zero }, { "nvnQueueGetTotalComputeMemoryUsed", nvn_zero },
     { "nvnQueueResetMemoryUsageCounts", nvn_nothing },
-    NVN_ENTRY(nvnQueueSubmitCommands), { "nvnQueueFlush", nvn_nothing }, { "nvnQueueFinish", nvn_nothing },
+    NVN_ENTRY(nvnQueueSubmitCommands), { "nvnQueueFlush", nvn_nothing }, NVN_ENTRY(nvnQueueFinish),
     NVN_ENTRY(nvnQueueFenceSync), NVN_ENTRY(nvnQueueWaitSync),
 
     NVN_ENTRY(nvnSyncInitialize), { "nvnSyncFinalize", nvn_nothing }, { "nvnSyncSetDebugLabel", nvn_nothing },

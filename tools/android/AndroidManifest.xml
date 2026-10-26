@@ -23,6 +23,9 @@
         android:largeHeap="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
+        <!-- lets simpleperf (adb shell simpleperf record, option app) profile the game: no debugger, no root -->
+        <profileable android:shell="true" />
+
         <activity
             android:name="org.libsdl.app.SDLActivity"
             android:exported="true"

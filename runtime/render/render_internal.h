@@ -23,6 +23,7 @@ typedef struct HostImage {
     int layout_ready;                /* moved to VK_IMAGE_LAYOUT_GENERAL */
     int gpu_written;                 /* rendered into: the image is newer than guest memory */
     int astc_decode;                 /* ASTC the GPU can't sample: decoded to RGBA8 on upload */
+    VkFormat view_format;            /* the other format views may have (sRGB <-> UNORM twin), or UNDEFINED */
     uint64_t hash;                   /* of its guest memory when last uploaded (CPU writes, image.c) */
     uint64_t checked;                /* frame of the last hash check */
     uint64_t hot_until;              /* changed recently: check every frame until this frame */
@@ -54,8 +55,15 @@ VkSampler render_sampler(const SamplerDesc *d);
 /* ---- submissions (submit.c) ---- */
 /* The command buffer being recorded; recording starts on first use. */
 VkCommandBuffer render_cmd(void);
-/* Submit what was recorded and wait for the GPU to finish it. */
-void render_flush(void);
+/* Send what was recorded to the GPU without waiting (submit.c's notes). */
+void render_submit(void);
+int render_context(void);                        /* the context being recorded (0 .. NCTX-1) */
+int render_serial_done(uint64_t serial);
+/* LAA_GPU_TIMING_AT: GPU timestamp after a command, with a label to add its time to */
+extern int render_gpu_timing;
+extern int render_passes;
+void render_timestamp(const char *label);
+void render_gpu_timing_frame(uint64_t frame);
 /* A full memory barrier: everything before is done and visible to everything after. */
 void render_barrier(VkCommandBuffer cmd);
 /* Space in the staging buffer (CPU-writable memory the GPU copies from), valid until the
@@ -113,6 +121,6 @@ VkCompareOp render_compare_op(uint32_t nvn_func);
 
 /* ---- command execution (draw.c) ---- */
 void render_end_rendering(void);                 /* close the current vkCmdBeginRendering */
-void render_submission_done(void);               /* the GPU finished everything submitted */
+void render_submission_done(int context);        /* the GPU finished that context's work: reuse it */
 
 #endif

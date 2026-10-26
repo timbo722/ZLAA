@@ -246,7 +246,7 @@ static void nvnWindowGetCrop(CPU *c)             { memcpy(gptr(ARG(1)), WIN->cro
 /* (window or queue+window, sync, int *index) -> NVNwindowAcquireTextureResult (0 = success).
  * Textures are handed out in turn; our presents finish at once, so each is free again. */
 static uint32_t acquire(Window *w, uint64_t sync, uint64_t index_out) {
-    if (sync) ((Sync *)gptr(sync))->signaled = 1;
+    if (sync) *(Sync *)gptr(sync) = (Sync){ .signaled = 1 };   /* (no GPU work to wait for) */
     g_st32(index_out, w->next);
     w->next = (w->next + 1) % (w->num_active ? w->num_active : 1);
     return 0;

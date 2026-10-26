@@ -20,6 +20,14 @@
 /* One GPU: submissions and presents from different game threads take turns. */
 static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* guest memory, in order with the GPU's work when there is a GPU */
+static void gpu_write(uint64_t address, const void *data, uint32_t size) {
+#ifdef LAA_HAVE_SDL
+    if (render_active()) { render_guest_write(address, data, size); return; }
+#endif
+    memcpy(gptr(address), data, size);
+}
+
 static void run_list(uint64_t at, int depth) {
     if (depth > 8) { fprintf(stderr, "nvn: command lists call each other too deeply\n"); return; }
     for (;;) {
@@ -42,20 +50,22 @@ static void run_list(uint64_t at, int depth) {
                 run_list(h, depth + 1);
             }
             break;
+        /* What the game reads back to see how far the GPU got: written when the GPU gets there
+         * (the renderer runs ahead of the CPU), not when the command list is read */
         case CMD_FENCE_SYNC:                             /* a = sync, condition, flags */
-            ((Sync *)gptr(r->a[0]))->signaled = 1;
+            nvn_sync_fence(gptr(r->a[0]));
             break;
         case CMD_SIGNAL_EVENT: {                         /* a = event, mode, location, flags, value */
             uint64_t addr = ((Event *)gptr(r->a[0]))->address;
             uint32_t v = (uint32_t)r->a[4];
-            g_st32(addr, r->a[1] == 1 ? g_ld32(addr) + v : v);
+            gpu_write(addr, &(uint32_t){ r->a[1] == 1 ? g_ld32(addr) + v : v }, 4);
             break;
         }
         case CMD_REPORT_COUNTER:                         /* a = counter type, address: {u64 value, u64 timestamp} */
-            if (r->a[1]) { g_st64(r->a[1], 0); g_st64(r->a[1] + 8, nvn_gpu_ticks()); }
+            if (r->a[1]) gpu_write(r->a[1], (uint64_t[2]){ 0, nvn_gpu_ticks() }, 16);
             break;
         case CMD_REPORT_VALUE:                           /* a = value, address */
-            if (r->a[1]) g_st32(r->a[1], (uint32_t)r->a[0]);
+            if (r->a[1]) gpu_write(r->a[1], &(uint32_t){ (uint32_t)r->a[0] }, 4);
             break;
         /* buffer writes: in order with the GPU's other work, so through the renderer when there is one */
         case CMD_CLEAR_BUFFER:                           /* a = address, size, u32 value */
@@ -86,14 +96,49 @@ static void run_list(uint64_t at, int depth) {
     }
 }
 
+/* LAA_FRAME_STATS: with each "frame N presented", how the last 300 frames went: time between
+ * presents (and how many took over 20 ms, i.e. missed a vsync), time in submissions (recording
+ * plus waiting for the GPU) and in present */
+static int frame_stats = -1;
+static struct { double last, interval, interval_max, submit, present; int slow; } fs;
+static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+
+void nvn_sync_fence(Sync *s) {
+    s->signaled = 1;
+    s->serial = 0;
+#ifdef LAA_HAVE_SDL
+    if (render_active()) s->serial = render_fence_serial();
+#endif
+}
+
+int nvn_sync_wait(const Sync *s, uint64_t timeout_ns) {
+#ifdef LAA_HAVE_SDL
+    if (render_active() && s->serial) return render_wait_serial(s->serial, timeout_ns);
+#endif
+    (void)timeout_ns;
+    return s->signaled ? 0 : -1;
+}
+
+void nvn_queue_finish(void) {
+#ifdef LAA_HAVE_SDL
+    if (render_active()) {
+        pthread_mutex_lock(&gpu_lock);
+        render_flush();
+        pthread_mutex_unlock(&gpu_lock);
+    }
+#endif
+}
+
 void nvn_execute(uint64_t handle) {
     if (nvn_trace > 1) fprintf(stderr, "nvn: submit %#" PRIx64 "\n", handle);
+    double t0 = frame_stats > 0 ? now_ms() : 0;
     pthread_mutex_lock(&gpu_lock);
     run_list(handle, 0);
 #ifdef LAA_HAVE_SDL
     if (render_active()) render_submitted();
 #endif
     pthread_mutex_unlock(&gpu_lock);
+    if (frame_stats > 0) fs.submit += now_ms() - t0;
 }
 
 /* ---- present: wait for the next vblank (60 Hz), or the interval-th one ---- */
@@ -221,8 +266,32 @@ void nvn_present(const Window *w, uint64_t texture) {
             fprintf(stderr, "peek %#" PRIx64 ": %08x %g\n", peek_addr + 4 * i, v, f);
         }
     }
+    if (frame_stats < 0) frame_stats = getenv("LAA_FRAME_STATS") != NULL;
+    if (frame_stats) {
+        double t = now_ms();
+        if (fs.last) {
+            double dt = t - fs.last;
+            fs.interval += dt;
+            if (dt > fs.interval_max) fs.interval_max = dt;
+            if (dt > 20) fs.slow++;
+        }
+        fs.last = t;
+    }
     if (frames == 1 || frames % 300 == 0) {
         fprintf(stderr, "nvn: frame %" PRIu64 " presented\n", frames);
+        if (frame_stats && frames > 1) {
+            double gpu_wait = 0;
+#ifdef LAA_HAVE_SDL
+            gpu_wait = render_gpu_wait_ms;
+            render_gpu_wait_ms = 0;
+#endif
+            fprintf(stderr, "nvn: frames: %.1f ms apart (max %.1f), %d over 20 ms; per frame %.1f ms in submissions, %.1f in present, "
+                    "%.1f waiting for the GPU\n", fs.interval / 300, fs.interval_max, fs.slow, fs.submit / 300, fs.present / 300,
+                    gpu_wait / 300);
+            double last = fs.last;
+            memset(&fs, 0, sizeof fs);
+            fs.last = last;
+        }
 #ifdef LAA_HAVE_SDL
         if (render_active()) render_stats();
 #endif
@@ -230,9 +299,11 @@ void nvn_present(const Window *w, uint64_t texture) {
     screenshot(texture, rect);
 #ifdef LAA_HAVE_SDL
     if (render_active()) {                           /* the display's vsync paces us */
+        double t0 = frame_stats > 0 ? now_ms() : 0;
         pthread_mutex_lock(&gpu_lock);
         render_present(texture, rect);
         pthread_mutex_unlock(&gpu_lock);
+        if (frame_stats > 0) fs.present += now_ms() - t0;
         return;
     }
 #endif

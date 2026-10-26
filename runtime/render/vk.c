@@ -46,9 +46,15 @@ void vk_fail(const char *what, VkResult r) {
     exit(1);
 }
 
-uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
+int vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < vk.memory_props.memoryTypeCount; i++)
-        if ((type_bits & (1u << i)) && (vk.memory_props.memoryTypes[i].propertyFlags & want) == want) return i;
+        if ((type_bits & (1u << i)) && (vk.memory_props.memoryTypes[i].propertyFlags & want) == want) return (int)i;
+    return -1;
+}
+
+uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
+    int i = vk_find_memory_type(type_bits, want);
+    if (i >= 0) return (uint32_t)i;
     fprintf(stderr, "vulkan: no memory type with flags %#x\n", want);
     exit(1);
 }
@@ -144,7 +150,8 @@ static int create_device(void) {
                                              .dynamicRendering = VK_TRUE };
     /* buffer device addresses: shaders read the game's memory through 64-bit pointers (LDG) */
     VkPhysicalDeviceVulkan12Features v12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                                             .pNext = &v13, .bufferDeviceAddress = VK_TRUE };
+                                             .pNext = &v13, .bufferDeviceAddress = VK_TRUE,
+                                             .timelineSemaphore = VK_TRUE };   /* (submit.c) */
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v12 };
     VkPhysicalDeviceFeatures supported;
     vkGetPhysicalDeviceFeatures(vk.gpu, &supported);

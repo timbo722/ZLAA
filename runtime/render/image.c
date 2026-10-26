@@ -77,6 +77,8 @@ VkImageAspectFlags render_aspects(VkFormat f) {
     }
 }
 
+static VkFormat srgb_twin(VkFormat f);           /* (below) */
+
 /* ---- the cache: a hash table from storage address to images (several may share one) ---- */
 
 #define BUCKETS 4096
@@ -108,10 +110,17 @@ static void create(HostImage *h) {
     int compressed = s.fmt->bw > 1 && !h->astc_decode;
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (!compressed) usage |= depth_stencil ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    /* Views in another format only where the format has an sRGB/UNORM twin, and with the list
+     * of the two: an image that may be viewed in any format loses the Adreno's framebuffer
+     * compression (UBWC), which made clears, copies and passes 2-4x slower on the Thor. */
+    h->view_format = srgb_twin(h->format);
+    VkFormat formats[2] = { h->format, h->view_format };
+    VkImageFormatListCreateInfo list = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+                                         .viewFormatCount = 2, .pViewFormats = formats };
     VkImageCreateInfo ci = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = h->view_format ? &list : NULL,
         .flags = (h->layers % 6 == 0 && (d->target == TARGET_CUBE || d->target == TARGET_CUBE_ARRAY)
-                      ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) | VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                      ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) | (h->view_format ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0),
         .imageType = d->target == TARGET_3D ? VK_IMAGE_TYPE_3D : d->target == TARGET_1D || d->target == TARGET_1D_ARRAY
                      ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
         .format = h->format,
@@ -142,6 +151,22 @@ static void create(HostImage *h) {
 }
 
 static int is_astc(VkFormat f) { return f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK; }
+
+/* The same texels read as sRGB or as UNORM: the one other format a view of f may have */
+static VkFormat srgb_twin(VkFormat f) {
+    static const VkFormat pairs[][2] = {
+        { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB }, { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB },
+        { VK_FORMAT_BC1_RGB_UNORM_BLOCK, VK_FORMAT_BC1_RGB_SRGB_BLOCK }, { VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK },
+        { VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC2_SRGB_BLOCK }, { VK_FORMAT_BC3_UNORM_BLOCK, VK_FORMAT_BC3_SRGB_BLOCK },
+        { VK_FORMAT_BC7_UNORM_BLOCK, VK_FORMAT_BC7_SRGB_BLOCK },
+    };
+    for (size_t i = 0; i < sizeof pairs / sizeof *pairs; i++) {
+        if (f == pairs[i][0]) return pairs[i][1];
+        if (f == pairs[i][1]) return pairs[i][0];
+    }
+    if (is_astc(f)) return (f - VK_FORMAT_ASTC_4x4_UNORM_BLOCK) % 2 ? f - 1 : f + 1;   /* (UNORM, SRGB, UNORM, ...) */
+    return VK_FORMAT_UNDEFINED;
+}
 
 /* Can this GPU sample (and, for uncompressed formats, render to) images of this format? */
 static int format_supported(VkFormat f) {
@@ -535,6 +560,12 @@ VkImageView render_image_view(HostImage *h, const TextureView *view, int dim, in
         int decode;
         VkFormat f = render_vk_format(view->format);
         if (f != VK_FORMAT_UNDEFINED) format = h->astc_decode ? host_format(f, &decode) : f;
+    }
+    if (format != h->format && format != h->view_format) {   /* (not seen in this game so far) */
+        static int warned;
+        if (!warned++) fprintf(stderr, "render: a view in format %d of an image in format %d: using the image's own format\n",
+                               format, h->format);
+        format = h->format;
     }
     const uint8_t *sw = view->set & VIEW_SWIZZLE ? view->swizzle : h->desc.swizzle;
     VkImageAspectFlags aspect = h->aspects;

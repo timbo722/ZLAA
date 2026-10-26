@@ -52,7 +52,8 @@
     X(vkCmdSetBlendConstants) X(vkCmdSetStencilReference) X(vkCmdSetStencilCompareMask) \
     X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias) X(vkCmdSetLineWidth) X(vkCmdUpdateBuffer) \
     X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments) X(vkGetBufferDeviceAddress) \
-    X(vkGetMemoryFdKHR)
+    X(vkGetMemoryFdKHR) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults) \
+    X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue)
 
 #define VK_DECLARE(name) extern PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DECLARE)
@@ -84,7 +85,8 @@ extern Vk vk;
 /* vk.c */
 int vk_init(void *sdl_window);               /* 0 on success */
 int vk_create_swapchain(uint32_t width, uint32_t height);
-uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);
+uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);   /* exits if there is none */
+int vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);   /* -1 if there is none */
 const char *vk_result_name(VkResult r);
 #define VK_CHECK(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) vk_fail(#call, r_); } while (0)
 void vk_fail(const char *what, VkResult r);   /* prints and exits */

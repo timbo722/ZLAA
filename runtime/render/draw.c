@@ -16,6 +16,7 @@ static struct {
     RenderTargets rt;                /* as the game set them */
     HostImage *color[8], *depth;     /* their images */
     int rendering;                   /* inside vkCmdBeginRendering */
+    int pass_draws;                  /* draws since it began (LAA_GPU_TIMING_AT labels) */
 
     Program program;
     BlendState blend[8];
@@ -46,34 +47,38 @@ static struct {
     .line_width = 1.0f,
 };
 
+int render_passes;                                   /* begun so far (LAA_GPU_TIMING_AT) */
+
 void render_end_rendering(void) {
     if (!st.rendering) return;
     vkCmdEndRendering(render_cmd());
     st.rendering = 0;
 }
 
-/* ---- descriptor sets: from a pool emptied after each submission ---- */
+/* ---- descriptor sets: from a pool per submission context, emptied when it is reused ---- */
 
-static VkDescriptorPool descriptor_pool;
+static VkDescriptorPool descriptor_pools[4];
 
-void render_submission_done(void) {
-    if (descriptor_pool) vkResetDescriptorPool(vk.device, descriptor_pool, 0);
+void render_submission_done(int context) {
+    if (descriptor_pools[context]) vkResetDescriptorPool(vk.device, descriptor_pools[context], 0);
 }
 
 static VkDescriptorSet new_set(VkDescriptorSetLayout layout) {
-    if (!descriptor_pool) {
+    render_cmd();                                    /* (recording first: starting it empties the pool) */
+    VkDescriptorPool *pool = &descriptor_pools[render_context()];
+    if (!*pool) {
         VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 8 },
                                           { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 8 } };
         VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4096,
                                           .poolSizeCount = 2, .pPoolSizes = sizes };
-        VK_CHECK(vkCreateDescriptorPool(vk.device, &ci, NULL, &descriptor_pool));
+        VK_CHECK(vkCreateDescriptorPool(vk.device, &ci, NULL, pool));
     }
     VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                       .descriptorPool = descriptor_pool, .descriptorSetCount = 1, .pSetLayouts = &layout };
+                                       .descriptorPool = *pool, .descriptorSetCount = 1, .pSetLayouts = &layout };
     VkDescriptorSet set;
     if (vkAllocateDescriptorSets(vk.device, &ai, &set) != VK_SUCCESS) {
-        render_flush();                              /* pool full: finish the work so far, start over */
-        VK_CHECK(vkAllocateDescriptorSets(vk.device, &ai, &set));
+        render_submit();                             /* pool full: send the work so far, go on in the next context */
+        return new_set(layout);
     }
     return set;
 }
@@ -312,6 +317,8 @@ static int begin_rendering(void) {
         .pDepthAttachment = has_d ? &depth : NULL, .pStencilAttachment = has_s ? &depth : NULL };
     vkCmdBeginRendering(cmd, &ri);
     st.rendering = 1;
+    st.pass_draws = 0;
+    render_passes++;
     return 0;
 }
 
@@ -797,6 +804,34 @@ void render_command(const Cmd *r) {
     default:
         break;
     }
+    if (render_gpu_timing) {                       /* LAA_GPU_TIMING_AT: label the command just recorded */
+        char label[48] = "";
+        switch (r->op) {
+        case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS:
+            snprintf(label, sizeof label, "draw fs %#llx%s", (unsigned long long)st.program.code[STAGE_FRAGMENT],
+                     st.pass_draws++ ? "" : " [new pass]");
+            break;
+        case CMD_DISPATCH: case CMD_DISPATCH_INDIRECT:
+            snprintf(label, sizeof label, "dispatch cs %#llx", (unsigned long long)st.program.code[STAGE_COMPUTE]); break;
+        case CMD_COPY_TEXTURE_TO_TEXTURE: {
+            const ImageRef *refs = (const ImageRef *)r->extra;
+            HostImage *s = render_image_find(refs[0].texture), *d = render_image_find(refs[1].texture);
+            snprintf(label, sizeof label, "copy %ux%u fmt %d -> %ux%u fmt %d", s ? s->width : 0, s ? s->height : 0,
+                     s ? s->format : 0, d ? d->width : 0, d ? d->height : 0, d ? d->format : 0);
+            break;
+        }
+        case CMD_CLEAR_COLOR: snprintf(label, sizeof label, "clear color"); break;
+        case CMD_CLEAR_DEPTH_STENCIL: snprintf(label, sizeof label, "clear depth/stencil"); break;
+        case CMD_CLEAR_TEXTURE: snprintf(label, sizeof label, "clear texture"); break;
+        case CMD_COPY_BUFFER_TO_TEXTURE: snprintf(label, sizeof label, "buffer -> texture"); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: snprintf(label, sizeof label, "texture -> buffer"); break;
+        case CMD_COPY_BUFFER_TO_BUFFER: case CMD_UPDATE_UNIFORM_BUFFER: case CMD_CLEAR_BUFFER:
+            snprintf(label, sizeof label, "buffer write"); break;
+        }
+        if (label[0]) render_timestamp(label);
+    }
 }
 
-void render_submitted(void) { render_flush(); }
+void render_submitted(void) { render_submit(); }
+
+void render_guest_write(uint64_t address, const void *data, uint32_t size) { update_buffer(address, data, size); }

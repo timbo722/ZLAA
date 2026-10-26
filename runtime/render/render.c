@@ -132,7 +132,8 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     if (reupload) render_reupload_all();
     render_images_new_frame();
     if (!active || !texture) return;
-    render_flush();                                  /* the frame's rendering is finished */
+    render_submit();                                 /* the frame's rendering (the blit below comes after it) */
+    render_gpu_timing_frame(nvn_frame_count());
     VK_CHECK(vkWaitForFences(vk.device, 1, &frame.done, VK_TRUE, UINT64_MAX));
     if (resized) {
         resized = 0;
@@ -156,6 +157,7 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                     .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+    render_barrier(cmd);                             /* after the game's rendering, submitted before */
     VkImageLayout src_layout = VK_IMAGE_LAYOUT_GENERAL;
     if (!from_gpu) {                                 /* staging buffer -> frame image */
         barrier(cmd, frame.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -183,6 +185,7 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     }
     vkCmdBlitImage(cmd, src, src_layout, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
     barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+    render_barrier(cmd);                             /* the game's next rendering waits for this read */
     VK_CHECK(vkEndCommandBuffer(cmd));
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
