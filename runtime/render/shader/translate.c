@@ -101,19 +101,21 @@ static uint32_t reg_var(T *t, int r) {
     if (!t->reg[r]) t->reg[r] = local_var(t, t->t_u32, cu(t, 0));
     return t->reg[r];
 }
-uint32_t get_u(T *t, int r) { return r == RZ ? cu(t, 0) : load(t, t->t_u32, reg_var(t, r)); }
+/* (r > RZ: the next registers of a vector starting at RZ, e.g. a 64-bit store of RZ: zero too,
+ * and they must not index past reg[]) */
+uint32_t get_u(T *t, int r) { return r >= RZ ? cu(t, 0) : load(t, t->t_u32, reg_var(t, r)); }
 uint32_t get_f(T *t, int r) { return r == RZ ? cf(t, 0.0f) : bitcast(t, t->t_f32, get_u(t, r)); }
 void set_u(T *t, int r, uint32_t v) {
-    if (r == RZ) return;
+    if (r >= RZ) return;
     store(t, reg_var(t, r), v);
     t->known[r] = 0;
 }
 void set_known(T *t, int r, uint32_t value) {
-    if (r == RZ) return;
+    if (r >= RZ) return;
     t->known[r] = 1;
     t->known_value[r] = value;
 }
-void set_f(T *t, int r, uint32_t v) { if (r != RZ) set_u(t, r, bitcast(t, t->t_u32, v)); }
+void set_f(T *t, int r, uint32_t v) { if (r < RZ) set_u(t, r, bitcast(t, t->t_u32, v)); }
 
 uint32_t get_p(T *t, int p) {
     if (p == PT) return cb(t, 1);
@@ -408,9 +410,52 @@ static uint32_t word_ptr(T *t, uint32_t addr, uint32_t byte_offset) {
     return op1(t, SpvOpBitcast, ptr_type(t, SpvStorageClassPhysicalStorageBuffer, t->t_u32), addr);
 }
 
+/* ---- local memory: LDL / STL ----
+ * Each invocation's own scratch memory (spilled registers, small arrays indexed by a register).
+ * It becomes an array of uints in the function; its size is in the shader header (graphics; for
+ * compute, a guess). An index past the end is clamped: SPIR-V has no out-of-bounds accesses. */
+static uint32_t local_word_ptr(T *t, uint32_t byte_addr, uint32_t word) {
+    if (!t->local_mem) {
+        uint32_t bytes = t->stage == SHADER_COMPUTE ? 1024 : t->sph[1] & 0xFFFFFF;
+        t->local_words = bytes < 16 ? 4 : (bytes + 3) / 4;
+        uint32_t arr = spv_type(&t->s, SpvOpTypeArray, (uint32_t[]){ t->t_u32, cu(t, t->local_words) }, 2);
+        t->local_mem = local_var(t, arr, 0);
+    }
+    uint32_t index = op2(t, SpvOpIAdd, t->t_u32, op2(t, SpvOpShiftRightLogical, t->t_u32, byte_addr, cu(t, 2)), cu(t, word));
+    index = ext2(t, t->t_u32, GLSLstd450UMin, index, cu(t, t->local_words - 1));
+    return op2(t, SpvOpAccessChain, ptr_type(t, SpvStorageClassFunction, t->t_u32), t->local_mem, index);
+}
+
+static int emit_local(T *t, const Inst *in) {
+    uint64_t w = in->w;
+    int rd = (int)bits(w, 0, 8), ra = (int)bits(w, 8, 8), size = (int)bits(w, 48, 3);   /* U8 S8 U16 S16 B32 B64 B128 */
+    uint32_t addr = op2(t, SpvOpIAdd, t->t_u32, get_u(t, ra), cu(t, (uint32_t)sext(bits(w, 20, 24), 24)));
+    int words = size == 5 ? 2 : size == 6 || size == 7 ? 4 : 1;
+    if (size < 4) {                                  /* 8/16 bits: part of the word at the address */
+        uint32_t p = local_word_ptr(t, addr, 0);
+        uint32_t shift = op2(t, SpvOpShiftLeftLogical, t->t_u32, op2(t, SpvOpBitwiseAnd, t->t_u32, addr, cu(t, 3)), cu(t, 3));
+        uint32_t count = cu(t, size < 2 ? 8 : 16);
+        if (in->op == OP_LDL)
+            set_u(t, rd, op3(t, size & 1 ? SpvOpBitFieldSExtract : SpvOpBitFieldUExtract, t->t_u32, load(t, t->t_u32, p), shift, count));
+        else {
+            uint32_t v = spv_id(&t->s);
+            spv_op(&t->s, SEC_BODY, SpvOpBitFieldInsert, 6, t->t_u32, v, load(t, t->t_u32, p), get_u(t, rd), shift, count);
+            store(t, p, v);
+        }
+        return 1;
+    }
+    for (int i = 0; i < words; i++) {
+        uint32_t p = local_word_ptr(t, addr, (uint32_t)i);
+        if (in->op == OP_LDL) set_u(t, rd + i, load(t, t->t_u32, p));
+        else store(t, p, get_u(t, rd + i));
+    }
+    return 1;
+}
+
 int emit_memory(T *t, const Inst *in) {
     uint64_t w = in->w;
     int rd = (int)bits(w, 0, 8);
+    if (in->op == OP_LDL || in->op == OP_STL) return emit_local(t, in);
     /* LDG/STG: global memory. LD/ST: "generic" addresses, which in these shaders are global too */
     if (in->op != OP_LDG && in->op != OP_STG && in->op != OP_LD && in->op != OP_ST) return 0;
     int generic = in->op == OP_LD || in->op == OP_ST;
@@ -503,7 +548,8 @@ static int32_t rel_target(uint64_t w, uint32_t pc) { return fix_target((int32_t)
 static int brx_targets(T *t, uint32_t brx_pc, uint64_t brx) {
     int reg = (int)bits(brx, 8, 8), stage = 0;
     uint32_t base = 0, count = 0;
-    for (uint32_t pc = brx_pc; pc >= 8 && pc + 64 > brx_pc && stage < 3; ) {
+    /* (the three may be spread out among other instructions: up to 32 back, following the register) */
+    for (uint32_t pc = brx_pc; pc >= 8 && pc + 256 > brx_pc && stage < 3; ) {
         pc -= 8;
         if (is_sched(pc)) continue;
         uint64_t w;

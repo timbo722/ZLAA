@@ -182,6 +182,20 @@ static void write_split(T *t, uint32_t res, int mask, int rd, int rd2) {
     }
 }
 
+/* TEXS.F16: the components as halves, two to a register: the first two in Rd, the others in Rd2 */
+static void write_split_f16(T *t, uint32_t res, int mask, int rd, int rd2) {
+    uint32_t h[4];
+    int n = 0;
+    for (int c = 0; c < 4; c++)
+        if (mask >> c & 1) h[n++] = op2(t, SpvOpCompositeExtract, t->t_f32, res, (uint32_t)c);
+    for (int pair = 0; pair < 2 && n > 2 * pair; pair++) {
+        int base = pair ? rd2 : rd;
+        uint32_t hi = n > 2 * pair + 1 ? h[2 * pair + 1] : cf(t, 0.0f);
+        if (base != RZ)
+            set_u(t, base, ext1(t, t->t_u32, GLSLstd450PackHalf2x16, op2(t, SpvOpCompositeConstruct, t->t_v2f, h[2 * pair], hi)));
+    }
+}
+
 static const int texs_mask[2][8] = {
     { 0x1, 0x2, 0x4, 0x8, 0x3, 0x9, 0xA, 0xC },
     { 0x7, 0xB, 0xD, 0xE, 0xF, 0x0, 0x0, 0x0 },
@@ -204,7 +218,7 @@ int emit_texture(T *t, const Inst *in) {
     uint32_t tid = bits(w, 36, 13);
     Sample s = { 0 };
     switch (in->op) {
-    case OP_TEXS: {
+    case OP_TEXS: case OP_TEXSF16: {                  /* (F16: the same, results as halves) */
         int target = (int)bits(w, 53, 4), rd2 = (int)bits(w, 28, 8);
         if (rd == RZ && rd2 == RZ) return 1;
         switch (target) {
@@ -238,7 +252,9 @@ int emit_texture(T *t, const Inst *in) {
         default: fail(t, "TEXS target %d", target); return 1;
         }
         uint32_t res = do_sample(t, tid, &s);
-        if (res) write_split(t, res, texs_mask[rd2 == RZ ? 0 : 1][bits(w, 50, 3)], rd, rd2);
+        int mask = texs_mask[rd2 == RZ ? 0 : 1][bits(w, 50, 3)];
+        if (res && in->op == OP_TEXSF16) write_split_f16(t, res, mask, rd, rd2);
+        else if (res) write_split(t, res, mask, rd, rd2);
         return 1;
     }
     case OP_TLDS: {

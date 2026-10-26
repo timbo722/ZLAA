@@ -52,6 +52,7 @@ typedef struct {
     uint32_t cbuf[18];               /* uniform buffer variables */
     int cbuf_decorated;              /* their types got their decorations */
     int uses_pointers;               /* global memory (LDG/STG): 64-bit physical pointers */
+    uint32_t local_mem, local_words; /* local memory (LDL/STL): a uint array of local_words, made on first use */
     int uses_quad, uses_shuffle;     /* SHFL: subgroup quad / shuffle operations */
     uint32_t in_attr[32], out_attr[32];
     uint32_t in_position, in_front_facing, in_vertex_index, in_instance_index, frag_coord, in_lane;
