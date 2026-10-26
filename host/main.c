@@ -38,6 +38,27 @@
 
 /* Keyboard: arrows = left stick, I/J/K/L = right stick, X = A, Z = B, S = X, A = Y, Q = L, W = R,
  * 1 = ZL, 2 = ZR, Enter = +, Backspace = -, T/F/G/H = d-pad. Gamepads map one to one. */
+/* The four face buttons go by the letter printed on them when the controller says (the Thor in
+ * Nintendo layout: its A is on the right but SDL calls it "south", Xbox's A's position), else by
+ * position as on a Switch controller (east = A, south = B, north = X, west = Y). */
+static uint64_t face_bit[4];                         /* SOUTH, EAST, WEST, NORTH -> BTN_* */
+
+static void map_face_buttons(SDL_Gamepad *pad) {
+    static const SDL_GamepadButton pos[4] = { SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST,
+                                              SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH };
+    static const uint64_t by_position[4] = { BTN_B, BTN_A, BTN_Y, BTN_X };
+    static const char *names[] = { "A", "B", "X", "Y" };
+    for (int i = 0; i < 4; i++) {
+        SDL_GamepadButtonLabel l = SDL_GetGamepadButtonLabel(pad, pos[i]);
+        face_bit[i] = l == SDL_GAMEPAD_BUTTON_LABEL_A ? BTN_A : l == SDL_GAMEPAD_BUTTON_LABEL_B ? BTN_B
+                    : l == SDL_GAMEPAD_BUTTON_LABEL_X ? BTN_X : l == SDL_GAMEPAD_BUTTON_LABEL_Y ? BTN_Y : by_position[i];
+    }
+    int letter[4];
+    for (int i = 0; i < 4; i++) letter[i] = face_bit[i] == BTN_A ? 0 : face_bit[i] == BTN_B ? 1 : face_bit[i] == BTN_X ? 2 : 3;
+    printf("input: %s: south = %s, east = %s, west = %s, north = %s\n", SDL_GetGamepadName(pad), names[letter[0]],
+           names[letter[1]], names[letter[2]], names[letter[3]]);
+}
+
 static void read_input(void) {
     static SDL_Gamepad *pad;
     if (!pad) {
@@ -45,6 +66,7 @@ static void read_input(void) {
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
         if (ids && n > 0) pad = SDL_OpenGamepad(ids[0]);
         SDL_free(ids);
+        if (pad) map_face_buttons(pad);
     }
     const bool *k = SDL_GetKeyboardState(NULL);
     InputState s = { 0 };
@@ -64,10 +86,12 @@ static void read_input(void) {
     if (k[SDL_SCANCODE_I]) s.ry += 32767;
     if (k[SDL_SCANCODE_K]) s.ry -= 32767;
     if (pad) {
-        /* SDL names buttons by position (south = the Switch's B, east = A) */
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH)) s.buttons |= face_bit[0];
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)) s.buttons |= face_bit[1];
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_WEST)) s.buttons |= face_bit[2];
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_NORTH)) s.buttons |= face_bit[3];
         static const struct { SDL_GamepadButton b; uint64_t bit; } map[] = {
-            { SDL_GAMEPAD_BUTTON_EAST, BTN_A }, { SDL_GAMEPAD_BUTTON_SOUTH, BTN_B }, { SDL_GAMEPAD_BUTTON_NORTH, BTN_X },
-            { SDL_GAMEPAD_BUTTON_WEST, BTN_Y }, { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L },
+            { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L },
             { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, BTN_R }, { SDL_GAMEPAD_BUTTON_START, BTN_PLUS },
             { SDL_GAMEPAD_BUTTON_BACK, BTN_MINUS }, { SDL_GAMEPAD_BUTTON_DPAD_UP, BTN_UP },
             { SDL_GAMEPAD_BUTTON_DPAD_DOWN, BTN_DOWN }, { SDL_GAMEPAD_BUTTON_DPAD_LEFT, BTN_LEFT },
