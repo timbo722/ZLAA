@@ -758,6 +758,10 @@ static int emit_flow(T *t, const Inst *in, uint32_t next_block) {
     case OP_BRX: {                                        /* jump table: pick the block by address */
         uint32_t addr = op2(t, SpvOpIAdd, t->t_u32, get_u(t, (int)bits(in->w, 8, 8)),
                             cu(t, (uint32_t)((int32_t)in->pc + 8 + sext(bits(in->w, 20, 24), 24))));
+        /* a target on a scheduling word (every 32 bytes) starts at the instruction after it, as
+         * fix_target did for the case values: the same for the address computed at run time */
+        uint32_t on_sched = op2(t, SpvOpIEqual, t->t_bool, op2(t, SpvOpBitwiseAnd, t->t_u32, addr, cu(t, 31)), cu(t, 0));
+        addr = op2(t, SpvOpIAdd, t->t_u32, addr, select_(t, t->t_u32, on_sched, cu(t, 8), cu(t, 0)));
         uint32_t merge = spv_id(&t->s), deflt = spv_id(&t->s);
         uint32_t *w = malloc((2 + 2 * (size_t)in->ntargets) * 4), *labels = malloc((size_t)in->ntargets * 4);
         w[0] = addr;
