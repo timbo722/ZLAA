@@ -307,7 +307,14 @@ static uint32_t read_attribute(T *t, uint32_t addr) {
     if (addr == 0x2fc || addr == 0x2f8) {                 /* vertex id / instance id */
         uint32_t *v = addr == 0x2fc ? &t->in_vertex_index : &t->in_instance_index;
         if (!*v) *v = builtin_var(t, SpvStorageClassInput, t->t_i32, addr == 0x2fc ? SpvBuiltInVertexIndex : SpvBuiltInInstanceIndex);
-        return bitcast(t, t->t_u32, load(t, t->t_i32, *v));
+        uint32_t id = load(t, t->t_i32, *v);
+        if (addr == 0x2f8) {
+            /* Vulkan's instance index counts from the draw's first instance, Maxwell's from 0
+             * (the text renderer draws its glyphs as instances, starting further along) */
+            if (!t->in_base_instance) t->in_base_instance = builtin_var(t, SpvStorageClassInput, t->t_i32, SpvBuiltInBaseInstance);
+            id = op2(t, SpvOpISub, t->t_i32, id, load(t, t->t_i32, t->in_base_instance));
+        }
+        return bitcast(t, t->t_u32, id);
     }
     if (addr == 0x3fc) {                                  /* front facing: -1 (all bits) or 0 */
         if (!t->in_front_facing) t->in_front_facing = builtin_var(t, SpvStorageClassInput, t->t_bool, SpvBuiltInFrontFacing);
@@ -491,7 +498,24 @@ int emit_memory(T *t, const Inst *in) {
 
 /* Fragment shaders return their colors in registers: each written render target takes 4
  * registers (R0-R3, then R4-R7, ...), depth comes after (see shader.h's header notes). */
+uint64_t shader_capture_address;
+
 void emit_outputs_at_exit(T *t) {
+    if (t->stage == SHADER_VERTEX && (t->options & SHADER_DEBUG_CAPTURE) && shader_capture_address) {
+        uint32_t slot = op2(t, SpvOpIAdd, t->t_u32, op2(t, SpvOpShiftLeftLogical, t->t_u32, read_attribute(t, 0x2f8), cu(t, 2)),
+                            op2(t, SpvOpBitwiseAnd, t->t_u32, read_attribute(t, 0x2fc), cu(t, 3)));
+        slot = ext2(t, t->t_u32, GLSLstd450UMin, slot, cu(t, 255));
+        uint32_t base = op2(t, SpvOpCompositeConstruct, t->t_v2u, cu(t, (uint32_t)shader_capture_address),
+                            cu(t, (uint32_t)(shader_capture_address >> 32)));
+        base = add64(t, base, op2(t, SpvOpShiftLeftLogical, t->t_u32, slot, cu(t, 5)), cu(t, 0));
+        t->uses_pointers = 1;
+        for (int k = 0; k < 8; k++) {
+            uint32_t var = k < 4 ? t->out_position : t->out_attr[1];
+            uint32_t v = var ? load(t, t->t_f32, component_ptr(t, SpvStorageClassOutput, var, (uint32_t)(k & 3))) : cf(t, -1.0f);
+            spv_op(&t->s, SEC_BODY, SpvOpStore, 4, word_ptr(t, base, 4u * (uint32_t)k), bitcast(t, t->t_u32, v),
+                   SpvMemoryAccessAlignedMask, 4);
+        }
+    }
     if (t->stage == SHADER_VERTEX && (t->options & SHADER_GL_DEPTH) && t->out_position) {
         uint32_t zp = component_ptr(t, SpvStorageClassOutput, t->out_position, 2);
         uint32_t z = load(t, t->t_f32, zp);
@@ -508,10 +532,14 @@ void emit_outputs_at_exit(T *t) {
             spv_op(&t->s, SEC_DECO, SpvOpDecorate, 3, t->out_color[rt], SpvDecorationLocation, (uint32_t)rt);
             t->info->color_outputs |= 1u << rt;
         }
+        /* (debugging: 0.5, or the input attribute given in the options' upper bits) */
+        int debug_input = (t->options >> 8) - 1;
+        uint32_t debug_vec = t->options & SHADER_DEBUG_CONST && debug_input >= 0 ? load(t, t->t_v4f, attr_var(t, 0, debug_input)) : 0;
         for (int c = 0; c < 4; c++)
             if (omap >> (4 * rt + c) & 1)
                 store(t, component_ptr(t, SpvStorageClassOutput, t->out_color[rt], (uint32_t)c),
-                      t->options & SHADER_DEBUG_CONST ? cf(t, 0.5f) : get_f(t, base + c));
+                      !(t->options & SHADER_DEBUG_CONST) ? get_f(t, base + c)
+                      : debug_vec ? op2(t, SpvOpCompositeExtract, t->t_f32, debug_vec, (uint32_t)c) : cf(t, 0.5f));
         base += 4;
     }
     if (t->sph[19] & 2) {
@@ -722,6 +750,7 @@ static int emit_flow(T *t, const Inst *in, uint32_t next_block) {
         t->terminated = 1;
         return 1;
     case OP_KIL:
+        if (t->options & SHADER_DEBUG_CONST) return 1;     /* (debugging: draw every pixel) */
         spv_op(&t->s, SEC_BODY, SpvOpKill, 0);
         t->info->discards = 1;
         t->terminated = 1;
@@ -919,6 +948,7 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
         if (t->in_lane || t->uses_quad || t->uses_shuffle)
             spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniform);
         if (t->uses_quad) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniformQuad);
+        if (t->in_base_instance) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityDrawParameters);
         if (t->uses_shuffle) spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityGroupNonUniformShuffle);
         if (t->uses_pointers) {                           /* (decided while translating) */
             spv_op(s, SEC_CAPS, SpvOpCapability, 1, SpvCapabilityPhysicalStorageBufferAddresses);

@@ -92,6 +92,7 @@ typedef struct HostShader {
     VkPipeline compute;              /* compute shaders: their pipeline (made on first use) */
 } HostShader;
 HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs);
+void render_capture_print(uint64_t frame);       /* LAA_DEBUG_VS (pipeline.c) */
 
 typedef struct { uint8_t src_color, dst_color, src_alpha, dst_alpha, eq_color, eq_alpha; } BlendKey;
 

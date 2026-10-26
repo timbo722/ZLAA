@@ -17,6 +17,43 @@
 #define SHADER_BUCKETS 1024
 static HostShader *shader_buckets[SHADER_BUCKETS];
 
+/* LAA_DEBUG_VS=address (+ LAA_DUMP_DRAWS_AT=frame): that vertex shader also stores its position and
+ * attribute 1 per vertex in a buffer, printed at that frame (render_capture_print) */
+static VkBuffer capture_buffer;
+static float *capture_ptr;
+
+static void make_capture_buffer(void) {
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 256 * 32,
+                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT };
+    VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &capture_buffer));
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(vk.device, capture_buffer, &req);
+    VkMemoryAllocateFlagsInfo flags = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                                        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
+    VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &flags, .allocationSize = req.size,
+        .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+    VkDeviceMemory mem;
+    VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &mem));
+    VK_CHECK(vkBindBufferMemory(vk.device, capture_buffer, mem, 0));
+    VK_CHECK(vkMapMemory(vk.device, mem, 0, VK_WHOLE_SIZE, 0, (void **)&capture_ptr));
+    for (int i = 0; i < 256 * 8; i++) capture_ptr[i] = -9;
+    VkBufferDeviceAddressInfo ai = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = capture_buffer };
+    shader_capture_address = vkGetBufferDeviceAddress(vk.device, &ai);
+}
+
+void render_capture_print(uint64_t frame) {
+    static int64_t at = -2;
+    if (at == -2) at = getenv("LAA_DUMP_DRAWS_AT") ? strtoll(getenv("LAA_DUMP_DRAWS_AT"), NULL, 0) : -1;
+    if (!capture_ptr || frame != (uint64_t)at) return;
+    render_flush();
+    for (int s = 0; s < 64; s++) {
+        const float *f = capture_ptr + 8 * s;
+        if (f[0] == -9) continue;
+        fprintf(stderr, "render: vs capture instance %d vertex %d: pos %g %g %g %g  attr1 %g %g %g %g\n", s / 4, s % 4,
+                f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+    }
+}
+
 HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs) {
     unsigned b = (unsigned)((code >> 6) * 0x9E3779B1u >> 22) & (SHADER_BUCKETS - 1);
     for (HostShader *s = shader_buckets[b]; s; s = s->next)
@@ -39,7 +76,14 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t e
         const uint8_t *p = gptr(code);
         /* LAA_DEBUG_FS=address: that fragment shader outputs 0.5 (is it drawing at all?) */
         int options = SHADER_GL_DEPTH;
-        if (getenv("LAA_DEBUG_FS") && strtoull(getenv("LAA_DEBUG_FS"), NULL, 0) == code) options |= SHADER_DEBUG_CONST;
+        if (stage == SHADER_VERTEX && getenv("LAA_DEBUG_VS") && strtoull(getenv("LAA_DEBUG_VS"), NULL, 0) == code) {
+            if (!capture_buffer) make_capture_buffer();
+            options |= SHADER_DEBUG_CAPTURE;
+        }
+        if (getenv("LAA_DEBUG_FS") && strtoull(getenv("LAA_DEBUG_FS"), NULL, 0) == code) {
+            options |= SHADER_DEBUG_CONST;
+            if (getenv("LAA_DEBUG_FS_INPUT")) options |= ((int)strtol(getenv("LAA_DEBUG_FS_INPUT"), NULL, 0) + 1) << 8;
+        }
         if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, &s->info) == 0) {
             VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                             .codeSize = s->info.words * 4, .pCode = s->info.spirv };

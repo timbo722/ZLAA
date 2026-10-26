@@ -79,6 +79,12 @@ static void nvnTextureInitialize(CPU *c) {
     t->address = pool_address(b->d.pool, b->d.offset);
     t->storage_size = texture_storage_size(&b->d);
     t->debug_id = next_debug_id++;
+    static int trace = -1;                           /* LAA_TRACE_TEXELS also lists each texture made */
+    if (trace < 0) trace = getenv("LAA_TRACE_TEXELS") != NULL;
+    if (trace)
+        fprintf(stderr, "nvn: texture %#llx: storage %#llx %ux%ux%u format %#x target %u levels %u flags %#x\n",
+                (unsigned long long)ARG(0), (unsigned long long)t->address, b->d.width, b->d.height, b->d.depth,
+                b->d.format, b->d.target, b->d.levels, b->d.flags);
     RET(1);
 }
 #define TEX ((Texture *)gptr(ARG(0)))

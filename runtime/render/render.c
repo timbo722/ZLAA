@@ -134,6 +134,7 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     if (!active || !texture) return;
     render_submit();                                 /* the frame's rendering (the blit below comes after it) */
     render_gpu_timing_frame(nvn_frame_count());
+    render_capture_print(nvn_frame_count());
     VK_CHECK(vkWaitForFences(vk.device, 1, &frame.done, VK_TRUE, UINT64_MAX));
     if (resized) {
         resized = 0;

@@ -340,11 +340,15 @@ static void dump_texture_if_asked(HostImage *h) {
     render_debug_dump(h, path);
     TexShape s;
     tex_shape(&h->desc, &s);
-    if (s.fmt->bw != 1 || s.fmt->bytes == 3 || s.fmt->bytes > 4 || (h->desc.flags & TEXTURE_FLAG_LINEAR)) return;
+    if (s.fmt->bw != 1 || s.fmt->bytes == 3 || s.fmt->bytes > 4) return;
     LevelShape l = tex_level(&s, 0);
     uint8_t *raw = malloc((size_t)s.width * s.height * s.fmt->bytes), *rgba = malloc((size_t)s.width * s.height * 4);
     uint32_t region[6] = { 0, 0, 0, l.wb, l.hb, 1 };
-    tex_copy_level(gptr(h->address), raw, &s, &l, region, (uint64_t)s.width * s.fmt->bytes, 0, 1);
+    if (h->desc.flags & TEXTURE_FLAG_LINEAR)         /* rows `stride` bytes apart */
+        for (uint32_t y = 0; y < s.height; y++)
+            memcpy(raw + (size_t)y * s.width * s.fmt->bytes, gptr(h->address + y * h->desc.stride), (size_t)s.width * s.fmt->bytes);
+    else
+        tex_copy_level(gptr(h->address), raw, &s, &l, region, (uint64_t)s.width * s.fmt->bytes, 0, 1);
     for (size_t i = 0; i < (size_t)s.width * s.height; i++)
         for (int c = 0; c < 4; c++)                  /* (1 byte: grey; 2 bytes: red and green) */
             rgba[4 * i + c] = c == 3 ? 255 : s.fmt->bytes == 1 ? raw[i] : c < (int)s.fmt->bytes ? raw[s.fmt->bytes * i + c] : 0;
@@ -417,6 +421,9 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
         uint32_t index = (tx->handle_offset / 4 - 8) / 2;
         uint64_t handle = index < 32 ? st.texture[stage][index] : 0;
         uint32_t tex_id = (uint32_t)(handle & 0xFFFFF), smp_id = (uint32_t)(handle >> 20 & 0xFFF);
+        if (render_tracing())
+            fprintf(stderr, "render:   binding %u: handle %#llx from index %u (offset %#x)\n", i, (unsigned long long)handle, index,
+                    tx->handle_offset);
         if (handle && st.texture_pool.entries && tex_id < st.texture_pool.count) {
             const TexturePoolEntry *e = &((TexturePoolEntry *)st.texture_pool.entries)[tex_id];
             HostImage *h = e->texture ? render_image_ready(e->texture) : NULL;
@@ -592,7 +599,8 @@ static void draw(const Cmd *r, int indexed) {
         if (st.depth) fprintf(stderr, " depth %ux%u", st.depth->width, st.depth->height);
         fprintf(stderr, " vp %g,%g %gx%g sc %d,%d %dx%d", st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3],
                 st.scissor[0], st.scissor[1], st.scissor[2], st.scissor[3]);
-        fprintf(stderr, " logic %u blend %#x", st.color_state.logic_op, st.color_state.blend_enable);
+        fprintf(stderr, " logic %u blend %#x textures vs %u fs %u", st.color_state.logic_op, st.color_state.blend_enable,
+                vs->info.ntextures, fs->info.ntextures);
         for (int s = 0; s < 6; s++)
             for (int i = 0; i < 16; i++)
                 if (st.storage[s][i].address)

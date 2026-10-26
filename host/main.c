@@ -27,6 +27,7 @@
 #include "hle.h"
 #include "nvn/nvn.h"
 #include "movie/movie.h"
+#include "trace_symbols.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -248,6 +249,7 @@ int main(int argc, char **argv) {
     hle_init(&kproc.image);
     nvn_init();
     movie_init(&kproc.image);             /* the game's graphics calls now come to runtime/nvn */
+    trace_symbols_init(&kproc.image);     /* LAA_TRACE_SYMBOLS (debugging) */
 
     void *window = NULL;
 #ifdef LAA_HAVE_SDL

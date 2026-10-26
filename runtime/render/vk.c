@@ -149,8 +149,11 @@ static int create_device(void) {
     VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                              .dynamicRendering = VK_TRUE };
     /* buffer device addresses: shaders read the game's memory through 64-bit pointers (LDG) */
+    /* draw parameters: shaders see the draw's first instance (Maxwell's instance id counts from it) */
+    VkPhysicalDeviceVulkan11Features v11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+                                             .pNext = &v13, .shaderDrawParameters = VK_TRUE };
     VkPhysicalDeviceVulkan12Features v12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                                             .pNext = &v13, .bufferDeviceAddress = VK_TRUE,
+                                             .pNext = &v11, .bufferDeviceAddress = VK_TRUE,
                                              .timelineSemaphore = VK_TRUE };   /* (submit.c) */
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v12 };
     VkPhysicalDeviceFeatures supported;
