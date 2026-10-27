@@ -53,7 +53,7 @@
     X(vkCmdSetStencilWriteMask) X(vkCmdSetDepthBias) X(vkCmdSetLineWidth) X(vkCmdUpdateBuffer) \
     X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments) X(vkGetBufferDeviceAddress) \
     X(vkGetMemoryFdKHR) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults) \
-    X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue)
+    X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkCmdPushConstants)
 
 #define VK_DECLARE(name) extern PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DECLARE)

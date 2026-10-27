@@ -1,0 +1,50 @@
+; depth_copy.frag.spvasm - write the depth of a depth texture as this fragment's depth:
+; uv = FragCoord.xy * scale + offset (push constants: scale.xy, offset.xy). Used for scaled depth
+; copies on GPUs that can't blit depth formats (the Thor's D24S8).
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %fc %depth
+               OpExecutionMode %main OriginUpperLeft
+               OpExecutionMode %main DepthReplacing
+               OpDecorate %fc BuiltIn FragCoord
+               OpDecorate %depth BuiltIn FragDepth
+               OpDecorate %tex DescriptorSet 0
+               OpDecorate %tex Binding 0
+               OpDecorate %pc_t Block
+               OpMemberDecorate %pc_t 0 Offset 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v2f = OpTypeVector %float 2
+        %v4f = OpTypeVector %float 4
+        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+     %simg   = OpTypeSampledImage %img
+   %p_simg   = OpTypePointer UniformConstant %simg
+        %tex = OpVariable %p_simg UniformConstant
+       %pc_t = OpTypeStruct %v4f
+      %p_pc  = OpTypePointer PushConstant %pc_t
+         %pc = OpVariable %p_pc PushConstant
+   %p_pc_v4  = OpTypePointer PushConstant %v4f
+    %p_in_v4 = OpTypePointer Input %v4f
+   %p_out_f  = OpTypePointer Output %float
+         %fc = OpVariable %p_in_v4 Input
+      %depth = OpVariable %p_out_f Output
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+    %float_0 = OpConstant %float 0
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+       %frag = OpLoad %v4f %fc
+         %xy = OpVectorShuffle %v2f %frag %frag 0 1
+     %pc_ptr = OpAccessChain %p_pc_v4 %pc %uint_0
+         %sv = OpLoad %v4f %pc_ptr
+      %scale = OpVectorShuffle %v2f %sv %sv 0 1
+     %offset = OpVectorShuffle %v2f %sv %sv 2 3
+     %scaled = OpFMul %v2f %xy %scale
+         %uv = OpFAdd %v2f %scaled %offset
+          %s = OpLoad %simg %tex
+          %t = OpImageSampleExplicitLod %v4f %s %uv Lod %float_0
+          %d = OpCompositeExtract %float %t 0
+               OpStore %depth %d
+               OpReturn
+               OpFunctionEnd

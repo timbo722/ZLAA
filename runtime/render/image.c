@@ -119,8 +119,10 @@ static void create(HostImage *h) {
                                          .viewFormatCount = 2, .pViewFormats = formats };
     VkImageCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = h->view_format ? &list : NULL,
-        .flags = (h->layers % 6 == 0 && (d->target == TARGET_CUBE || d->target == TARGET_CUBE_ARRAY)
-                      ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0) | (h->view_format ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0),
+        /* any square 2D image with whole sets of 6 layers: shaders may sample a 2D array as a cube */
+        .flags = (h->layers % 6 == 0 && h->width == h->height && d->target != TARGET_3D && d->target != TARGET_1D &&
+                  d->target != TARGET_1D_ARRAY ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0)
+                 | (h->view_format ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0),
         .imageType = d->target == TARGET_3D ? VK_IMAGE_TYPE_3D : d->target == TARGET_1D || d->target == TARGET_1D_ARRAY
                      ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
         .format = h->format,
@@ -301,7 +303,10 @@ static int debug_dump_hdr(HostImage *h, const char *path) {
     if (!out) return -1;
     double sum = 0;
     float lo = 1e30f, hi = 0;
+    uint64_t special = 0, first = 0;                 /* inf/NaN texels (exponent 31 in any channel) */
     for (uint64_t i = 0; i < n; i++) {
+        if ((raw[i] >> 6 & 31) == 31 || (raw[i] >> 17 & 31) == 31 || (raw[i] >> 27 & 31) == 31)
+            if (!special++) first = i;
         float c[3] = { small_float(raw[i] & 0x7FF, 6), small_float(raw[i] >> 11 & 0x7FF, 6), small_float(raw[i] >> 22, 5) };
         float l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
         sum += l;
@@ -311,6 +316,9 @@ static int debug_dump_hdr(HostImage *h, const char *path) {
         out[i * 4 + 3] = 255;
     }
     fprintf(stderr, "render: %s: luminance min %g average %g max %g\n", path, lo, sum / (double)n, hi);
+    if (special)
+        fprintf(stderr, "render: %s: %llu inf/NaN texels, the first at (%llu, %llu)\n", path, (unsigned long long)special,
+                (unsigned long long)(first % h->width), (unsigned long long)(first / h->width));
     png_write(path, out + (n - h->width) * 4, h->width, h->height, -(int32_t)h->width * 4);
     free(out);
     return 0;
@@ -542,7 +550,7 @@ VkImageView render_image_view(HostImage *h, const TextureView *view, int dim, in
         if (v->dim == dim && v->array == array && memcmp(&v->view, view, sizeof *view) == 0) return v->handle;
     int is3d = h->desc.target == TARGET_3D;
     if ((dim == TEXDIM_3D) != is3d) return VK_NULL_HANDLE;             /* the shader wants another kind */
-    if (dim == TEXDIM_CUBE && h->layers < 6) return VK_NULL_HANDLE;
+    if (dim == TEXDIM_CUBE && (h->layers < 6 || h->width != h->height)) return VK_NULL_HANDLE;
     uint32_t base_level = view->set & VIEW_LEVELS ? view->base_level : 0;
     uint32_t levels = view->set & VIEW_LEVELS && view->num_levels ? view->num_levels : h->levels - base_level;
     uint32_t base_layer = view->set & VIEW_LAYERS ? view->min_layer : 0;

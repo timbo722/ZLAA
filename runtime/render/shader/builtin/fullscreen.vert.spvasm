@@ -1,0 +1,35 @@
+; fullscreen.vert.spvasm (tools/embed_spirv.py builds builtin_shaders.h) - one triangle covering the viewport: vertex i at
+; x = (i & 1) * 4 - 1, y = (i >> 1) * 4 - 1. Used by depth_copy (draw.c).
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %vid %pos
+               OpDecorate %vid BuiltIn VertexIndex
+               OpDecorate %pos BuiltIn Position
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+      %float = OpTypeFloat 32
+      %v4f   = OpTypeVector %float 4
+    %p_in_i  = OpTypePointer Input %int
+   %p_out_v4 = OpTypePointer Output %v4f
+        %vid = OpVariable %p_in_i Input
+        %pos = OpVariable %p_out_v4 Output
+      %int_1 = OpConstant %int 1
+      %int_4 = OpConstant %int 4
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %i = OpLoad %int %vid
+         %lo = OpBitwiseAnd %int %i %int_1
+         %hi = OpShiftRightArithmetic %int %i %int_1
+         %x4 = OpIMul %int %lo %int_4
+         %y4 = OpIMul %int %hi %int_4
+         %xi = OpISub %int %x4 %int_1
+         %yi = OpISub %int %y4 %int_1
+          %x = OpConvertSToF %float %xi
+          %y = OpConvertSToF %float %yi
+          %p = OpCompositeConstruct %v4f %x %y %float_0 %float_1
+               OpStore %pos %p
+               OpReturn
+               OpFunctionEnd

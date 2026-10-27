@@ -66,7 +66,9 @@ static inline double fmulx_d(double a, double b) {
         return u2d(((d2u(a) ^ d2u(b)) & 0x8000000000000000ull) | 0x4000000000000000ull);
     return a * b;
 }
-/* FRECPS: 2 - a*b (fused);  FRSQRTS: (3 - a*b) / 2 (fused). infinity x zero gives 2.0 / 1.5. */
+/* FRECPS: 2 - a*b (fused);  FRSQRTS: (3 - a*b) / 2 (fused). infinity x zero gives 2.0 / 1.5.
+ * FRSQRTS rounds once, after the halving: when 3 - a*b overflows but its half doesn't, compute
+ * 1.5 - (a/2)*b instead (a is then large, so halving it is exact). */
 static inline float frecps_s(float a, float b) {
     if (!isnan_s(a) && !isnan_s(b) && ((isinf_s(a) && b == 0) || (a == 0 && isinf_s(b)))) return 2.0f;
     return __builtin_fmaf(-a, b, 2.0f);
@@ -77,11 +79,15 @@ static inline double frecps_d(double a, double b) {
 }
 static inline float frsqrts_s(float a, float b) {
     if (!isnan_s(a) && !isnan_s(b) && ((isinf_s(a) && b == 0) || (a == 0 && isinf_s(b)))) return 1.5f;
-    return __builtin_fmaf(-a, b, 3.0f) * 0.5f;
+    float r = __builtin_fmaf(-a, b, 3.0f) * 0.5f;
+    if (isinf_s(r) && !isinf_s(a) && !isinf_s(b)) r = __builtin_fmaf(-(a * 0.5f), b, 1.5f);
+    return r;
 }
 static inline double frsqrts_d(double a, double b) {
     if (!isnan_d(a) && !isnan_d(b) && ((isinf_d(a) && b == 0) || (a == 0 && isinf_d(b)))) return 1.5;
-    return __builtin_fma(-a, b, 3.0) * 0.5;
+    double r = __builtin_fma(-a, b, 3.0) * 0.5;
+    if (isinf_d(r) && !isinf_d(a) && !isinf_d(b)) r = __builtin_fma(-(a * 0.5), b, 1.5);
+    return r;
 }
 
 /* ---- FRECPE / FRSQRTE / URECPE / URSQRTE: the Arm manual's estimate tables ---- */

@@ -183,6 +183,18 @@ static int create_device(void) {
     if (getenv("LAA_VK_INFO"))
         fprintf(stderr, "vulkan: subgroup size %u, operations %#x, stages %#x, quad in all stages %u\n", subgroup.subgroupSize,
                 subgroup.supportedOperations, subgroup.supportedStages, subgroup.quadOperationsInAllStages);
+    if (getenv("LAA_VK_INFO")) {                     /* what the GPU can do with depth images */
+        static const VkFormat depth[] = { VK_FORMAT_D16_UNORM, VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT,
+                                          VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT };
+        for (size_t i = 0; i < sizeof depth / sizeof *depth; i++) {
+            VkFormatProperties fp;
+            vkGetPhysicalDeviceFormatProperties(vk.gpu, depth[i], &fp);
+            VkFormatFeatureFlags f = fp.optimalTilingFeatures;
+            fprintf(stderr, "vulkan: depth format %d: attachment %d sampled %d blit src %d blit dst %d\n", depth[i],
+                    !!(f & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT), !!(f & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+                    !!(f & VK_FORMAT_FEATURE_BLIT_SRC_BIT), !!(f & VK_FORMAT_FEATURE_BLIT_DST_BIT));
+        }
+    }
     vk.limits = props.properties.limits;
     vk.import_alignment = vk.host_import ? host.minImportedHostPointerAlignment : 0;
     if (vk.fd_export) fprintf(stderr, "vulkan: memory pools are exported GPU memory mapped at their guest addresses\n");
