@@ -16,6 +16,7 @@
  */
 #include "services.h"
 #include "kernel.h"
+#include "nvn/nvn.h"
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -52,6 +53,7 @@ static void *vsync_thread(void *arg) {
         if (next.tv_nsec >= 1000000000) { next.tv_sec++; next.tv_nsec -= 1000000000; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
         kevent_signal(vsync_event);
+        if (nvn_sync_tracing()) fprintf(stderr, "sync: %.2f vsync\n", next.tv_sec * 1e3 + next.tv_nsec / 1e6);
     }
     return NULL;
 }

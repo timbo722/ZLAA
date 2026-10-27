@@ -11,6 +11,7 @@
 #include "render/shader/shader.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* ================================================================ shaders */
 
@@ -54,10 +55,16 @@ void render_capture_print(uint64_t frame) {
     }
 }
 
+/* time spent creating shaders and pipelines (render_stats prints it: each one stalls a frame) */
+double render_compile_ms;
+unsigned render_compiles;
+static double compile_clock(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+
 HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs) {
     unsigned b = (unsigned)((code >> 6) * 0x9E3779B1u >> 22) & (SHADER_BUCKETS - 1);
     for (HostShader *s = shader_buckets[b]; s; s = s->next)
         if (s->code == code && s->stage == stage && s->extra_outputs == extra_outputs) return s;
+    double t0 = compile_clock();
     HostShader *s = calloc(1, sizeof *s);
     s->code = code;
     s->stage = stage;
@@ -75,7 +82,7 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t e
         if (c_off > avail || c_size > avail - c_off) c_off = c_size = 0;
         const uint8_t *p = gptr(code);
         /* LAA_DEBUG_FS=address: that fragment shader outputs 0.5 (is it drawing at all?) */
-        int options = SHADER_GL_DEPTH;
+        int options = nvn_depth_mode() == 0 ? SHADER_GL_DEPTH : 0;   /* (z -w..w -> 0..w, unless already 0..w) */
         if (stage == SHADER_VERTEX && getenv("LAA_DEBUG_VS") && strtoull(getenv("LAA_DEBUG_VS"), NULL, 0) == code) {
             if (!capture_buffer) make_capture_buffer();
             options |= SHADER_DEBUG_CAPTURE;
@@ -94,6 +101,7 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t e
     }
     if (!s->module) fprintf(stderr, "render: shader %#llx (stage %d) not translated: %s\n",
                             (unsigned long long)code, stage, s->info.error);
+    render_compile_ms += compile_clock() - t0;
     return s;
 }
 
@@ -145,7 +153,10 @@ VkPipeline render_compute_pipeline(HostShader *cs) {
         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                    .module = cs->module, .pName = "main" },
         .layout = render_compute_layout() };
-    VK_CHECK(vkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &cs->compute));
+    double t0 = compile_clock();
+    VK_CHECK(vkCreateComputePipelines(vk.device, vk.pipeline_cache, 1, &ci, NULL, &cs->compute));
+    render_compile_ms += compile_clock() - t0;
+    render_compiles++;
     return cs->compute;
 }
 
@@ -344,7 +355,7 @@ static VkPipeline create(const PipelineKey *k) {
                     attrs[i].location, attrs[i].format, k->attr[attrs[i].location].format, attrs[i].binding,
                     attrs[i].offset, k->stream[attrs[i].binding].stride, k->color_format[0]);
     VkPipeline p;
-    VkResult r = vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+    VkResult r = vkCreateGraphicsPipelines(vk.device, vk.pipeline_cache, 1, &ci, NULL, &p);
     if (r != VK_SUCCESS) {           /* the driver refused it: its draws are skipped (counted as "other") */
         fprintf(stderr, "render: pipeline vs %#llx fs %#llx: vkCreateGraphicsPipelines %s\n",
                 (unsigned long long)k->vs_code, (unsigned long long)k->fs_code, vk_result_name(r));
@@ -359,7 +370,10 @@ VkPipeline render_pipeline(const PipelineKey *k) {
         if (memcmp(&p->key, k, sizeof *k) == 0) return p->pipeline;
     Pipeline *p = calloc(1, sizeof *p);
     p->key = *k;
+    double t0 = compile_clock();
     p->pipeline = create(k);
+    render_compile_ms += compile_clock() - t0;
+    render_compiles++;
     p->next = pipeline_buckets[b];
     pipeline_buckets[b] = p;
     return p->pipeline;

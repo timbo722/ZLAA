@@ -229,7 +229,7 @@ HostImage *render_image(const Texture *t) {
  *     After GPU_QUIET frames without, its guest memory is hashed again as the new baseline:
  *     some images are cleared by the GPU once, then filled by the CPU (glyph caches). */
 #define CHECK_EVERY 30
-#define CHECK_BUDGET (24u << 20)                     /* bytes per frame, for images that aren't hot */
+#define CHECK_BUDGET (6u << 20)                      /* bytes per frame, for images that aren't hot (spread out) */
 #define HOT_FRAMES 600
 #define GPU_QUIET 60
 static uint64_t frame_no = 1, budget = CHECK_BUDGET;
@@ -240,16 +240,27 @@ static uint64_t storage_bytes(const HostImage *h) {
     return h->desc.flags & TEXTURE_FLAG_LINEAR ? (uint64_t)h->desc.stride * h->height : texture_storage_size(&h->desc);
 }
 
+/* 4 independent lanes: the CPU works on all four at once (one chain was ~4 GB/s on the Thor, and
+ * a frame that rechecked 24 MB of textures missed its vsync) */
 static uint64_t guest_hash(const HostImage *h) {
-    uint64_t n = storage_bytes(h) / 8, v = 0x9E3779B97F4A7C15ull;
-    const uint64_t *p = gptr(h->address);
-    for (uint64_t i = 0; i < n; i++) {                /* 4 independent lanes would be faster; this is ~5 GB/s */
-        uint64_t w;
-        memcpy(&w, p + i, 8);
-        v = (v ^ w) * 0x100000001B3ull;
-        v ^= v >> 29;
+    uint64_t n = storage_bytes(h) / 8, v[4] = { 0x9E3779B97F4A7C15ull, 1, 2, 3 };
+    const uint8_t *p = gptr(h->address);
+    uint64_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint64_t w[4];
+        memcpy(w, p + i * 8, 32);
+        for (int k = 0; k < 4; k++) {
+            v[k] = (v[k] ^ w[k]) * 0x100000001B3ull;
+            v[k] ^= v[k] >> 29;
+        }
     }
-    return v;
+    for (; i < n; i++) {
+        uint64_t w;
+        memcpy(&w, p + i * 8, 8);
+        v[0] = (v[0] ^ w) * 0x100000001B3ull;
+        v[0] ^= v[0] >> 29;
+    }
+    return v[0] ^ (v[1] * 3) ^ (v[2] * 5) ^ (v[3] * 7);
 }
 
 void render_image_gpu_wrote(HostImage *h) {
@@ -324,7 +335,48 @@ static int debug_dump_hdr(HostImage *h, const char *path) {
     return 0;
 }
 
+/* Depth images: the depth aspect's values, printed as a range and saved as grey from the
+ * nearest (black) to the farthest (white) value in the image */
+static void debug_dump_depth(HostImage *h, const char *path) {
+    int bytes = h->format == VK_FORMAT_D16_UNORM ? 2 : 4;
+    int is_float = h->format == VK_FORMAT_D32_SFLOAT || h->format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    uint64_t n = (uint64_t)h->width * h->height, offset;
+    uint8_t *raw = render_staging(n * bytes, &offset);
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    render_image_init_layout(cmd, h);
+    VkBufferImageCopy copy = { .bufferOffset = offset, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
+                               .imageExtent = { h->width, h->height, 1 } };
+    vkCmdCopyImageToBuffer(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, render_staging_buffer(), 1, &copy);
+    render_flush();
+    float *d = malloc(n * sizeof *d);
+    uint8_t *out = malloc(n * 4);
+    if (!d || !out) { free(d); free(out); return; }
+    float lo = 1e30f, hi = -1e30f;
+    double sum = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        uint32_t v = 0;
+        memcpy(&v, raw + i * bytes, bytes);
+        if (is_float) memcpy(&d[i], &v, 4);
+        else d[i] = bytes == 2 ? v / 65535.0f : (v & 0xFFFFFF) / 16777215.0f;
+        if (d[i] < lo) lo = d[i];
+        if (d[i] > hi) hi = d[i];
+        sum += d[i];
+    }
+    for (uint64_t i = 0; i < n; i++) {
+        uint8_t g = (uint8_t)(hi > lo ? 255.0f * (d[i] - lo) / (hi - lo) : 0);
+        out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = g;
+        out[i * 4 + 3] = 255;
+    }
+    fprintf(stderr, "render: %s: depth min %.6f average %.6f max %.6f\n", path, lo, sum / (double)n, hi);
+    png_write(path, out + (n - h->width) * 4, h->width, h->height, -(int32_t)h->width * 4);
+    free(d);
+    free(out);
+}
+
 void render_debug_dump(HostImage *h, const char *path) {
+    render_image_flush_clear(h);
+    if (h->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) { debug_dump_depth(h, path); return; }
     if (!(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) return;
     if (h->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) { debug_dump_hdr(h, path); return; }
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
@@ -383,6 +435,7 @@ int render_tracing(void) {
 /* Copy the texture's guest memory into its image (all levels and layers), through the staging
  * buffer: block-linear -> rows on the CPU (layout.c), then vkCmdCopyBufferToImage. */
 void render_upload(HostImage *h) {
+    h->pending_clear = 0;                            /* (the whole image is replaced: newer than a clear) */
     h->needs_upload = 0;
     h->gpu_written = 0;                              /* (now the same as guest memory) */
     h->hash_valid = 1;
@@ -444,6 +497,7 @@ void render_upload(HostImage *h) {
 void render_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height) {
     HostImage *h = render_image(gptr(texture));
     if (!h || h->width != width || h->height != height) return;
+    h->pending_clear = 0;                            /* (the whole image is replaced) */
     uint64_t size = (uint64_t)width * height * 4, offset;
     uint8_t *dst = render_staging(size, &offset);
     memcpy(dst, rgba, size);
@@ -470,6 +524,7 @@ void render_texels_written(uint64_t texture, uint32_t level, uint32_t layer, con
         if (level >= s.levels || layer >= s.layers || (h->desc.flags & TEXTURE_FLAG_LINEAR)) continue;
         LevelShape l = tex_level(&s, level);
         if (region[0] >= l.wb || region[1] >= l.hb || region[2] >= l.depth) continue;
+        render_image_flush_clear(h);                 /* (a clear before these texels comes first) */
         uint32_t r[6] = { region[0], region[1], region[2], region[3], region[4], region[5] };
         if (r[3] > l.wb - r[0]) r[3] = l.wb - r[0];
         if (r[4] > l.hb - r[1]) r[4] = l.hb - r[1];
@@ -509,11 +564,53 @@ HostImage *render_image_find(uint64_t texture) {
     return NULL;
 }
 
-HostImage *render_image_ready(uint64_t texture) {
+HostImage *render_image_target(uint64_t texture) {
     HostImage *h = texture ? render_image(gptr(texture)) : NULL;
     if (h) check_cpu_writes(h);
     if (h && h->needs_upload) render_upload(h);
     return h;
+}
+
+HostImage *render_image_ready(uint64_t texture) {
+    HostImage *h = render_image_target(texture);
+    if (h) render_image_flush_clear(h);
+    return h;
+}
+
+/* Clears wait for the image's next use. If that is a render pass covering all of it, the pass
+ * starts with loadOp CLEAR, which costs almost nothing on a tiler (the Adreno): a separate clear
+ * writes the whole image to memory and the pass then reads it all back in. Any other use clears
+ * it first (render_image_ready). Images with one level and layer only, like render targets. */
+void render_image_clear(HostImage *h, const VkClearValue *value, VkImageAspectFlags aspects) {
+    static int now = -1;                             /* LAA_NO_DEFERRED_CLEAR=1: clear right away */
+    if (now < 0) now = getenv("LAA_NO_DEFERRED_CLEAR") != NULL;
+    if (h->levels == 1 && h->layers == 1 && h->depth == 1 && !now) {
+        if (aspects & VK_IMAGE_ASPECT_COLOR_BIT) h->clear_value.color = value->color;
+        if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) h->clear_value.depthStencil.depth = value->depthStencil.depth;
+        if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) h->clear_value.depthStencil.stencil = value->depthStencil.stencil;
+        h->pending_clear |= aspects;
+        render_image_gpu_wrote(h);
+        return;
+    }
+    render_image_flush_clear(h);                     /* (an older one first) */
+    h->clear_value = *value;
+    h->pending_clear = aspects;
+    render_image_flush_clear(h);                     /* (every level and layer: now) */
+}
+
+void render_image_flush_clear(HostImage *h) {
+    if (!h->pending_clear) return;
+    render_end_rendering();
+    VkCommandBuffer cmd = render_cmd();
+    render_image_init_layout(cmd, h);
+    VkImageSubresourceRange range = { h->pending_clear, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
+    if (h->pending_clear & VK_IMAGE_ASPECT_COLOR_BIT)
+        vkCmdClearColorImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, &h->clear_value.color, 1, &range);
+    else
+        vkCmdClearDepthStencilImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, &h->clear_value.depthStencil, 1, &range);
+    h->pending_clear = 0;
+    render_barrier(cmd);
+    render_image_gpu_wrote(h);
 }
 
 /* Images start UNDEFINED; move them to GENERAL once, before their first use. */

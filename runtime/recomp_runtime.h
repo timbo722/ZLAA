@@ -70,7 +70,8 @@ extern const uint64_t recomp_module_count;
  * at addr (high-level emulation, runtime/hle.c), or NULL to run the recompiled one. */
 extern RecompFunc (*recomp_override)(uint64_t addr);
 void recomp_call_addr(CPU *c, uint64_t addr);       /* indirect call (BLR, tail calls) */
-RecompFunc recomp_lookup(uint64_t addr);
+RecompFunc recomp_lookup(uint64_t addr);             /* the recompiled function at addr (not replacements) */
+void recomp_set_target(uint64_t addr, RecompFunc fn); /* indirect calls to addr run fn from now on */
 void recomp_unimplemented(CPU *c, uint64_t pc, uint32_t insn);
 void recomp_bad_jump(CPU *c, uint64_t pc, uint64_t target);
 void recomp_svc(CPU *c, uint64_t pc, uint32_t imm);

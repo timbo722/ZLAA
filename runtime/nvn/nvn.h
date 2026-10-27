@@ -345,6 +345,8 @@ typedef struct {
 void nvn_execute(uint64_t handle);  /* exec.c: run a finalized command list */
 void nvn_present(const Window *w, uint64_t texture);
 uint64_t nvn_frame_count(void);      /* frames presented so far */
+uint32_t nvn_depth_mode(void);
+int nvn_sync_tracing(void);          /* inside the LAA_TRACE_SYNC window */       /* nvnDeviceSetDepthMode: 0 near is -w (OpenGL), 1 near is 0 */
 /* Put RGBA8 pixels (rows of width * 4 bytes) into a texture's level 0, e.g. a movie frame */
 void nvn_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
 void nvn_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const uint32_t region[6]);  /* CPU wrote texels */

@@ -261,11 +261,34 @@ static void dump_cpu(const CPU *c) {
             c->sp, c->n, c->z, c->c, c->v, c->tpidr_el0, c->tpidrro_el0);
 }
 
+/* A guest C++ object's class, from its vtable (Itanium ABI: vtable[-1] = typeinfo, whose
+ * second word is the mangled name). NULL if p doesn't look like one. Reads only mapped memory. */
+static const char *guest_class_name(uint64_t p) {
+    uint64_t vt, ti, name;
+    if (p < 0x8000000 || p + 8 > guest_mem_size) return NULL;
+    memcpy(&vt, guest_mem + p, 8);
+    if (vt < 0x8000008 || vt + 8 > guest_mem_size) return NULL;
+    memcpy(&ti, guest_mem + vt - 8, 8);
+    if (ti < 0x8000000 || ti + 16 > guest_mem_size) return NULL;
+    memcpy(&name, guest_mem + ti + 8, 8);
+    if (name < 0x8000000 || name + 64 > guest_mem_size) return NULL;
+    const char *s = (const char *)guest_mem + name;
+    for (int i = 0; i < 64; i++) {                   /* a printable, terminated string */
+        if (!s[i]) return i > 1 ? s : NULL;
+        if (s[i] < 0x20 || s[i] > 0x7E) return NULL;
+    }
+    return NULL;
+}
+
 void kernel_dump_state(void) {
     KThread *t = kthread_current();
     if (t) {
         fprintf(stderr, "registers of thread %" PRIu64 ":\n", t->id);
         dump_cpu(&t->cpu);
+        for (int i = 0; i < 31; i++) {               /* registers that point at C++ objects */
+            const char *n = guest_class_name(t->cpu.x[i]);
+            if (n) fprintf(stderr, "  x%d -> object of class %s\n", i, n);
+        }
     }
     print_backtrace();
 }

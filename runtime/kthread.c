@@ -14,6 +14,7 @@
  */
 #include "kernel.h"
 #include "guest_memory.h"
+#include "nvn/nvn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -426,8 +427,15 @@ void svc_wait_for_address(CPU *c) {
         __atomic_store_n(word(addr), (uint32_t)(cur - 1), __ATOMIC_SEQ_CST);
     t->wait = WAIT_ADDRESS;
     t->wait_addr = addr;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     uint32_t r = sleep_locked(t, timeout);
     kunlock();
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    if (ms > 0.5 && nvn_sync_tracing())               /* LAA_TRACE_SYNC: the game's own waits too */
+        fprintf(stderr, "sync: %.2f thread %d waited %.2f ms at address %#llx (from %#llx)\n",
+                t0.tv_sec * 1e3 + t0.tv_nsec / 1e6, (int)t->id, ms, (unsigned long long)addr, (unsigned long long)c->x[30]);
     ret(c, r);
 }
 
@@ -444,9 +452,15 @@ void svc_signal_to_address(CPU *c) {
         if (type == SIG_INCREMENT_IF_EQUAL) {
             new_value = value + 1;
         } else {                 /* tells the game whether waiters remain after this signal */
+            /* As mesosphere: with waiters, count those after the first (at most count + 1).
+             * None: +1 (none left); up to count: -1; more: unchanged. Counting the first one too
+             * (as we did) told the game's semaphores the wrong thing whenever threads waited. */
             int n = count_waiters(WAIT_ADDRESS, addr);
             if (count <= 0) new_value = n > 0 ? value - 2 : value + 1;
-            else new_value = n == 0 ? value + 1 : n <= count ? value - 1 : value;
+            else {
+                int after_first = n - 1 < count + 1 ? n - 1 : count + 1;
+                new_value = n == 0 || after_first == 0 ? value + 1 : after_first <= count ? value - 1 : value;
+            }
         }
         uint32_t expected = (uint32_t)value;
         if (!__atomic_compare_exchange_n(word(addr), &expected, (uint32_t)new_value, 0,

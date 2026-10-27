@@ -17,6 +17,8 @@
 #include <inttypes.h>
 #include <time.h>
 
+static int sync_tracing(void);
+
 /* One GPU: submissions and presents from different game threads take turns. */
 static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -62,6 +64,13 @@ static void run_list(uint64_t at, int depth) {
             break;
         }
         case CMD_REPORT_COUNTER:                         /* a = counter type, address: {u64 value, u64 timestamp} */
+            if (sync_tracing()) fprintf(stderr, "sync: report counter %llu at %#llx\n", (unsigned long long)r->a[0],
+                                        (unsigned long long)r->a[1]);
+#ifdef LAA_HAVE_SDL
+            /* timestamps: when the GPU gets there (the game times its frame with two and picks
+             * its resolution by that); other counters, and if that fails: now */
+            if (r->a[1] && r->a[0] == 0 && render_active() && render_guest_timestamp(r->a[1]) == 0) break;
+#endif
             if (r->a[1]) gpu_write(r->a[1], (uint64_t[2]){ 0, nvn_gpu_ticks() }, 16);
             break;
         case CMD_REPORT_VALUE:                           /* a = value, address */
@@ -102,6 +111,19 @@ static void run_list(uint64_t at, int depth) {
 static int frame_stats = -1;
 static struct { double last, interval, interval_max, submit, present; int slow; } fs;
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static uint64_t frames;
+
+/* LAA_TRACE_SYNC=frame: a timeline of 3 frames from that one: submissions, presents, GPU waits */
+int nvn_sync_tracing(void) { return sync_tracing(); }
+
+static int sync_tracing(void) {                    /* (+ LAA_TRACE_SYNC_FRAMES=n, default 3) */
+    static int64_t from = -2, n;
+    if (from == -2) {
+        from = getenv("LAA_TRACE_SYNC") ? strtoll(getenv("LAA_TRACE_SYNC"), NULL, 0) : -1;
+        n = getenv("LAA_TRACE_SYNC_FRAMES") ? strtoll(getenv("LAA_TRACE_SYNC_FRAMES"), NULL, 0) : 3;
+    }
+    return from >= 0 && frames >= (uint64_t)from && frames < (uint64_t)(from + n);
+}
 
 void nvn_sync_fence(Sync *s) {
     s->signaled = 1;
@@ -113,6 +135,16 @@ void nvn_sync_fence(Sync *s) {
 
 int nvn_sync_wait(const Sync *s, uint64_t timeout_ns) {
 #ifdef LAA_HAVE_SDL
+    /* LAA_TRACE_SYNC=frame: for 3 frames from that one, each wait: for which submission (and
+     * the newest submitted / finished then), how long it took, who called */
+    if (sync_tracing() && render_active() && s->serial) {
+        uint64_t newest = render_fence_serial(), done = render_serial_completed();
+        double t0 = now_ms();
+        int r = render_wait_serial(s->serial, timeout_ns);
+        fprintf(stderr, "sync: %.2f frame %" PRIu64 " wait for %" PRIu64 " (submitted %" PRIu64 ", done %" PRIu64 "), timeout %" PRIu64 ": %.2f ms, sync %#" PRIx64 "\n",
+                t0, frames, s->serial, newest, done, timeout_ns, now_ms() - t0, (uint64_t)((uintptr_t)s - (uintptr_t)gptr(0)));
+        return r;
+    }
     if (render_active() && s->serial) return render_wait_serial(s->serial, timeout_ns);
 #endif
     (void)timeout_ns;
@@ -136,6 +168,7 @@ void nvn_execute(uint64_t handle) {
     run_list(handle, 0);
 #ifdef LAA_HAVE_SDL
     if (render_active()) render_submitted();
+    if (sync_tracing()) fprintf(stderr, "sync: %.2f submitted %" PRIu64 " (took %.2f ms)\n", now_ms(), render_fence_serial(), now_ms() - t0);
 #endif
     pthread_mutex_unlock(&gpu_lock);
     if (frame_stats > 0) fs.submit += now_ms() - t0;
@@ -144,7 +177,6 @@ void nvn_execute(uint64_t handle) {
 /* ---- present: wait for the next vblank (60 Hz), or the interval-th one ---- */
 
 static struct timespec next_vblank;
-static uint64_t frames;
 
 /* LAA_SCREENSHOT=dir: save every 300th frame (LAA_SCREENSHOT_EVERY=n) as dir/frame_NNNNNN.png.
  * The picture comes from the texture's guest memory. */
@@ -302,6 +334,7 @@ void nvn_present(const Window *w, uint64_t texture) {
         double t0 = frame_stats > 0 ? now_ms() : 0;
         pthread_mutex_lock(&gpu_lock);
         render_present(texture, rect);
+        if (sync_tracing()) fprintf(stderr, "sync: %.2f presented frame %" PRIu64 "\n", now_ms(), frames);
         pthread_mutex_unlock(&gpu_lock);
         if (frame_stats > 0) fs.present += now_ms() - t0;
         return;

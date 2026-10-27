@@ -77,9 +77,17 @@ static void nvnDeviceGetImageHandle(CPU *c)           { RET(ARG(1) & 0xFFFFF); }
 static void nvnDeviceGetSeparateTextureHandle(CPU *c) { RET(ARG(1) & 0xFFFFF); }
 static void nvnDeviceGetSeparateSamplerHandle(CPU *c) { RET((ARG(1) & 0xFFF) << 20); }
 
-static void nvnDeviceSetWindowOriginMode(CPU *c) { window_origin_mode = (uint32_t)ARG(1); }
+static void nvnDeviceSetWindowOriginMode(CPU *c) {
+    window_origin_mode = (uint32_t)ARG(1);
+    fprintf(stderr, "nvn: window origin mode %u (0 lower left, 1 upper left)\n", window_origin_mode);
+}
 static void nvnDeviceGetWindowOriginMode(CPU *c) { RET(window_origin_mode); }
-static void nvnDeviceSetDepthMode(CPU *c)        { depth_mode = (uint32_t)ARG(1); }
+/* 0: clip-space z runs -w..w (NEAR_IS_MINUS_W, OpenGL's); 1: 0..w (NEAR_IS_ZERO, like Vulkan) */
+static void nvnDeviceSetDepthMode(CPU *c) {
+    depth_mode = (uint32_t)ARG(1);
+    fprintf(stderr, "nvn: depth mode %u (0 near is -w, 1 near is 0)\n", depth_mode);
+}
+uint32_t nvn_depth_mode(void) { return depth_mode; }
 static void nvnDeviceGetDepthMode(CPU *c)        { RET(depth_mode); }
 static void nvnDeviceGenerateDebugDomainId(CPU *c) { static int next = 1; RET(next++); }
 

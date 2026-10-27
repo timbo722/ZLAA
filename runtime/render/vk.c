@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+static void load_pipeline_cache(void);
 
 #define VK_DEFINE(name) PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DEFINE)
@@ -169,6 +172,7 @@ static int create_device(void) {
 #define VK_LOAD_DEVICE(name) name = (PFN_##name)vkGetDeviceProcAddr(vk.device, #name);
     VK_DEVICE_FUNCTIONS(VK_LOAD_DEVICE)
     vkGetDeviceQueue(vk.device, vk.queue_family, 0, &vk.queue);
+    load_pipeline_cache();
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT host = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
     VkPhysicalDeviceSubgroupProperties subgroup = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
@@ -247,6 +251,57 @@ int vk_create_swapchain(uint32_t width, uint32_t height) {
     vk.image_count = 8;
     VK_CHECK(vkGetSwapchainImagesKHR(vk.device, vk.swapchain, &vk.image_count, vk.images));
     return 0;
+}
+
+/* ---- the pipeline cache: LAA_CACHE_DIR/pipelines.bin (Android: the app folder's cache/,
+ * desktop: ~/.cache/LAARecomp). Compiling a pipeline takes the Adreno driver several ms, and
+ * each new one stalls the frame that first needs it; with the cache that happens once ever.
+ * (The driver checks the file's header and ignores a cache from another driver or device.) */
+static char cache_path[1100];
+
+static void load_pipeline_cache(void) {
+    const char *dir = getenv("LAA_CACHE_DIR"), *home = getenv("HOME");
+    char made[1024];
+    if (!dir && home) {                              /* desktop default */
+        snprintf(made, sizeof made, "%s/.cache", home);
+        mkdir(made, 0755);
+        snprintf(made, sizeof made, "%s/.cache/LAARecomp", home);
+        dir = made;
+    }
+    void *data = NULL;
+    size_t size = 0;
+    if (dir) {
+        mkdir(dir, 0755);
+        snprintf(cache_path, sizeof cache_path, "%s/pipelines.bin", dir);
+        FILE *f = fopen(cache_path, "rb");
+        if (f && fseek(f, 0, SEEK_END) == 0 && (size = (size_t)ftell(f)) > 0 && (data = malloc(size))) {
+            rewind(f);
+            if (fread(data, 1, size, f) != size) size = 0;
+        }
+        if (f) fclose(f);
+    }
+    VkPipelineCacheCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+                                     .initialDataSize = data ? size : 0, .pInitialData = data };
+    if (vkCreatePipelineCache(vk.device, &ci, NULL, &vk.pipeline_cache) != VK_SUCCESS) {
+        ci.initialDataSize = 0;                      /* (a damaged file: start empty) */
+        VK_CHECK(vkCreatePipelineCache(vk.device, &ci, NULL, &vk.pipeline_cache));
+    }
+    if (data) fprintf(stderr, "vulkan: pipeline cache %s: %zu bytes\n", cache_path, size);
+    free(data);
+}
+
+void vk_save_pipeline_cache(void) {
+    size_t size = 0;
+    if (!*cache_path || vkGetPipelineCacheData(vk.device, vk.pipeline_cache, &size, NULL) != VK_SUCCESS || !size) return;
+    void *data = malloc(size);
+    char tmp[1200];
+    snprintf(tmp, sizeof tmp, "%s.new", cache_path);
+    FILE *f = data && vkGetPipelineCacheData(vk.device, vk.pipeline_cache, &size, data) == VK_SUCCESS ? fopen(tmp, "wb") : NULL;
+    if (f) {
+        int ok = fwrite(data, 1, size, f) == size;
+        if (fclose(f) == 0 && ok) rename(tmp, cache_path);   /* (a crash mid-write can't damage the old file) */
+    }
+    free(data);
 }
 
 int vk_init(void *sdl_window) {

@@ -184,6 +184,8 @@ static void android_setup(const char **exefs, const char **romfs) {
     setenv("LAA_SAVE_DIR", path, 0);
     snprintf(path, sizeof path, "%s/fonts", base);
     setenv("LAA_FONT_DIR", path, 0);
+    snprintf(path, sizeof path, "%s/cache", base);
+    setenv("LAA_CACHE_DIR", path, 0);
     snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
     snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
     *exefs = exefs_path;

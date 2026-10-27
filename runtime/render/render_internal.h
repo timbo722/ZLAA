@@ -5,6 +5,7 @@
 #define RENDER_INTERNAL_H
 
 #include "render.h"
+#include <pthread.h>
 #include "vk.h"
 #include "nvn/nvn.h"
 
@@ -30,6 +31,8 @@ typedef struct HostImage {
     uint64_t gpu_frame;              /* frame of the last GPU write */
     int hash_valid;                  /* `hash` describes guest memory as it is now */
     struct ImageView *views;         /* views made for sampling it (image.c) */
+    VkImageAspectFlags pending_clear;   /* cleared, but not yet: see render_image_clear */
+    VkClearValue clear_value;
 } HostImage;
 
 VkFormat render_vk_format(uint32_t nvn_format);
@@ -43,8 +46,12 @@ int render_tracing(void);                        /* LAA_TRACE_PIPELINES, within 
 void render_debug_dump(HostImage *h, const char *path);   /* save a colour image as a PNG (debugging) */
 void render_upload(HostImage *h);                /* guest memory -> image, recorded in render_cmd() */
 void render_image_init_layout(VkCommandBuffer cmd, HostImage *h);
-/* the image for a texture, ready to use: uploaded if the CPU's copy is newer */
+/* the image for a texture, ready to use: uploaded if the CPU's copy is newer, cleared if a
+ * clear is pending; render_image_target: the same, but leaves a pending clear to the render pass */
 HostImage *render_image_ready(uint64_t texture);
+HostImage *render_image_target(uint64_t texture);
+void render_image_clear(HostImage *h, const VkClearValue *value, VkImageAspectFlags aspects);
+void render_image_flush_clear(HostImage *h);
 /* A view of an image for sampling, as a shader texture of `dim`/`array` wants it, applying
  * an NVN texture view (view->set == 0: the whole texture) */
 VkImageView render_image_view(HostImage *h, const TextureView *view, int dim, int array);
@@ -57,6 +64,10 @@ VkSampler render_sampler(const SamplerDesc *d);
 VkCommandBuffer render_cmd(void);
 /* Send what was recorded to the GPU without waiting (submit.c's notes). */
 void render_submit(void);
+extern pthread_mutex_t render_queue_lock;          /* held around everything that uses vk.queue */
+void render_count_work(void);                    /* a draw or dispatch was recorded (submit.c) */
+uint32_t render_recorded_work(void);             /* how many since the last submission */
+#define RENDER_CONTEXTS 8                        /* submissions the CPU may be ahead of the GPU (submit.c) */
 int render_context(void);                        /* the context being recorded (0 .. NCTX-1) */
 int render_serial_done(uint64_t serial);
 /* LAA_GPU_TIMING_AT: GPU timestamp after a command, with a label to add its time to */

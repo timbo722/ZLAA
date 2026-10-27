@@ -176,22 +176,32 @@ static void wav_header(void) {
 }
 
 #ifdef LAA_HAVE_SDL
-static SDL_AudioStream *stream;
+static SDL_AudioStream *volatile stream;                  /* set once the device is open */
+
+/* Opening the device can take long or never finish (WSL's audio server hung it): on its own
+ * thread, so the 5 ms clock, which the game's timing and movies follow, never waits for it */
+static void *open_device(void *arg) {
+    (void)arg;
+    SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, 48000 };
+    SDL_AudioStream *s = NULL;
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO) || !(s = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL))) {
+        fprintf(stderr, "audio: no sound output: %s\n", SDL_GetError());
+        return NULL;
+    }
+    static const int16_t silence[2 * 48000 / 25];        /* 40 ms head start against timer jitter */
+    SDL_PutAudioStreamData(s, silence, sizeof silence);
+    SDL_ResumeAudioStreamDevice(s);
+    __atomic_store_n(&stream, s, __ATOMIC_RELEASE);
+    return NULL;
+}
 #endif
 
 static void output_open(void) {
     const char *path = getenv("LAA_AUDIO_WAV");
     if (path && (wav = fopen(path, "wb"))) wav_header();
 #ifdef LAA_HAVE_SDL
-    SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, 48000 };
-    if (!SDL_InitSubSystem(SDL_INIT_AUDIO) ||
-        !(stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL))) {
-        fprintf(stderr, "audio: no sound output: %s\n", SDL_GetError());
-        return;
-    }
-    static const int16_t silence[2 * 48000 / 25];        /* 40 ms head start against timer jitter */
-    SDL_PutAudioStreamData(stream, silence, sizeof silence);
-    SDL_ResumeAudioStreamDevice(stream);
+    pthread_t t;
+    if (pthread_create(&t, NULL, open_device, NULL) == 0) pthread_detach(t);
 #endif
 }
 
@@ -214,7 +224,8 @@ static void output_write(float (*mix)[2]) {
     }
 #ifdef LAA_HAVE_SDL
     /* more than 100 ms waiting: the timer ran ahead of the device; drop this frame */
-    if (stream && SDL_GetAudioStreamQueued(stream) < 48000 * 4 / 10) SDL_PutAudioStreamData(stream, pcm, sizeof pcm);
+    SDL_AudioStream *s = __atomic_load_n(&stream, __ATOMIC_ACQUIRE);
+    if (s && SDL_GetAudioStreamQueued(s) < 48000 * 4 / 10) SDL_PutAudioStreamData(s, pcm, sizeof pcm);
 #endif
 }
 

@@ -1,24 +1,30 @@
 /*
  * render.c - presenting frames.
  *
- * The presented texture is blitted into the window's swapchain image (vkCmdBlitImage scales
- * and converts RGBA to the window's BGRA). If the GPU rendered it, it comes from its VkImage;
- * otherwise from guest memory: the bytes are converted from the Tegra block-linear layout to
- * rows (layout.c) and uploaded first.
+ * Presenting runs on its own thread. The game thread (render_present) records, after the
+ * frame's rendering, a scaled copy of the shown texture into one of OUT_SLOTS window-sized
+ * images (vkCmdBlitImage scales, flips and converts to the window's format), adds the FPS box,
+ * and hands the slot over. The present thread acquires a swapchain image, copies the slot into
+ * it and presents. Acquiring waits for the display, and Android's queueBuffer sleeps ~2 ms a
+ * frame on the Thor (a system frame-pacing library): neither holds up the game any more. If the
+ * game hands over frames faster than the display takes them, the older waiting one is dropped.
+ *
+ * The shown texture comes from its VkImage when the GPU rendered it; otherwise from guest
+ * memory: converted from the Tegra block-linear layout to rows (layout.c) and uploaded first.
  */
 #include "render_internal.h"
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 static int active;
 static volatile int resized;
 
-static struct {
-    VkCommandBuffer cmd;
-    VkFence done;                    /* the GPU finished this frame's commands */
-    VkSemaphore acquired;            /* the swapchain image is ready to draw into */
-    VkSemaphore rendered[8];         /* per swapchain image: our copy into it is done (an image
-                                        can't be acquired again until its present used this) */
+pthread_mutex_t render_queue_lock = PTHREAD_MUTEX_INITIALIZER;   /* vk.queue is used by two threads */
+
+static struct {                      /* textures the GPU didn't render: uploaded from guest memory */
     VkBuffer staging;                /* CPU-visible copy of the texture */
     VkDeviceMemory staging_mem;
     void *staging_ptr;
@@ -28,20 +34,46 @@ static struct {
     uint32_t width, height;
 } frame;
 
+#define OUT_SLOTS 3                  /* one being written, one waiting, one being presented */
+static struct {
+    VkImage image[OUT_SLOTS];        /* window-sized, in the window's format, layout GENERAL */
+    VkDeviceMemory memory[OUT_SLOTS];
+    uint32_t width, height;
+    VkCommandPool pool;              /* the present thread's own (pools are single-threaded) */
+    VkCommandBuffer cmd[OUT_SLOTS];  /* the present thread's copy of each slot into the window */
+    VkFence copied[OUT_SLOTS];       /* ... is finished */
+    VkSemaphore acquired[OUT_SLOTS]; /* the swapchain image for that copy is ready */
+    VkSemaphore rendered[8];         /* per swapchain image: our copy into it is done (an image
+                                        can't be acquired again until its present used this) */
+    int pending, busy;               /* slot waiting to be presented, slot being presented (-1: none) */
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} out = { .pending = -1, .busy = -1, .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+
 int render_active(void) { return active; }
 void render_resized(void) { resized = 1; }
 
+static void *present_thread(void *arg);
+
 int render_init(void *sdl_window) {
     if (vk_init(sdl_window) != 0) return -1;
+    VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = vk.queue_family };
+    VK_CHECK(vkCreateCommandPool(vk.device, &pci, NULL, &out.pool));
     VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                       .commandPool = vk.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                       .commandBufferCount = 1 };
-    VK_CHECK(vkAllocateCommandBuffers(vk.device, &ai, &frame.cmd));
+                                       .commandPool = out.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                       .commandBufferCount = OUT_SLOTS };
+    VK_CHECK(vkAllocateCommandBuffers(vk.device, &ai, out.cmd));
     VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
-    VK_CHECK(vkCreateFence(vk.device, &fi, NULL, &frame.done));
     VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &frame.acquired));
-    for (int i = 0; i < 8; i++) VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &frame.rendered[i]));
+    for (int i = 0; i < OUT_SLOTS; i++) {
+        VK_CHECK(vkCreateFence(vk.device, &fi, NULL, &out.copied[i]));
+        VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &out.acquired[i]));
+    }
+    for (int i = 0; i < 8; i++) VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &out.rendered[i]));
+    pthread_t t;
+    pthread_create(&t, NULL, present_thread, NULL);
+    pthread_detach(t);
     active = 1;
     return 0;
 }
@@ -49,7 +81,7 @@ int render_init(void *sdl_window) {
 /* (Re)create the staging buffer and image for a width x height RGBA8 texture */
 static void make_frame_image(uint32_t width, uint32_t height) {
     if (frame.width == width && frame.height == height) return;
-    vkDeviceWaitIdle(vk.device);
+    render_flush();                                  /* (nothing may still read the old ones) */
     if (frame.staging) {
         vkDestroyBuffer(vk.device, frame.staging, NULL);
         vkFreeMemory(vk.device, frame.staging_mem, NULL);
@@ -115,6 +147,7 @@ static int read_guest_texture(const Texture *t) {
 int render_read_back(uint64_t texture, uint8_t *out) {
     HostImage *h = active ? render_image_find(texture) : NULL;
     if (!h || !h->gpu_written || !(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
+    render_image_flush_clear(h);
     uint64_t size = (uint64_t)h->width * h->height * 4, offset;
     uint8_t *staging = render_staging(size, &offset);
     VkCommandBuffer cmd = render_cmd();
@@ -126,39 +159,235 @@ int render_read_back(uint64_t texture, uint8_t *out) {
     return 0;
 }
 
+/* ---- LAA_SHOW_FPS=1: frames per second and the slowest frame (ms) of the last half second,
+ * drawn in the bottom-left corner: text in a 5x7 pixel font, rasterized here, blitted 2x larger ---- */
+#define OSD_CHARS 13
+#define OSD_W (OSD_CHARS * 6 + 2)
+#define OSD_H 9
+static struct {
+    int on;
+    VkBuffer buffer;                 /* the pixels, put there by the command buffer (vkCmdUpdateBuffer):
+                                        so the CPU never waits for the GPU to finish with them */
+    VkDeviceMemory memory;
+    uint32_t pixels[OSD_W * OSD_H];  /* RGBA8 */
+    VkImage image;
+    VkDeviceMemory image_memory;
+    double window_start, last, worst;
+    int frames;
+    char text[OSD_CHARS + 1];
+} osd = { .on = -1 };
+
+static double osd_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+
+/* 5x7 glyphs, one byte per row, bit 4 = leftmost column */
+static const uint8_t *osd_glyph(char c) {
+    static const uint8_t digits[10][7] = {
+        { 14, 17, 19, 21, 25, 17, 14 }, { 4, 12, 4, 4, 4, 4, 14 }, { 14, 17, 1, 2, 4, 8, 31 }, { 31, 2, 4, 2, 1, 17, 14 },
+        { 2, 6, 10, 18, 31, 2, 2 }, { 31, 16, 30, 1, 1, 17, 14 }, { 6, 8, 16, 30, 17, 17, 14 }, { 31, 1, 2, 4, 8, 8, 8 },
+        { 14, 17, 17, 14, 17, 17, 14 }, { 14, 17, 17, 15, 1, 2, 12 } };
+    static const uint8_t F[7] = { 31, 16, 16, 30, 16, 16, 16 }, P[7] = { 30, 17, 17, 30, 16, 16, 16 },
+                         S[7] = { 15, 16, 16, 14, 1, 1, 30 }, M[7] = { 17, 27, 21, 21, 17, 17, 17 };
+    if (c >= '0' && c <= '9') return digits[c - '0'];
+    return c == 'F' ? F : c == 'P' ? P : c == 'S' ? S : c == 'M' ? M : NULL;
+}
+
+static void osd_init(void) {
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = OSD_W * OSD_H * 4,
+                              .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &osd.buffer));
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(vk.device, osd.buffer, &req);
+    VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+        .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &osd.memory));
+    VK_CHECK(vkBindBufferMemory(vk.device, osd.buffer, osd.memory, 0));
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { OSD_W, OSD_H, 1 }, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    VK_CHECK(vkCreateImage(vk.device, &ii, NULL, &osd.image));
+    vkGetImageMemoryRequirements(vk.device, osd.image, &req);
+    mi.allocationSize = req.size;
+    mi.memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &osd.image_memory));
+    VK_CHECK(vkBindImageMemory(vk.device, osd.image, osd.image_memory, 0));
+    osd.window_start = osd.last = osd_now_ms();
+    snprintf(osd.text, sizeof osd.text, "   FPS");
+}
+
+/* Count this frame; every half second, redraw the text (yellow when below 55 fps or a frame
+ * took over 20 ms, i.e. missed a 60 Hz refresh). */
+static void osd_update(void) {
+    double t = osd_now_ms();
+    if (t - osd.last > osd.worst) osd.worst = t - osd.last;
+    osd.last = t;
+    osd.frames++;
+    if (t - osd.window_start < 500 && osd.frames > 1) return;
+    double fps = osd.frames * 1000.0 / (t - osd.window_start);
+    int slow = fps < 55 || osd.worst > 20;
+    snprintf(osd.text, sizeof osd.text, "%2.0f FPS %3.0f MS", fps > 99 ? 99 : fps, osd.worst > 999 ? 999 : osd.worst);
+    osd.window_start = t;
+    osd.frames = 0;
+    osd.worst = 0;
+    uint32_t fg = slow ? 0xFF00FFFFu : 0xFFFFFFFFu, bg = 0xC0000000u;    /* ABGR in memory: R, G, B, A bytes */
+    for (int i = 0; i < OSD_W * OSD_H; i++) osd.pixels[i] = bg;
+    for (int k = 0; osd.text[k]; k++) {
+        const uint8_t *g = osd_glyph(osd.text[k]);
+        for (int y = 0; g && y < 7; y++)
+            for (int x = 0; x < 5; x++)
+                if (g[y] >> (4 - x) & 1) osd.pixels[(y + 1) * OSD_W + 1 + k * 6 + x] = fg;
+    }
+}
+
+static void osd_draw(VkCommandBuffer cmd, VkImage dst) {      /* (dst: an out slot, GENERAL) */
+    VkMemoryBarrier before = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                               .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };   /* (last frame's copy read it) */
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, NULL, 0, NULL);
+    vkCmdUpdateBuffer(cmd, osd.buffer, 0, sizeof osd.pixels, osd.pixels);
+    VkMemoryBarrier after = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                              .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &after, 0, NULL, 0, NULL);
+    barrier(cmd, osd.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkBufferImageCopy copy = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { OSD_W, OSD_H, 1 } };
+    vkCmdCopyBufferToImage(cmd, osd.buffer, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    barrier(cmd, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    int32_t scale = out.height >= 1000 ? 2 : 1, x = 4, y = (int32_t)out.height - OSD_H * scale - 4;   /* bottom left */
+    VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                         .srcOffsets = { { 0, 0, 0 }, { OSD_W, OSD_H, 1 } },
+                         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                         .dstOffsets = { { x, y, 0 }, { x + OSD_W * scale, y + OSD_H * scale, 1 } } };
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                           .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };   /* (after the game's frame blit) */
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdBlitImage(cmd, osd.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+}
+
+/* ---- the slots ---- */
+
+/* (Re)create the slots at the window's size. Waits until the present thread holds none. */
+static void make_out_images(void) {
+    pthread_mutex_lock(&out.lock);
+    while (out.busy >= 0) pthread_cond_wait(&out.cond, &out.lock);
+    out.pending = -1;
+    render_flush();
+    VK_CHECK(vkWaitForFences(vk.device, OUT_SLOTS, out.copied, VK_TRUE, UINT64_MAX));
+    for (int i = 0; i < OUT_SLOTS; i++) {
+        if (out.image[i]) { vkDestroyImage(vk.device, out.image[i], NULL); vkFreeMemory(vk.device, out.memory[i], NULL); }
+        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+            .format = vk.swapchain_format, .extent = { vk.extent.width, vk.extent.height, 1 }, .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        VK_CHECK(vkCreateImage(vk.device, &ii, NULL, &out.image[i]));
+        VkMemoryRequirements req;
+        vkGetImageMemoryRequirements(vk.device, out.image[i], &req);
+        VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+            .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+        VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &out.memory[i]));
+        VK_CHECK(vkBindImageMemory(vk.device, out.image[i], out.memory[i], 0));
+        barrier(render_cmd(), out.image[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
+                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    }
+    out.width = vk.extent.width;
+    out.height = vk.extent.height;
+    pthread_mutex_unlock(&out.lock);
+}
+
+/* A slot the game thread may write: neither waiting nor being presented, its last copy done */
+static int take_slot(void) {
+    pthread_mutex_lock(&out.lock);
+    int s = 0;
+    while (s == out.pending || s == out.busy) s++;
+    pthread_mutex_unlock(&out.lock);
+    VK_CHECK(vkWaitForFences(vk.device, 1, &out.copied[s], VK_TRUE, UINT64_MAX));
+    return s;
+}
+
+static void *present_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&out.lock);
+        while (out.pending < 0) pthread_cond_wait(&out.cond, &out.lock);
+        int s = out.busy = out.pending;
+        out.pending = -1;
+        uint32_t width = out.width, height = out.height;
+        pthread_mutex_unlock(&out.lock);
+
+        if (resized) {
+            resized = 0;
+            pthread_mutex_lock(&render_queue_lock);
+            vkDeviceWaitIdle(vk.device);
+            vk_create_swapchain(vk.extent.width, vk.extent.height);
+            pthread_mutex_unlock(&render_queue_lock);
+        }
+        uint32_t index;
+        VkResult r = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX, out.acquired[s], VK_NULL_HANDLE, &index);
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
+        else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkAcquireNextImageKHR", r);
+        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
+            VkCommandBuffer cmd = out.cmd[s];
+            VK_CHECK(vkResetCommandBuffer(cmd, 0));
+            VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+            VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+            render_barrier(cmd);                     /* after the game thread's copy into the slot */
+            VkImage dst = vk.images[index];
+            barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                 .srcOffsets = { { 0, 0, 0 }, { (int32_t)width, (int32_t)height, 1 } },
+                                 .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                 .dstOffsets = { { 0, 0, 0 }, { (int32_t)vk.extent.width, (int32_t)vk.extent.height, 1 } } };
+            vkCmdBlitImage(cmd, out.image[s], VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                           width == vk.extent.width && height == vk.extent.height ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+            barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
+            VK_CHECK(vkEndCommandBuffer(cmd));
+            VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
+                                .pWaitSemaphores = &out.acquired[s], .pWaitDstStageMask = &wait_stage,
+                                .commandBufferCount = 1, .pCommandBuffers = &cmd,
+                                .signalSemaphoreCount = 1, .pSignalSemaphores = &out.rendered[index] };
+            VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
+                                    .pWaitSemaphores = &out.rendered[index], .swapchainCount = 1,
+                                    .pSwapchains = &vk.swapchain, .pImageIndices = &index };
+            VK_CHECK(vkResetFences(vk.device, 1, &out.copied[s]));
+            pthread_mutex_lock(&render_queue_lock);
+            VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, out.copied[s]));
+            r = vkQueuePresentKHR(vk.queue, &pi);
+            pthread_mutex_unlock(&render_queue_lock);
+            /* (SUBOPTIMAL is fine: Android says it whenever it rotates for us; resizes come as SDL events) */
+            if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
+            else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkQueuePresentKHR", r);
+        }
+        pthread_mutex_lock(&out.lock);
+        out.busy = -1;
+        pthread_cond_broadcast(&out.cond);
+        pthread_mutex_unlock(&out.lock);
+    }
+    return NULL;
+}
+
 void render_present(uint64_t texture, const int32_t crop[4]) {
     static int reupload = -1;
     if (reupload < 0) reupload = getenv("LAA_REUPLOAD") != NULL;
     if (reupload) render_reupload_all();
     render_images_new_frame();
     if (!active || !texture) return;
-    render_submit();                                 /* the frame's rendering (the blit below comes after it) */
+    HostImage *h = render_image_find(texture);
+    if (h) render_image_flush_clear(h);              /* (cleared but never drawn into) */
+    render_submit();                                 /* the frame's rendering (the copy below comes after it) */
+    render_timestamps_update();
     render_gpu_timing_frame(nvn_frame_count());
     render_capture_print(nvn_frame_count());
-    VK_CHECK(vkWaitForFences(vk.device, 1, &frame.done, VK_TRUE, UINT64_MAX));
-    if (resized) {
-        resized = 0;
-        vkDeviceWaitIdle(vk.device);
-        vk_create_swapchain(vk.extent.width, vk.extent.height);
-    }
-    HostImage *h = render_image_find(texture);
+    if (osd.on < 0 && (osd.on = getenv("LAA_SHOW_FPS") && atoi(getenv("LAA_SHOW_FPS")))) osd_init();
+    if (osd.on) osd_update();
     int from_gpu = h && h->gpu_written;
     if (!from_gpu && read_guest_texture(gptr(texture)) != 0) return;
     VkImage src = from_gpu ? h->image : frame.image;
     int32_t width = (int32_t)(from_gpu ? h->width : frame.width), height = (int32_t)(from_gpu ? h->height : frame.height);
+    if (out.width != vk.extent.width || out.height != vk.extent.height) make_out_images();
+    int s = take_slot();
 
-    uint32_t index;
-    VkResult r = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX, frame.acquired, VK_NULL_HANDLE, &index);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { resized = 1; return; }
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkAcquireNextImageKHR", r);
-    VK_CHECK(vkResetFences(vk.device, 1, &frame.done));
-
-    VkCommandBuffer cmd = frame.cmd;
-    VK_CHECK(vkResetCommandBuffer(cmd, 0));
-    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
-    render_barrier(cmd);                             /* after the game's rendering, submitted before */
+    VkCommandBuffer cmd = render_cmd();
     VkImageLayout src_layout = VK_IMAGE_LAYOUT_GENERAL;
     if (!from_gpu) {                                 /* staging buffer -> frame image */
         barrier(cmd, frame.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -169,37 +398,27 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         src_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     }
-    /* frame image -> window (scaled to fit) */
-    VkImage dst = vk.images[index];
-    barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+    /* frame image -> slot (scaled to fit) */
     VkImageBlit blit = {
         .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
         .srcOffsets = { { 0, 0, 0 }, { width, height, 1 } },
         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
         /* upside down: NVN's (OpenGL's) row 0 is the bottom of the screen, Vulkan's the top */
-        .dstOffsets = { { 0, (int32_t)vk.extent.height, 0 }, { (int32_t)vk.extent.width, 0, 1 } },
+        .dstOffsets = { { 0, (int32_t)out.height, 0 }, { (int32_t)out.width, 0, 1 } },
     };
     if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] + crop[2] <= width && crop[1] + crop[3] <= height) {
         /* the window's crop: only this part of the texture is shown (dynamic resolution) */
         blit.srcOffsets[0] = (VkOffset3D){ crop[0], crop[1], 0 };
         blit.srcOffsets[1] = (VkOffset3D){ crop[0] + crop[2], crop[1] + crop[3], 1 };
     }
-    vkCmdBlitImage(cmd, src, src_layout, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-    barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
-    render_barrier(cmd);                             /* the game's next rendering waits for this read */
-    VK_CHECK(vkEndCommandBuffer(cmd));
+    vkCmdBlitImage(cmd, src, src_layout, out.image[s], VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+    if (osd.on) osd_draw(cmd, out.image[s]);
+    render_barrier(cmd);
+    render_submit();
+    if (!from_gpu) render_flush();                   /* (the staging buffer is used again next frame) */
 
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
-                        .pWaitSemaphores = &frame.acquired, .pWaitDstStageMask = &wait_stage,
-                        .commandBufferCount = 1, .pCommandBuffers = &cmd,
-                        .signalSemaphoreCount = 1, .pSignalSemaphores = &frame.rendered[index] };
-    VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, frame.done));
-    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
-                            .pWaitSemaphores = &frame.rendered[index], .swapchainCount = 1,
-                            .pSwapchains = &vk.swapchain, .pImageIndices = &index };
-    r = vkQueuePresentKHR(vk.queue, &pi);
-    /* (SUBOPTIMAL is fine: Android says it whenever it rotates for us; resizes come as SDL events) */
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
-    else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkQueuePresentKHR", r);
+    pthread_mutex_lock(&out.lock);                   /* hand it over (a frame still waiting is dropped) */
+    out.pending = s;
+    pthread_cond_broadcast(&out.cond);
+    pthread_mutex_unlock(&out.lock);
 }

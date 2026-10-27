@@ -33,6 +33,7 @@ typedef struct {
 
 static Import *imports;
 static int nimports, imports_cap;
+static int last_import = -1;                         /* where render_guest_buffer last found its pool */
 
 static Import *new_import(void) {
     if (nimports == imports_cap) {
@@ -173,6 +174,7 @@ void render_pool_destroyed(uint64_t storage, uint64_t size) {
         vkDestroyBuffer(vk.device, im->buffer, NULL);
         vkFreeMemory(vk.device, im->memory, NULL);
         *im = imports[--nimports];
+        last_import = -1;
         return;
     }
 }
@@ -187,10 +189,16 @@ uint64_t render_guest_device_address(uint64_t address) {
 
 int render_guest_buffer(uint64_t address, VkBuffer *buffer, VkDeviceSize *offset) {
     if (!(vk.host_import || vk.fd_export) || !address) return -1;
+    if (last_import >= 0 && last_import < nimports && address - imports[last_import].storage < imports[last_import].size) {
+        *buffer = imports[last_import].buffer;     /* (almost always: no pool search, no lock) */
+        *offset = address - imports[last_import].storage;
+        return 0;
+    }
     uint64_t storage, size;
     if (!nvn_pool_find(address, &storage, &size)) return -1;
     for (int i = 0; i < nimports; i++)
         if (imports[i].storage == storage && imports[i].size == size) {
+            last_import = i;
             *buffer = imports[i].buffer;
             *offset = address - storage;
             return 0;

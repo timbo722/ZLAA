@@ -147,6 +147,7 @@ int hle_replace(uint64_t guest_addr, HleFunc fn) {
         if (!replaced[k].addr || replaced[k].addr == guest_addr) {
             replaced[k].fn = fn;
             replaced[k].addr = guest_addr;
+            recomp_set_target(guest_addr, fn);
             return 0;
         }
     }

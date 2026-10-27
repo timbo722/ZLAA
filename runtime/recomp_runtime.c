@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <time.h>
 
 /* recomp_func_table is sorted by address, so binary search it. */
@@ -21,7 +22,38 @@ RecompFunc recomp_lookup(uint64_t addr) {
 
 RecompFunc (*recomp_override)(uint64_t addr);
 
+/* Indirect calls look the function up in a hash table of all of them (address -> C function),
+ * built on first use: one or two probes, where the binary search above takes ~17 through 2 MB
+ * of table (indirect calls were 18% of the game's main thread). Replacements (hle_replace) are
+ * put in it too; addresses it doesn't have (HLE functions) go to recomp_override. */
+#define DISPATCH_BITS 19                     /* 512K slots for ~150K functions */
+static struct { uint64_t addr; RecompFunc fn; } *dispatch;
+static pthread_once_t dispatch_once = PTHREAD_ONCE_INIT;
+
+static inline uint64_t dispatch_slot(uint64_t addr) { return (addr >> 2) * 0x9E3779B97F4A7C15ull >> (64 - DISPATCH_BITS); }
+
+static void dispatch_put(uint64_t addr, RecompFunc fn) {
+    uint64_t k = dispatch_slot(addr);
+    while (dispatch[k].addr && dispatch[k].addr != addr) k = (k + 1) & ((1u << DISPATCH_BITS) - 1);
+    dispatch[k].fn = fn;
+    dispatch[k].addr = addr;
+}
+
+static void dispatch_build(void) {
+    dispatch = calloc(1u << DISPATCH_BITS, sizeof *dispatch);
+    if (!dispatch) { fprintf(stderr, "recomp: out of memory\n"); abort(); }
+    for (uint64_t i = 0; i < recomp_func_count; i++) dispatch_put(recomp_func_table[i].addr, recomp_func_table[i].fn);
+}
+
+void recomp_set_target(uint64_t addr, RecompFunc fn) {
+    pthread_once(&dispatch_once, dispatch_build);
+    dispatch_put(addr, fn);
+}
+
 void recomp_call_addr(CPU *c, uint64_t addr) {
+    pthread_once(&dispatch_once, dispatch_build);
+    for (uint64_t k = dispatch_slot(addr); dispatch[k].addr; k = (k + 1) & ((1u << DISPATCH_BITS) - 1))
+        if (dispatch[k].addr == addr) { dispatch[k].fn(c); return; }
     RecompFunc fn = recomp_override ? recomp_override(addr) : NULL;
     if (!fn) fn = recomp_lookup(addr);
     if (!fn) {

@@ -18,11 +18,15 @@
 #include <string.h>
 #include <time.h>
 
-#define NCTX 2
-#define STAGING_SIZE (256ull << 20)                /* split between the contexts */
+/* 8, not 2: the game submits many command lists a frame, and with 2 contexts recording each
+ * one waited for the GPU to finish the one before last: CPU and GPU took turns */
+#define NCTX RENDER_CONTEXTS
+#define STAGING_SIZE (512ull << 20)                /* split between the contexts */
 #define UNIFORM_RING (8u << 20)                    /* per context */
 
 typedef struct {
+    VkCommandPool pool;                            /* its own, reset as a whole: resetting single command
+                                                      buffers was 6% of the game thread on the Thor */
     VkCommandBuffer cmd;
     uint64_t serial;                               /* of its last submission (0: none) */
     uint64_t staging_used, uniform_used;
@@ -57,17 +61,77 @@ static void *host_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer *out)
     return p;
 }
 
+/* ---- GPU timestamps the game asks for (nvnCommandBufferReportCounter, TIMESTAMP) ----
+ * The game times each frame on the GPU with two and picks its rendering resolution by that
+ * (dynamic resolution, like on the Switch: 720p outdoors when busy). They used to be the CPU's
+ * clock when the command list was read, so the frame seemed to cost nothing and the game kept
+ * 1080p. Now: a timestamp query where the command is, read back once its submission is done
+ * (render_timestamps_update: after waits, at present, before a context is reused) and stored
+ * in the game's memory as NVN ticks (625/384 ns) on the CPU clock's scale. The game waits for
+ * the frame's fence before it reads them. */
+#define STAMPS_PER_CTX 32
+static VkQueryPool game_stamps;
+static int stamps_used[NCTX];
+static struct { uint64_t serial, address; uint32_t query; } pending_stamps[NCTX * STAMPS_PER_CTX];
+static int npending_stamps;
+static pthread_mutex_t stamps_lock = PTHREAD_MUTEX_INITIALIZER;
+static double stamp_offset_ns;                     /* CPU clock - GPU clock, from the first one read */
+static int stamp_offset_set;
+
+static void init(void);
+
+int render_guest_timestamp(uint64_t address) {
+    VkCommandBuffer cmd = render_cmd();
+    if (!game_stamps || !vk.limits.timestampComputeAndGraphics || stamps_used[cur] >= STAMPS_PER_CTX) return -1;
+    uint32_t q = (uint32_t)cur * STAMPS_PER_CTX + (uint32_t)stamps_used[cur]++;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, game_stamps, q);
+    pthread_mutex_lock(&stamps_lock);
+    pending_stamps[npending_stamps++] = (typeof(pending_stamps[0])){ submitted + 1, address, q };
+    pthread_mutex_unlock(&stamps_lock);
+    return 0;
+}
+
+void render_timestamps_update(void) {
+    if (!npending_stamps) return;
+    pthread_mutex_lock(&stamps_lock);
+    uint64_t done = render_serial_completed();
+    int kept = 0;
+    for (int i = 0; i < npending_stamps; i++) {
+        if (pending_stamps[i].serial > done) { pending_stamps[kept++] = pending_stamps[i]; continue; }
+        uint64_t v = 0;
+        if (vkGetQueryPoolResults(vk.device, game_stamps, pending_stamps[i].query, 1, 8, &v, 8, VK_QUERY_RESULT_64_BIT) != VK_SUCCESS)
+            continue;
+        struct timespec t;
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        double gpu_ns = (double)v * vk.limits.timestampPeriod;
+        if (!stamp_offset_set) { stamp_offset_ns = (double)t.tv_sec * 1e9 + t.tv_nsec - gpu_ns; stamp_offset_set = 1; }
+        uint64_t ticks = (uint64_t)((gpu_ns + stamp_offset_ns) * 384.0 / 625.0);
+        uint64_t report[2] = { 0, ticks };
+        memcpy(gptr(pending_stamps[i].address), report, 16);
+    }
+    npending_stamps = kept;
+    pthread_mutex_unlock(&stamps_lock);
+}
+
 static void init(void) {
-    VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                       .commandPool = vk.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-                                       .commandBufferCount = 1 };
-    for (int i = 0; i < NCTX; i++) VK_CHECK(vkAllocateCommandBuffers(vk.device, &ai, &ctx[i].cmd));
+    for (int i = 0; i < NCTX; i++) {
+        VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = vk.queue_family };
+        VK_CHECK(vkCreateCommandPool(vk.device, &pci, NULL, &ctx[i].pool));
+        VkCommandBufferAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                           .commandPool = ctx[i].pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                           .commandBufferCount = 1 };
+        VK_CHECK(vkAllocateCommandBuffers(vk.device, &ai, &ctx[i].cmd));
+    }
     VkSemaphoreTypeCreateInfo ti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0 };
     VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti };
     VK_CHECK(vkCreateSemaphore(vk.device, &si, NULL, &timeline));
     staging_ptr = host_buffer(STAGING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &staging);
     uniform_ptr = host_buffer((uint64_t)UNIFORM_RING * NCTX, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &uniform_buffer);
+    VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                 .queryCount = NCTX * STAMPS_PER_CTX };
+    if (vk.limits.timestampComputeAndGraphics) VK_CHECK(vkCreateQueryPool(vk.device, &qi, NULL, &game_stamps));
     ready = 1;
 }
 
@@ -100,6 +164,7 @@ int render_wait_serial(uint64_t serial, uint64_t timeout_ns) {
     render_gpu_wait_ms += now_ms() - t0;
     if (r == VK_TIMEOUT) return -1;
     VK_CHECK(r);
+    render_timestamps_update();
     return 0;
 }
 
@@ -183,13 +248,16 @@ VkCommandBuffer render_cmd(void) {
     if (!recording) {
         /* this context's last submission must be finished before its memory is used again */
         if (c->serial) render_wait_serial(c->serial, UINT64_MAX);
+        render_timestamps_update();                /* (its timestamps are read before the reset below) */
         c->staging_used = c->uniform_used = 0;
         render_submission_done(cur);
         VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-        VK_CHECK(vkResetCommandBuffer(c->cmd, 0));
+        VK_CHECK(vkResetCommandPool(vk.device, c->pool, 0));
         VK_CHECK(vkBeginCommandBuffer(c->cmd, &bi));
         recording = 1;
+        if (game_stamps) vkCmdResetQueryPool(c->cmd, game_stamps, (uint32_t)cur * STAMPS_PER_CTX, STAMPS_PER_CTX);
+        stamps_used[cur] = 0;
         if (render_gpu_timing) start_stamps(c->cmd);
     }
     return c->cmd;
@@ -197,8 +265,13 @@ VkCommandBuffer render_cmd(void) {
 
 int render_context(void) { return cur; }
 
+static uint32_t work;                              /* draws and dispatches recorded since the last submission */
+void render_count_work(void) { work++; }
+uint32_t render_recorded_work(void) { return recording ? work : 0; }
+
 void render_submit(void) {
     if (!recording) return;
+    work = 0;
     render_end_rendering();
     Context *c = &ctx[cur];
     render_barrier(c->cmd);                        /* the next submission's work comes after all of this */
@@ -209,7 +282,9 @@ void render_submit(void) {
                                          .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &serial };
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &ts, .commandBufferCount = 1,
                         .pCommandBuffers = &c->cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &timeline };
+    pthread_mutex_lock(&render_queue_lock);
     VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, VK_NULL_HANDLE));
+    pthread_mutex_unlock(&render_queue_lock);
     c->serial = serial;
     __atomic_store_n(&submitted, serial, __ATOMIC_RELEASE);
     cur = (cur + 1) % NCTX;

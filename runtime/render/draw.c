@@ -59,7 +59,7 @@ void render_end_rendering(void) {
 
 /* ---- descriptor sets: from a pool per submission context, emptied when it is reused ---- */
 
-static VkDescriptorPool descriptor_pools[4];
+static VkDescriptorPool descriptor_pools[RENDER_CONTEXTS];
 
 void render_submission_done(int context) {
     if (descriptor_pools[context]) vkResetDescriptorPool(vk.device, descriptor_pools[context], 0);
@@ -116,8 +116,8 @@ static void warn_once(const char *what, uint64_t key) {
 static void set_render_targets(const RenderTargets *rt) {
     render_end_rendering();
     st.rt = *rt;
-    for (int i = 0; i < 8; i++) st.color[i] = i < (int)rt->count ? render_image_ready(rt->color[i].texture) : NULL;
-    st.depth = render_image_ready(rt->depth.texture);
+    for (int i = 0; i < 8; i++) st.color[i] = i < (int)rt->count ? render_image_target(rt->color[i].texture) : NULL;
+    st.depth = render_image_target(rt->depth.texture);
 }
 
 /* a color value as Vulkan wants it: float, int or uint bits (sub: 0 float, 1 int, 2 uint) */
@@ -131,14 +131,11 @@ static void clear_image(HostImage *h, const VkClearColorValue *color, const VkCl
                         VkImageAspectFlags aspects) {
     if (!h) return;
     if (render_tracing()) fprintf(stderr, "render: clear %ux%u fmt %d aspects %#x\n", h->width, h->height, h->format, aspects);
-    render_end_rendering();
-    VkCommandBuffer cmd = render_cmd();
-    render_image_init_layout(cmd, h);
-    VkImageSubresourceRange range = { aspects, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS };
-    if (color) vkCmdClearColorImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, color, 1, &range);
-    else vkCmdClearDepthStencilImage(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, ds, 1, &range);
-    render_barrier(cmd);
-    render_image_gpu_wrote(h);
+    render_end_rendering();                          /* (the next draw starts a pass that clears) */
+    VkClearValue v;
+    if (color) v.color = *color;
+    else v.depthStencil = *ds;
+    render_image_clear(h, &v, aspects);
 }
 
 /* Which level/layers of an image an ImageRef means (its view, if any) */
@@ -225,7 +222,7 @@ static VkPipeline depth_copy_pipeline(VkFormat format) {
         .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cb,
         .pDynamicState = &dy, .layout = dc_layout };
     VkPipeline p;
-    VK_CHECK(vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &ci, NULL, &p));
+    VK_CHECK(vkCreateGraphicsPipelines(vk.device, vk.pipeline_cache, 1, &ci, NULL, &p));
     vkDestroyShaderModule(vk.device, vs, NULL);
     vkDestroyShaderModule(vk.device, fs, NULL);
     for (int i = 0; i < 4; i++) if (!dc_pipelines[i].pipeline) { dc_pipelines[i].format = format; dc_pipelines[i].pipeline = p; break; }
@@ -418,11 +415,31 @@ static int begin_rendering(void) {
         if (st.depth->height < h) h = st.depth->height;
     }
     if (w == 0x7FFFFFFF) return -1;                      /* nothing to render into */
+    /* pending clears (render_image_clear) become loadOp CLEAR where the pass covers the image */
+    VkRenderingAttachmentInfo stencil = depth;
+    for (uint32_t i = 0; i < ncolor; i++) {
+        HostImage *img = st.color[i];
+        if (!img || !img->pending_clear) continue;
+        if (img->width != w || img->height != h) { render_image_flush_clear(img); continue; }
+        color[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color[i].clearValue = img->clear_value;
+        img->pending_clear = 0;
+    }
+    if (st.depth && st.depth->pending_clear) {
+        HostImage *img = st.depth;
+        if (img->width != w || img->height != h) {
+            render_image_flush_clear(img);
+        } else {
+            if (img->pending_clear & VK_IMAGE_ASPECT_DEPTH_BIT) { depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; depth.clearValue = img->clear_value; }
+            if (img->pending_clear & VK_IMAGE_ASPECT_STENCIL_BIT) { stencil.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; stencil.clearValue = img->clear_value; }
+            img->pending_clear = 0;
+        }
+    }
     int has_d = st.depth && (st.depth->aspects & VK_IMAGE_ASPECT_DEPTH_BIT);
     int has_s = st.depth && (st.depth->aspects & VK_IMAGE_ASPECT_STENCIL_BIT);
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { w, h } },
         .layerCount = 1, .colorAttachmentCount = ncolor, .pColorAttachments = color,
-        .pDepthAttachment = has_d ? &depth : NULL, .pStencilAttachment = has_s ? &depth : NULL };
+        .pDepthAttachment = has_d ? &depth : NULL, .pStencilAttachment = has_s ? &stencil : NULL };
     vkCmdBeginRendering(cmd, &ri);
     st.rendering = 1;
     st.pass_draws = 0;
@@ -544,8 +561,14 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
                         h->desc.swizzle[0], h->desc.swizzle[1], h->desc.swizzle[2], h->desc.swizzle[3], e->view.swizzle[0],
                         e->view.swizzle[1], e->view.swizzle[2], e->view.swizzle[3], (void *)h, (void *)st.color[0], smp_id);
         }
-        if (st.sampler_pool.entries && smp_id < st.sampler_pool.count)
-            ii->sampler = render_sampler(&((SamplerDesc *)st.sampler_pool.entries)[smp_id]);
+        if (st.sampler_pool.entries && smp_id < st.sampler_pool.count) {
+            /* Maxwell compares depth only in instructions that ask for it (TEX.DC); a sampler with
+             * compare on, used by a plain sample, is undefined in Vulkan (the Adreno compares
+             * anyway: the tilt-shift blur read 0/1 instead of depth and blurred everything) */
+            SamplerDesc d = ((SamplerDesc *)st.sampler_pool.entries)[smp_id];
+            if (!tx->shadow) d.compare_mode = 0;
+            ii->sampler = render_sampler(&d);
+        }
         if (st.sampler_pool.entries && smp_id < st.sampler_pool.count && render_tracing()) {
             const SamplerDesc *d = &((SamplerDesc *)st.sampler_pool.entries)[smp_id];
             fprintf(stderr, "render:     sampler %u: filt %u/%u wrap %u %u %u cmp %u/%u red %u lod %g..%g bias %g aniso %g\n", smp_id,
@@ -630,7 +653,18 @@ static void fill_buffer(uint64_t dst, uint64_t size, uint32_t value) {
 /* ---- compute ---- */
 
 /* DispatchCompute (a = groups x, y, z) / DispatchComputeIndirect (a = address of the counts) */
+/* The game records each frame as one command list, so the GPU used to start only after we had
+ * translated all of it (~4 ms): the game then waits for that frame on the GPU, and the two
+ * together missed the 60 Hz deadline by about a millisecond. Now the work so far is submitted
+ * whenever a new render pass is about to start (not inside one: splitting a pass costs the
+ * tiler a store and a load) and enough has been recorded: the GPU works while we translate. */
+#define EARLY_SUBMIT_WORK 48
+static void submit_early(void) {
+    if (!st.rendering && render_recorded_work() >= EARLY_SUBMIT_WORK) render_submit();
+}
+
 static void dispatch(const Cmd *r, int indirect) {
+    submit_early();
     const Program *p = &st.program;
     if (!(p->stages >> STAGE_COMPUTE & 1)) { warn_once("dispatch without a compute shader", p->stages); return; }
     HostShader *cs = render_shader(p->code[STAGE_COMPUTE], p->control[STAGE_COMPUTE], SHADER_COMPUTE, 0);
@@ -668,6 +702,7 @@ static void dispatch(const Cmd *r, int indirect) {
     }
     render_barrier(cmd);                             /* its writes, before whatever comes next */
     stats.dispatches++;
+    render_count_work();
 }
 
 void render_stats(void) {
@@ -675,10 +710,17 @@ void render_stats(void) {
             (unsigned long long)stats.done, (unsigned long long)stats.no_shader,
             (unsigned long long)stats.failed_shader, (unsigned long long)stats.other);
     if (stats.dispatches) fprintf(stderr, "render: %llu compute dispatches\n", (unsigned long long)stats.dispatches);
+    if (render_compiles) {                           /* new pipelines: keep them for next time */
+        fprintf(stderr, "render: %u new pipelines, %.0f ms creating shaders and pipelines\n", render_compiles, render_compile_ms);
+        vk_save_pipeline_cache();
+    }
+    render_compiles = 0;
+    render_compile_ms = 0;
     memset(&stats, 0, sizeof stats);
 }
 
 static void draw(const Cmd *r, int indexed) {
+    submit_early();
     const Program *p = &st.program;
     if (!(p->stages >> STAGE_VERTEX & 1) || !(p->stages >> STAGE_FRAGMENT & 1)) {
         warn_once("draw without a vertex and a fragment shader", p->stages);
@@ -778,16 +820,25 @@ static void draw(const Cmd *r, int indexed) {
     VkCommandBuffer cmd = render_cmd();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipeline_layout(), 0, 1, &set, 0, NULL);
+    VkBuffer vb[16];                                 /* the streams used, bound in runs of neighbours */
+    VkDeviceSize voff[16];
+    uint32_t used = 0;
     for (uint32_t i = 0; i < st.nattribs; i++) {
         if (!(vs->info.inputs >> i & 1) || !st.attrib[i].format) continue;
         uint32_t s = st.attrib[i].stream;
-        VkBuffer b;
-        VkDeviceSize off;
-        if (render_guest_buffer(st.vertex_buffer[s].address, &b, &off) != 0) {
+        if (used >> s & 1) continue;
+        if (render_guest_buffer(st.vertex_buffer[s].address, &vb[s], &voff[s]) != 0) {
             warn_once("vertex buffer not in a memory pool", st.vertex_buffer[s].address);
             return;
         }
-        vkCmdBindVertexBuffers(cmd, s, 1, &b, &off);
+        used |= 1u << s;
+    }
+    for (uint32_t s = 0; s < 16; s++) {
+        if (!(used >> s & 1)) continue;
+        uint32_t n = 1;
+        while (s + n < 16 && (used >> (s + n) & 1)) n++;
+        vkCmdBindVertexBuffers(cmd, s, n, &vb[s], &voff[s]);
+        s += n - 1;
     }
     VkViewport vp = { st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3], st.depth_range[0], st.depth_range[1] };
     if (vp.width <= 0) vp.width = 1;
@@ -818,6 +869,7 @@ static void draw(const Cmd *r, int indexed) {
     }
     stats.other--;
     stats.done++;
+    render_count_work();
     for (uint32_t i = 0; i < st.rt.count; i++) if (st.color[i]) render_image_gpu_wrote(st.color[i]);
     if (st.depth) render_image_gpu_wrote(st.depth);
     /* LAA_DUMP_DRAWS_AT=frame (+ LAA_DUMP_DIR): after each pass of that frame that isn't scene
