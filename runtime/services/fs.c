@@ -12,6 +12,8 @@
  */
 #define _DEFAULT_SOURCE
 #include "services.h"
+#include <time.h>
+#include "nvn/nvn.h"
 #include "kernel.h"
 #include "romfs.h"
 #include <dirent.h>
@@ -57,7 +59,14 @@ static void romfs_storage_dispatch(ServiceObject *self, IpcCall *call) {
         IpcBuffer b = ipc_out_buffer(call, 0);
         if (size > b.size) size = b.size;
         void *dst = ipc_guest_ptr(b.addr, size);
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
         if (!dst || romfs_read(off, dst, size) != 0) call->result = RESULT_OUT_OF_RANGE;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if (nvn_sync_tracing())                     /* LAA_TRACE_SYNC: file reads in the timeline */
+            fprintf(stderr, "sync: %.2f thread %d read 0x%llx bytes from the RomFS in %.2f ms\n",
+                    t0.tv_sec * 1e3 + t0.tv_nsec / 1e6, kthread_current() ? (int)kthread_current()->id : -1,
+                    (unsigned long long)size, (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
         static uint64_t reads, bytes;
         reads++;
         bytes += size;

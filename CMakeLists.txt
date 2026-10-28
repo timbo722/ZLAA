@@ -25,6 +25,11 @@ if(CMAKE_C_FLAGS MATCHES "fast-math" OR CMAKE_C_FLAGS_RELEASE MATCHES "fast-math
     message(FATAL_ERROR "-ffast-math changes float results; the generated code must not use it")
 endif()
 set(RECOMP_FLAGS -fwrapv -ffp-contract=off -fno-math-errno)
+if(ANDROID)
+    # The Thor's cores are ARMv9; armv8.2-a makes atomics single instructions (LSE) instead of
+    # calls that check the CPU at run time
+    add_compile_options(-march=armv8.2-a)
+endif()
 
 # Each chunk compile needs ~0.7 GB of RAM (16 jobs peaked at 11 GB). One job per core could
 # run the machine out of memory, so game chunks get their own Ninja pool sized by RAM.

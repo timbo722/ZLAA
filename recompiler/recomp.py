@@ -15,6 +15,7 @@ Examples:
 With -o ending in ".c" everything goes in one file; otherwise -o is a folder and the
 output is split into chunks (the game is far too big for one C file).
 """
+import re
 import argparse
 import os
 import sys
@@ -136,19 +137,141 @@ def recompile_function(img, funcs, start, name, size, stats, comments=True):
     if not last_info or last_info[0] in ("cond", "bl", "blr"):
         body.append("    " + tr.jump(start + size - 4, start + size))
 
+    if has_br:
+        body.append("dispatch:")
+        body.append("    switch (jt) {")
+        for pc in range(start, start + size, 4):
+            body.append(f"    case {hx(pc)}: goto L_{pc:x};")
+        body.append("    default: recomp_call_addr(c, jt); return;  /* indirect tail call */")
+        body.append("    }")
+    # (not in big functions with an indirect-jump dispatch, where every instruction is an entry
+    # point and the C compiler spills the locals everywhere, nor in huge ones)
+    cache = not os.environ.get("RECOMP_NO_REGISTER_CACHE") and size // 4 <= 3000 and not (has_br and size // 4 > 300)
+    if COLLECT_ABI:
+        plain = [_REG_RE.sub(_local, l) for l in body]
+        text = "\n".join(plain)
+        FUNC_INFO[cname(start)] = (follows_abi(plain), re.search(r"\bst64\(c, .*\bX(19|2[0-8])\)", text) is not None,
+                                   set(re.findall(r"\b(f_[0-9a-f]+)\(c\)", text)))
+    decls, body = cache_registers(body) if cache else ([], body)
     out = [f"/* {name} */", f"void {cname(start)}(CPU *c) {{"]
+    out.extend(decls)
     if has_br:
         out.append("    uint64_t jt;")
     out.extend(body)
-    if has_br:
-        out.append("dispatch:")
-        out.append("    switch (jt) {")
-        for pc in range(start, start + size, 4):
-            out.append(f"    case {hx(pc)}: goto L_{pc:x};")
-        out.append("    default: recomp_call_addr(c, jt); return;  /* indirect tail call */")
-        out.append("    }")
     out.append("}")
     return out
+
+
+# Guest registers live in local variables inside each function (X0..X30, XSP) instead of the CPU
+# struct: the C compiler can't tell that guest memory (c->mem + address) never overlaps the
+# struct, so with c->x[n] it stored every register write and reloaded registers after every
+# guest memory store. Locals can't overlap memory: they stay in host registers, like native
+# code. The struct is brought up to date only where someone else can look: before calls that
+# read or change registers (other guest functions, indirect calls, SVCs, error reports) the
+# caller-saved registers (X0-X18, X30) this function wrote and SP are stored, and afterwards the
+# caller-saved ones it uses are reloaded; the same stores happen before each return. By the
+# AArch64 calling convention, X19-X29 and SP come back from a call unchanged, and a function
+# doesn't depend on its caller's X19-X29 (it may save and restore them, which leaves our locals
+# right). So X19-X29 in the struct can be stale (only crash reports show it). Not every callee
+# keeps the convention: jumps into the middle of other code (B to another "function"), indirect
+# jumps, and the compiler's outlined fragments (tiny functions that use whatever registers their
+# call site had) - so for those all written registers are stored and all used ones reloaded.
+# Which functions keep it is found by a first pass over all of them (follows_abi, NON_ABI).
+NON_ABI = set()           # functions that read X19-X29 before saving or setting them, or change them unsaved
+FUNC_INFO = {}            # first pass: name -> (keeps the convention itself, saves X19-X28, direct callees)
+COLLECT_ABI = False
+
+
+def find_non_abi():
+    """NON_ABI from FUNC_INFO: functions that break the convention themselves, and - repeated until
+    nothing changes - functions that call one of those without having saved X19-X28 first (so they
+    pass their caller's values on to it, like the startup code's trampolines)."""
+    NON_ABI.clear()
+    NON_ABI.update(n for n, (ok, _, _) in FUNC_INFO.items() if not ok)
+    changed = True
+    while changed:
+        changed = False
+        for n, (ok, saves, callees) in FUNC_INFO.items():
+            if n not in NON_ABI and not saves and callees & NON_ABI:
+                NON_ABI.add(n)
+                changed = True
+FULL_SYNC_CALLS = ("recomp_trap", "recomp_bad_jump", "recomp_unimplemented")
+
+
+def follows_abi(lines):
+    """Does a function (body with X0..X30 locals) keep the calling convention for X19-X29? Walking
+    its statements in order, the first use of each must save it (st64 of it to the stack) or set it
+    (X19 = ... not reading it), and one that is set must be saved somewhere (to be restored)."""
+    stmts = [t for t in re.split(r"[;{}]", "\n".join(lines)) if t.strip()]
+    text = "\n".join(lines)
+    for n in range(19, 30):
+        r = re.compile(rf"\bX{n}\b")
+        save = re.compile(rf"\bst64\(c, .*\bX{n}\)")
+        for t in stmts:
+            if not r.search(t):
+                continue
+            if save.search(t):
+                break                                   # saved first: fine
+            m = re.match(rf"\s*X{n} = (?!=)(.*)", t, re.S)
+            if m and not r.search(m.group(1)):
+                if not save.search(text):
+                    return False                        # changed but never saved
+                break                                   # set first: fine
+            return False                                # read first: uses its caller's value
+    return True
+
+
+REG_CALLS = ("recomp_call_addr", "recomp_svc", "recomp_trap", "recomp_bad_jump", "recomp_unimplemented")
+_REG_RE = re.compile(r"c->x\[(\d+)\]|c->sp\b")
+_CALL_RE = re.compile(r"\b(f_[0-9a-f]+|" + "|".join(REG_CALLS) + r")\(c[,)]")
+
+
+def _local(m):
+    return "XSP" if m.group(0) == "c->sp" else f"X{m.group(1)}"
+
+
+def cache_registers(lines):
+    lines = [_REG_RE.sub(_local, l) for l in lines]
+    used = sorted({n for l in lines for n in re.findall(r"\b(X\d+|XSP)\b", l)},
+                  key=lambda n: 99 if n == "XSP" else int(n[1:]))
+    if not used:
+        return [], lines
+    written = [n for n in used if any(re.search(rf"\b{n} = (?!=)", l) for l in lines)]
+    field = lambda n: "c->sp" if n == "XSP" else f"c->x[{n[1:]}]"
+    store = "".join(f"{field(n)} = {n}; " for n in written)
+    callee_saved = lambda n: n == "XSP" or 19 <= int(n[1:]) <= 29
+    store = "".join(f"{field(n)} = {n}; " for n in written if n == "XSP" or not callee_saved(n))
+    load = "".join(f"{n} = {field(n)}; " for n in used if not callee_saved(n))
+    store_all = "".join(f"{field(n)} = {n}; " for n in written)
+    load_all = "".join(f"{n} = {field(n)}; " for n in used)
+    out = []
+    for l in lines:
+        # wrap each register-visible call: store before, reload after (scan for its closing ")")
+        res, i = "", 0
+        for m in _CALL_RE.finditer(l):
+            if m.start() < i:
+                continue
+            depth, j = 0, l.index("(", m.start())
+            while j < len(l):
+                if l[j] == "(":
+                    depth += 1
+                elif l[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            end = j + 1
+            if end < len(l) and l[end] == ";":
+                end += 1
+            callee, jump = m.group(1), l[end:].lstrip().startswith("return;")
+            full = jump or callee in FULL_SYNC_CALLS or callee in NON_ABI
+            res += l[i:m.start()] + "{ " + (store_all if full else store) + l[m.start():end] + " " + \
+                (load_all if full else load) + "}"
+            i = end
+        l = res + l[i:]
+        out.append(re.sub(r"\breturn;", "{ " + store + "return; }", l) if store else l)
+    decls = ["    uint64_t " + ", ".join(f"{n} = {field(n)}" for n in used) + ";"]
+    return decls, out
 
 
 def emit_image(img):
@@ -272,6 +395,17 @@ def main():
         out_f.write(f"/* Generated by recomp.py from {os.path.basename(args.input)} - do not edit */\n")
         out_f.write('#include "recomp_runtime.h"\n\n')
         out_f.writelines(f"void {cname(a)}(CPU *c);\n" for a in funcs)
+    # First pass: which functions keep the calling convention
+    global COLLECT_ABI
+    t_abi = time.time()
+    COLLECT_ABI = True
+    for addr, (name, size) in items:
+        recompile_function(img, funcs, addr, name, size, Stats(), False)
+    COLLECT_ABI = False
+    find_non_abi()
+    FUNC_INFO.clear()
+    print(f"  {len(NON_ABI)} functions don't keep the calling convention ({time.time() - t_abi:.0f} s to find them)",
+          file=sys.stderr)
     for k, (addr, (name, size)) in enumerate(items):
         code = "\n".join(recompile_function(img, funcs, addr, name, size, stats, comments)) + "\n\n"
         if out_f:

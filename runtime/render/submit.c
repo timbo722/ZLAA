@@ -73,7 +73,7 @@ static void *host_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer *out)
 #define STAMPS_PER_CTX 32
 static VkQueryPool game_stamps;
 static int stamps_used[NCTX];
-static struct { uint64_t serial, address; uint32_t query; } pending_stamps[NCTX * STAMPS_PER_CTX];
+static struct { uint64_t serial, address, frame; uint32_t query; } pending_stamps[NCTX * STAMPS_PER_CTX];
 static int npending_stamps;
 static pthread_mutex_t stamps_lock = PTHREAD_MUTEX_INITIALIZER;
 static double stamp_offset_ns;                     /* CPU clock - GPU clock, from the first one read */
@@ -88,7 +88,7 @@ int render_guest_timestamp(uint64_t address) {
     uint32_t q = (uint32_t)cur * STAMPS_PER_CTX + (uint32_t)stamps_used[cur]++;
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, game_stamps, q);
     pthread_mutex_lock(&stamps_lock);
-    pending_stamps[npending_stamps++] = (typeof(pending_stamps[0])){ submitted + 1, address, q };
+    pending_stamps[npending_stamps++] = (typeof(pending_stamps[0])){ submitted + 1, address, nvn_frame_count(), q };
     pthread_mutex_unlock(&stamps_lock);
     return 0;
 }
@@ -107,6 +107,16 @@ void render_timestamps_update(void) {
         clock_gettime(CLOCK_MONOTONIC, &t);
         double gpu_ns = (double)v * vk.limits.timestampPeriod;
         if (!stamp_offset_set) { stamp_offset_ns = (double)t.tv_sec * 1e9 + t.tv_nsec - gpu_ns; stamp_offset_set = 1; }
+        /* LAA_DRS_BIAS=x (default 1): times within a frame are stretched from its first timestamp,
+         * so the game's dynamic resolution picks a lower resolution. Measured walking in Mabe
+         * Village: 1.25 -> 1280x720 instead of 1536x864, slow frames 48 instead of 59 of ~1400 (the
+         * GPU's tail is mostly full-screen post-processing, which doesn't shrink with it). */
+        static double bias = -1, base_ns;
+        static uint64_t base_frame = ~0ull;
+        if (bias < 0) bias = getenv("LAA_DRS_BIAS") ? atof(getenv("LAA_DRS_BIAS")) : 1.0;
+        if (!(bias >= 0.5 && bias <= 4)) bias = 1;
+        if (pending_stamps[i].frame != base_frame) { base_frame = pending_stamps[i].frame; base_ns = gpu_ns; }
+        gpu_ns = base_ns + (gpu_ns - base_ns) * bias;
         uint64_t ticks = (uint64_t)((gpu_ns + stamp_offset_ns) * 384.0 / 625.0);
         uint64_t report[2] = { 0, ticks };
         memcpy(gptr(pending_stamps[i].address), report, 16);
