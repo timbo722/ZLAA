@@ -62,7 +62,8 @@ void render_end_rendering(void) {
     if (!st.rendering) return;
     static int no_barrier = -1;
     if (no_barrier < 0) no_barrier = getenv("LAA_NO_PASS_BARRIER") != NULL;
-    vkCmdEndRendering(render_cmd());
+    if (render_pass_objects()) vkCmdEndRenderPass(render_cmd());
+    else vkCmdEndRendering(render_cmd());
     if (!no_barrier) render_barrier(render_cmd());
     st.rendering = 0;
 }
@@ -455,6 +456,108 @@ static void copy_buffer_image(uint64_t address, const ImageRef *ref, int to_buff
 
 /* ---- drawing ---- */
 
+/* ---- render pass objects ----
+ * Passes begin with vkCmdBeginRenderPass and cached VkRenderPass / VkFramebuffer objects. With
+ * dynamic rendering (vkCmdBeginRendering) the Adreno driver did its setup at every pass begin,
+ * allocating memory each time (~50 us a pass, 32 passes a frame). LAA_DYNAMIC_RENDERING=1: as before. */
+int render_pass_objects(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LAA_DYNAMIC_RENDERING") == NULL;
+    return on;
+}
+
+typedef struct {
+    uint32_t ncolor;
+    VkFormat color[8], depth;
+    uint8_t color_load[8], depth_load, stencil_load; /* VkAttachmentLoadOp */
+} PassKey;
+typedef struct { PassKey k; VkRenderPass pass; } PassEntry;
+static PassEntry passes[512];
+static int npasses;
+static pthread_mutex_t passes_lock = PTHREAD_MUTEX_INITIALIZER;   /* (pipelines are made on compile threads) */
+
+static VkRenderPass make_pass(const PassKey *k) {
+    VkAttachmentDescription att[9];
+    VkAttachmentReference color[8], depth;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < k->ncolor; i++) {
+        if (k->color[i] == VK_FORMAT_UNDEFINED) { color[i] = (VkAttachmentReference){ VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED }; continue; }
+        att[n] = (VkAttachmentDescription){ .format = k->color[i], .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = k->color_load[i], .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
+        color[i] = (VkAttachmentReference){ n++, VK_IMAGE_LAYOUT_GENERAL };
+    }
+    int has_depth = k->depth != VK_FORMAT_UNDEFINED;
+    if (has_depth) {
+        att[n] = (VkAttachmentDescription){ .format = k->depth, .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = k->depth_load, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = k->stencil_load,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE, .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
+        depth = (VkAttachmentReference){ n++, VK_IMAGE_LAYOUT_GENERAL };
+    }
+    VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = k->ncolor,
+                                .pColorAttachments = color, .pDepthStencilAttachment = has_depth ? &depth : NULL };
+    VkRenderPassCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = n, .pAttachments = att,
+                                  .subpassCount = 1, .pSubpasses = &sp };
+    VkRenderPass rp;
+    VK_CHECK(vkCreateRenderPass(vk.device, &ci, NULL, &rp));
+    return rp;
+}
+
+static VkRenderPass find_pass(const PassKey *k) {
+    pthread_mutex_lock(&passes_lock);
+    VkRenderPass rp = VK_NULL_HANDLE;
+    for (int i = 0; i < npasses && !rp; i++)
+        if (memcmp(&passes[i].k, k, sizeof *k) == 0) rp = passes[i].pass;
+    if (!rp) {
+        rp = make_pass(k);
+        if (npasses < (int)(sizeof passes / sizeof *passes)) passes[npasses++] = (PassEntry){ *k, rp };
+    }
+    pthread_mutex_unlock(&passes_lock);
+    return rp;
+}
+
+/* For pipelines: a pass with these formats (any pass differing only in load ops is compatible) */
+VkRenderPass render_compatible_pass(uint32_t ncolor, const VkFormat *color, VkFormat depth) {
+    PassKey k;
+    memset(&k, 0, sizeof k);
+    k.ncolor = ncolor;
+    for (uint32_t i = 0; i < ncolor && i < 8; i++) { k.color[i] = color[i]; k.color_load[i] = VK_ATTACHMENT_LOAD_OP_LOAD; }
+    k.depth = depth;
+    k.depth_load = k.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    return find_pass(&k);
+}
+
+/* Framebuffers: by pass formats, views and size (views live as long as their images: always) */
+#define FRAMEBUFFERS 4096
+typedef struct { VkRenderPass compat; VkImageView views[9]; uint32_t n, w, h; VkFramebuffer fb; } FbEntry;
+static FbEntry framebuffers[FRAMEBUFFERS];
+
+static VkFramebuffer find_framebuffer(VkRenderPass compat, const VkImageView *views, uint32_t n, uint32_t w, uint32_t h) {
+    uint64_t hsh = (uint64_t)(uintptr_t)compat * 31 + w * 131071u + h;
+    for (uint32_t i = 0; i < n; i++) hsh = (hsh ^ (uint64_t)(uintptr_t)views[i]) * 0x100000001B3ull;
+    for (unsigned k = 0; k < FRAMEBUFFERS; k++) {
+        FbEntry *e = &framebuffers[(hsh + k) % FRAMEBUFFERS];
+        if (e->fb && e->compat == compat && e->n == n && e->w == w && e->h == h && memcmp(e->views, views, n * sizeof *views) == 0)
+            return e->fb;
+        if (!e->fb) {
+            VkFramebufferCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = compat,
+                                           .attachmentCount = n, .pAttachments = views, .width = w, .height = h, .layers = 1 };
+            VK_CHECK(vkCreateFramebuffer(vk.device, &ci, NULL, &e->fb));
+            e->compat = compat;
+            memcpy(e->views, views, n * sizeof *views);
+            e->n = n; e->w = w; e->h = h;
+            return e->fb;
+        }
+    }
+    static int warned;                               /* (table full: one that is made and never kept) */
+    if (!warned++) fprintf(stderr, "render: framebuffer table full\n");
+    VkFramebufferCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = compat,
+                                   .attachmentCount = n, .pAttachments = views, .width = w, .height = h, .layers = 1 };
+    VkFramebuffer fb;
+    VK_CHECK(vkCreateFramebuffer(vk.device, &ci, NULL, &fb));
+    return fb;
+}
+
 /* Start rendering into the current targets, if not already. 0 on success. */
 static int begin_rendering(void) {
     if (st.rendering) return 0;
@@ -506,10 +609,39 @@ static int begin_rendering(void) {
     }
     int has_d = st.depth && (st.depth->aspects & VK_IMAGE_ASPECT_DEPTH_BIT);
     int has_s = st.depth && (st.depth->aspects & VK_IMAGE_ASPECT_STENCIL_BIT);
-    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { w, h } },
-        .layerCount = 1, .colorAttachmentCount = ncolor, .pColorAttachments = color,
-        .pDepthAttachment = has_d ? &depth : NULL, .pStencilAttachment = has_s ? &stencil : NULL };
-    vkCmdBeginRendering(cmd, &ri);
+    if (render_pass_objects()) {
+        PassKey k;
+        memset(&k, 0, sizeof k);
+        VkImageView views[9];
+        VkClearValue clears[9];
+        uint32_t n = 0;
+        k.ncolor = ncolor;
+        VkFormat formats[8] = { 0 };
+        for (uint32_t i = 0; i < ncolor; i++) {
+            formats[i] = k.color[i] = st.color[i] ? st.color[i]->format : VK_FORMAT_UNDEFINED;
+            if (!st.color[i]) continue;
+            k.color_load[i] = (uint8_t)color[i].loadOp;
+            clears[n] = color[i].clearValue;
+            views[n++] = color[i].imageView;
+        }
+        if (st.depth) {
+            k.depth = st.depth->format;
+            k.depth_load = (uint8_t)(has_d ? depth.loadOp : VK_ATTACHMENT_LOAD_OP_LOAD);
+            k.stencil_load = (uint8_t)(has_s ? stencil.loadOp : VK_ATTACHMENT_LOAD_OP_LOAD);
+            clears[n].depthStencil = (VkClearDepthStencilValue){ depth.clearValue.depthStencil.depth, stencil.clearValue.depthStencil.stencil };
+            views[n++] = st.depth->target_view;
+        }
+        VkRenderPass rp = find_pass(&k);
+        VkFramebuffer fb = find_framebuffer(render_compatible_pass(ncolor, formats, k.depth), views, n, w, h);
+        VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
+                                     .renderArea = { { 0, 0 }, { w, h } }, .clearValueCount = n, .pClearValues = clears };
+        vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    } else {
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { w, h } },
+            .layerCount = 1, .colorAttachmentCount = ncolor, .pColorAttachments = color,
+            .pDepthAttachment = has_d ? &depth : NULL, .pStencilAttachment = has_s ? &stencil : NULL };
+        vkCmdBeginRendering(cmd, &ri);
+    }
     st.rendering = 1;
     st.pass_draws = 0;
     render_passes++;

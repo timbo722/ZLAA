@@ -451,6 +451,10 @@ static VkPipeline create(const PipelineKey *k) {
         .stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
         .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
         .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = render_pipeline_layout() };
+    if (render_pass_objects()) {                     /* (draw.c begins passes with render pass objects) */
+        ci.pNext = NULL;
+        ci.renderPass = render_compatible_pass(k->ncolor, k->color_format, k->depth_format);
+    }
     if (render_tracing())
         fprintf(stderr, "render: pipeline vs %#llx fs %#llx, %u attributes, %u targets\n",
                 (unsigned long long)k->vs_code, (unsigned long long)k->fs_code, nattrs, k->ncolor);

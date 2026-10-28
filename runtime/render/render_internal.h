@@ -131,6 +131,8 @@ typedef struct {
     VkFormat color_format[8], depth_format;
 } PipelineKey;
 VkPipeline render_pipeline(const PipelineKey *k);
+int render_pass_objects(void);                   /* passes with VkRenderPass objects, not dynamic rendering (draw.c) */
+VkRenderPass render_compatible_pass(uint32_t ncolor, const VkFormat *color, VkFormat depth);   /* (thread-safe) */
 VkPipelineLayout render_pipeline_layout(void);
 VkDescriptorSetLayout render_set_layout(void);
 VkPipelineLayout render_compute_layout(void);    /* compute: its own set (bindings from SHADER_COMPUTE * 64) */
