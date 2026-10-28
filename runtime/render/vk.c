@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <pthread.h>
+#include <time.h>
 
 static void load_pipeline_cache(void);
 
@@ -290,9 +292,34 @@ static void load_pipeline_cache(void) {
     free(data);
 }
 
+/* Saving copies megabytes to storage: on a thread of its own, at most once a minute (it took
+ * the game thread long enough to miss frames every 5 s while walking around). */
+static void *save_cache_now(void *arg);
+static pthread_mutex_t save_lock = PTHREAD_MUTEX_INITIALIZER;
+static int saving;
+
 void vk_save_pipeline_cache(void) {
+    static time_t last;
+    time_t now = time(NULL);
+    if (!*cache_path || (last && now - last < 60)) return;
+    pthread_mutex_lock(&save_lock);
+    int busy = saving;
+    saving = 1;
+    pthread_mutex_unlock(&save_lock);
+    if (busy) return;
+    last = now;
+    pthread_t t;
+    if (pthread_create(&t, NULL, save_cache_now, NULL) == 0) pthread_detach(t);
+    else { pthread_mutex_lock(&save_lock); saving = 0; pthread_mutex_unlock(&save_lock); }
+}
+
+static void *save_cache_now(void *arg) {
+    (void)arg;
     size_t size = 0;
-    if (!*cache_path || vkGetPipelineCacheData(vk.device, vk.pipeline_cache, &size, NULL) != VK_SUCCESS || !size) return;
+    if (vkGetPipelineCacheData(vk.device, vk.pipeline_cache, &size, NULL) != VK_SUCCESS || !size) {
+        pthread_mutex_lock(&save_lock); saving = 0; pthread_mutex_unlock(&save_lock);
+        return NULL;
+    }
     void *data = malloc(size);
     char tmp[1200];
     snprintf(tmp, sizeof tmp, "%s.new", cache_path);
@@ -302,6 +329,10 @@ void vk_save_pipeline_cache(void) {
         if (fclose(f) == 0 && ok) rename(tmp, cache_path);   /* (a crash mid-write can't damage the old file) */
     }
     free(data);
+    pthread_mutex_lock(&save_lock);
+    saving = 0;
+    pthread_mutex_unlock(&save_lock);
+    return NULL;
 }
 
 int vk_init(void *sdl_window) {

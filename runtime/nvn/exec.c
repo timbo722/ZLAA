@@ -137,8 +137,23 @@ void nvn_sync_fence(Sync *s) {
 #endif
 }
 
+/* A wait for work of the frame presented last (or later) only waits for the frame before it:
+ * the GPU may run one frame behind, as in a native game. The game fences each frame and waits
+ * for it a few ms after presenting, so its CPU and our GPU took turns and frames missed 60 Hz
+ * (it alternates two syncs: its per-frame data looks double-buffered). Walking in Mabe Village:
+ * GPU waits 4.5 -> 0 ms a frame, slow frames 110 -> 47 of 1500. LAA_FRAME_LAG=0: wait fully. */
+static uint64_t present_serial[2];                 /* GPU serials at the last two presents */
+static int frame_lag = -1;
+
 int nvn_sync_wait(const Sync *s, uint64_t timeout_ns) {
 #ifdef LAA_HAVE_SDL
+    if (frame_lag < 0) frame_lag = !getenv("LAA_FRAME_LAG") || atoi(getenv("LAA_FRAME_LAG")) != 0;
+    if (frame_lag && s->serial > present_serial[1] && present_serial[1]) {
+        Sync capped = *s;
+        capped.serial = present_serial[1];
+        s = &capped;
+        return render_active() ? render_wait_serial(capped.serial, timeout_ns) : 0;
+    }
     /* LAA_TRACE_SYNC=frame: for 3 frames from that one, each wait: for which submission (and
      * the newest submitted / finished then), how long it took, who called */
     if (sync_tracing() && render_active() && s->serial) {
@@ -366,6 +381,8 @@ void nvn_present(const Window *w, uint64_t texture) {
     if (render_active()) {                           /* the display's vsync paces us */
         double t0 = frame_stats > 0 ? now_ms() : 0;
         pthread_mutex_lock(&gpu_lock);
+        present_serial[1] = present_serial[0];       /* (LAA_FRAME_LAG) */
+        present_serial[0] = render_fence_serial();
         render_present(texture, rect);
         if (sync_tracing()) fprintf(stderr, "sync: %.2f presented frame %" PRIu64 "\n", now_ms(), frames);
         pthread_mutex_unlock(&gpu_lock);

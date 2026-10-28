@@ -184,7 +184,10 @@ static void android_setup(const char **exefs, const char **romfs) {
     setenv("LAA_SAVE_DIR", path, 0);
     snprintf(path, sizeof path, "%s/fonts", base);
     setenv("LAA_FONT_DIR", path, 0);
-    snprintf(path, sizeof path, "%s/cache", base);
+    /* the pipeline cache: in internal storage (a real file system: the shared folder above is
+     * FUSE, slow for megabyte writes) */
+    const char *internal = SDL_GetAndroidInternalStoragePath();
+    snprintf(path, sizeof path, "%s/cache", internal ? internal : base);
     setenv("LAA_CACHE_DIR", path, 0);
     snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
     snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
