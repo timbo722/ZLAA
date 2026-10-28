@@ -67,6 +67,7 @@ void render_submit(void);
 extern pthread_mutex_t render_queue_lock;          /* held around everything that uses vk.queue */
 void render_count_work(void);                    /* a draw or dispatch was recorded (submit.c) */
 uint32_t render_recorded_work(void);             /* how many since the last submission */
+void render_collect_compile_stats(void);          /* background pipeline compiles into render_compile_ms (pipeline.c) */
 #define RENDER_CONTEXTS 8                        /* submissions the CPU may be ahead of the GPU (submit.c) */
 int render_context(void);                        /* the context being recorded (0 .. NCTX-1) */
 int render_serial_done(uint64_t serial);

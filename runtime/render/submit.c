@@ -30,6 +30,7 @@ typedef struct {
     VkCommandBuffer cmd;
     uint64_t serial;                               /* of its last submission (0: none) */
     uint64_t staging_used, uniform_used;
+    int clean;                                     /* reset and free to record into (the recycler) */
 } Context;
 
 static Context ctx[NCTX];
@@ -79,6 +80,7 @@ static double stamp_offset_ns;                     /* CPU clock - GPU clock, fro
 static int stamp_offset_set;
 
 static void init(void);
+static void *recycler(void *arg);
 
 int render_guest_timestamp(uint64_t address) {
     VkCommandBuffer cmd = render_cmd();
@@ -122,7 +124,11 @@ static void init(void) {
                                            .commandPool = ctx[i].pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                            .commandBufferCount = 1 };
         VK_CHECK(vkAllocateCommandBuffers(vk.device, &ai, &ctx[i].cmd));
+        ctx[i].clean = 1;
     }
+    pthread_t t;
+    pthread_create(&t, NULL, recycler, NULL);
+    pthread_detach(t);
     VkSemaphoreTypeCreateInfo ti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
                                      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0 };
     VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti };
@@ -242,18 +248,53 @@ void render_gpu_timing_frame(uint64_t frame) {    /* (render_present, after the 
 
 /* ---- recording and submitting ---- */
 
+/* ---- the recycler: once the GPU has finished a context's submission, a thread of its own
+ * resets that context's command and descriptor pools (resetting them was ~6% of the game
+ * thread, and with the work submitted in pieces it happens several times a frame) ---- */
+static struct { int ctx; uint64_t serial; } recycle_queue[NCTX];
+static unsigned recycle_head, recycle_tail;
+static pthread_mutex_t recycle_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t recycle_cond = PTHREAD_COND_INITIALIZER;
+
+static void *recycler(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&recycle_lock);
+        while (recycle_head == recycle_tail) pthread_cond_wait(&recycle_cond, &recycle_lock);
+        int i = recycle_queue[recycle_tail % NCTX].ctx;
+        uint64_t serial = recycle_queue[recycle_tail % NCTX].serial;
+        recycle_tail++;
+        pthread_mutex_unlock(&recycle_lock);
+        VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
+                                   .pSemaphores = &timeline, .pValues = &serial };
+        VK_CHECK(vkWaitSemaphores(vk.device, &wi, UINT64_MAX));
+        VK_CHECK(vkResetCommandPool(vk.device, ctx[i].pool, 0));
+        render_submission_done(i);
+        pthread_mutex_lock(&recycle_lock);
+        ctx[i].clean = 1;
+        pthread_cond_broadcast(&recycle_cond);
+        pthread_mutex_unlock(&recycle_lock);
+    }
+    return NULL;
+}
+
 VkCommandBuffer render_cmd(void) {
     if (!ready) init();
     Context *c = &ctx[cur];
     if (!recording) {
-        /* this context's last submission must be finished before its memory is used again */
-        if (c->serial) render_wait_serial(c->serial, UINT64_MAX);
+        /* this context's last submission must be finished (and its pools reset) before reuse */
+        pthread_mutex_lock(&recycle_lock);
+        if (!c->clean) {
+            double t0 = now_ms();
+            while (!c->clean) pthread_cond_wait(&recycle_cond, &recycle_lock);
+            render_gpu_wait_ms += now_ms() - t0;
+        }
+        c->clean = 0;
+        pthread_mutex_unlock(&recycle_lock);
         render_timestamps_update();                /* (its timestamps are read before the reset below) */
         c->staging_used = c->uniform_used = 0;
-        render_submission_done(cur);
         VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-        VK_CHECK(vkResetCommandPool(vk.device, c->pool, 0));
         VK_CHECK(vkBeginCommandBuffer(c->cmd, &bi));
         recording = 1;
         if (game_stamps) vkCmdResetQueryPool(c->cmd, game_stamps, (uint32_t)cur * STAMPS_PER_CTX, STAMPS_PER_CTX);
@@ -287,6 +328,12 @@ void render_submit(void) {
     pthread_mutex_unlock(&render_queue_lock);
     c->serial = serial;
     __atomic_store_n(&submitted, serial, __ATOMIC_RELEASE);
+    pthread_mutex_lock(&recycle_lock);             /* (reset it once the GPU is done with it) */
+    recycle_queue[recycle_head % NCTX].ctx = cur;
+    recycle_queue[recycle_head % NCTX].serial = serial;
+    recycle_head++;
+    pthread_cond_signal(&recycle_cond);
+    pthread_mutex_unlock(&recycle_lock);
     cur = (cur + 1) % NCTX;
     if (nstamps) {                                 /* (timing: read the timestamps right away) */
         render_wait_serial(serial, UINT64_MAX);

@@ -11,6 +11,7 @@
 #include "render/shader/shader.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <time.h>
 
 /* ================================================================ shaders */
@@ -247,6 +248,7 @@ typedef struct Pipeline {
     struct Pipeline *next;
     PipelineKey key;
     VkPipeline pipeline;
+    int ready;                       /* (atomic) compiled, or failed: pipeline is final */
 } Pipeline;
 
 #define PIPELINE_BUCKETS 1024
@@ -364,17 +366,79 @@ static VkPipeline create(const PipelineKey *k) {
     return p;
 }
 
+/* New pipelines are compiled by background threads: the driver takes several ms for one, and
+ * walking into a new part of the village needed dozens (frames of 100+ ms). Until one is ready,
+ * the draws that need it are skipped (the object appears a frame or two late). The pipeline
+ * cache makes it near-instant the next time. LAA_SYNC_PIPELINES=1: compile right away instead
+ * (screenshots that must show everything). */
+#define COMPILE_THREADS 2
+#define COMPILE_QUEUE 1024
+static Pipeline *compile_queue[COMPILE_QUEUE];
+static unsigned compile_head, compile_tail;
+static pthread_mutex_t compile_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t compile_cond = PTHREAD_COND_INITIALIZER;
+static double async_compile_ms;                  /* (render_stats adds these to the main thread's) */
+static unsigned async_compiles;
+
+static void *compile_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&compile_lock);
+        while (compile_head == compile_tail) pthread_cond_wait(&compile_cond, &compile_lock);
+        Pipeline *p = compile_queue[compile_tail++ % COMPILE_QUEUE];
+        pthread_mutex_unlock(&compile_lock);
+        double t0 = compile_clock();
+        VkPipeline v = create(&p->key);
+        pthread_mutex_lock(&compile_lock);
+        async_compile_ms += compile_clock() - t0;
+        async_compiles++;
+        pthread_mutex_unlock(&compile_lock);
+        p->pipeline = v;
+        __atomic_store_n(&p->ready, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+void render_collect_compile_stats(void) {         /* (render_stats: once in a while, main thread) */
+    pthread_mutex_lock(&compile_lock);
+    render_compile_ms += async_compile_ms;
+    render_compiles += async_compiles;
+    async_compile_ms = 0;
+    async_compiles = 0;
+    pthread_mutex_unlock(&compile_lock);
+}
+
 VkPipeline render_pipeline(const PipelineKey *k) {
+    static int sync = -1;
+    if (sync < 0) {
+        sync = getenv("LAA_SYNC_PIPELINES") != NULL;
+        render_pipeline_layout();                    /* (made before any thread can use it) */
+        for (int i = 0; !sync && i < COMPILE_THREADS; i++) {
+            pthread_t t;
+            pthread_create(&t, NULL, compile_thread, NULL);
+            pthread_detach(t);
+        }
+    }
     unsigned b = hash(k, sizeof *k) & (PIPELINE_BUCKETS - 1);
     for (Pipeline *p = pipeline_buckets[b]; p; p = p->next)
-        if (memcmp(&p->key, k, sizeof *k) == 0) return p->pipeline;
+        if (memcmp(&p->key, k, sizeof *k) == 0)
+            return __atomic_load_n(&p->ready, __ATOMIC_ACQUIRE) ? p->pipeline : VK_NULL_HANDLE;
     Pipeline *p = calloc(1, sizeof *p);
     p->key = *k;
-    double t0 = compile_clock();
+    p->next = pipeline_buckets[b];
+    pipeline_buckets[b] = p;
+    pthread_mutex_lock(&compile_lock);
+    int queued = !sync && compile_head - compile_tail < COMPILE_QUEUE;
+    if (queued) {
+        compile_queue[compile_head++ % COMPILE_QUEUE] = p;
+        pthread_cond_signal(&compile_cond);
+    }
+    pthread_mutex_unlock(&compile_lock);
+    if (queued) return VK_NULL_HANDLE;
+    double t0 = compile_clock();                     /* (synchronous: as asked, or the queue is full) */
     p->pipeline = create(k);
     render_compile_ms += compile_clock() - t0;
     render_compiles++;
-    p->next = pipeline_buckets[b];
-    pipeline_buckets[b] = p;
+    __atomic_store_n(&p->ready, 1, __ATOMIC_RELEASE);
     return p->pipeline;
 }

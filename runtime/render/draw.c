@@ -658,9 +658,11 @@ static void fill_buffer(uint64_t dst, uint64_t size, uint32_t value) {
  * together missed the 60 Hz deadline by about a millisecond. Now the work so far is submitted
  * whenever a new render pass is about to start (not inside one: splitting a pass costs the
  * tiler a store and a load) and enough has been recorded: the GPU works while we translate. */
-#define EARLY_SUBMIT_WORK 48
+#define EARLY_SUBMIT_WORK 96                         /* (measured best on the Thor; LAA_EARLY_SUBMIT=n) */
 static void submit_early(void) {
-    if (!st.rendering && render_recorded_work() >= EARLY_SUBMIT_WORK) render_submit();
+    static int every = -1;
+    if (every < 0) every = getenv("LAA_EARLY_SUBMIT") ? atoi(getenv("LAA_EARLY_SUBMIT")) : EARLY_SUBMIT_WORK;
+    if (!st.rendering && every > 0 && render_recorded_work() >= (uint32_t)every) render_submit();
 }
 
 static void dispatch(const Cmd *r, int indirect) {
@@ -710,6 +712,7 @@ void render_stats(void) {
             (unsigned long long)stats.done, (unsigned long long)stats.no_shader,
             (unsigned long long)stats.failed_shader, (unsigned long long)stats.other);
     if (stats.dispatches) fprintf(stderr, "render: %llu compute dispatches\n", (unsigned long long)stats.dispatches);
+    render_collect_compile_stats();
     if (render_compiles) {                           /* new pipelines: keep them for next time */
         fprintf(stderr, "render: %u new pipelines, %.0f ms creating shaders and pipelines\n", render_compiles, render_compile_ms);
         vk_save_pipeline_cache();

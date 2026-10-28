@@ -89,6 +89,8 @@ typedef struct {
     int16_t history[2];
     float last[2][MAX_CHANNELS];            /* the two source samples being interpolated between */
     double fraction;                        /* how far between them */
+    struct { uint8_t on; float b[3], a[2]; } biquad[2];    /* the voice's 2 filters (EQ: games quieten */
+    float biquad_state[2][MAX_CHANNELS][2];                /* and muffle distant sounds with them) */
 } Voice;
 
 typedef struct {
@@ -292,7 +294,7 @@ static void renderer_destroy(ServiceObject *self) {
 /* VoiceInParameter1 (0x170 bytes), the fields we use */
 #define VOICE_IN_SIZE 0x170
 enum { VIN_IS_NEW = 0x8, VIN_IN_USE = 0x9, VIN_PLAY_STATE = 0xA, VIN_SAMPLE_FORMAT = 0xB, VIN_SAMPLE_RATE = 0xC,
-       VIN_CHANNELS = 0x18, VIN_PITCH = 0x1C, VIN_VOLUME = 0x20, VIN_DATA_SOURCE = 0x48, VIN_MIX_ID = 0x58,
+       VIN_CHANNELS = 0x18, VIN_PITCH = 0x1C, VIN_VOLUME = 0x20, VIN_BIQUADS = 0x24, VIN_DATA_SOURCE = 0x48, VIN_MIX_ID = 0x58,
        VIN_SPLITTER_ID = 0x5C, VIN_WAVE_BUFFERS = 0x60, VIN_CHANNEL_RESOURCES = 0x140, VIN_FLUSH_COUNT = 0x159 };
 /* its 4 wave buffers, 0x38 bytes each */
 enum { WB_SIZE = 0x38, WB_ADDRESS = 0x0, WB_BYTES = 0x8, WB_START = 0x10, WB_END = 0x14, WB_LOOP = 0x18,
@@ -330,6 +332,17 @@ static void voice_update(Voice *v, const uint8_t *in) {
     if (v->channels < 1 || v->channels > MAX_CHANNELS) v->channels = 1;
     if (!(v->pitch > 0 && v->pitch < 16)) v->pitch = 1;                 /* also catches NaN */
     if (!(v->volume >= 0 && v->volume < 16)) v->volume = 0;
+    /* BiquadFilterParameter (0xC): enable, -, s16 numerator[3], s16 denominator[2], Q14 fixed point */
+    for (int f = 0; f < 2; f++) {
+        const uint8_t *q = in + VIN_BIQUADS + 0xC * f;
+        int16_t num[3], den[2];
+        memcpy(num, q + 2, 6);
+        memcpy(den, q + 8, 4);
+        if (q[0] && !v->biquad[f].on) memset(v->biquad_state[f], 0, sizeof v->biquad_state[f]);
+        v->biquad[f].on = q[0];
+        for (int k = 0; k < 3; k++) v->biquad[f].b[k] = num[k] / 16384.0f;
+        for (int k = 0; k < 2; k++) v->biquad[f].a[k] = den[k] / 16384.0f;
+    }
     for (int i = 0; i < 4; i++) {                     /* buffers the game appended since last time */
         const uint8_t *wb = in + VIN_WAVE_BUFFERS + WB_SIZE * i;
         if (wb[WB_SENT_TO_SERVER]) continue;
@@ -459,6 +472,19 @@ static void voice_render(Renderer *r, Voice *v) {
         float t = (float)v->fraction;
         for (uint32_t c = 0; c < channels; c++) in[c][i] = v->last[0][c] + (v->last[1][c] - v->last[0][c]) * t;
         v->fraction += step;
+    }
+    for (int f = 0; f < 2; f++) {                     /* the filters (as Ryujinx's BiquadFilterHelper) */
+        if (!v->biquad[f].on) continue;
+        const float *b = v->biquad[f].b, *a = v->biquad[f].a;
+        for (uint32_t c = 0; c < channels; c++) {
+            float *z = v->biquad_state[f][c];
+            for (uint32_t i = 0; i < n; i++) {
+                float x = in[c][i], y = x * b[0] + z[0];
+                z[0] = x * b[1] + y * a[0] + z[1];
+                z[1] = x * b[2] + y * a[1];
+                in[c][i] = y;
+            }
+        }
     }
     float from = v->previous_volume, to = v->volume;
     v->previous_volume = to;
@@ -662,9 +688,19 @@ static void request_update(Renderer *r, IpcCall *call) {
         voice_update(v, vin);
         if (dump && v->state == VOICE_STARTED) {
             const float *res = v->resources[0] >= 0 && (uint32_t)v->resources[0] < r->p.voices ? r->resources[v->resources[0]] : NULL;
-            fprintf(stderr, "audren:   voice %u: format %u ch %u rate %u pitch %g vol %g mix %d res %d (%g %g) slot %d valid %d%d%d%d\n",
+            char sends[512];
+            int len = 0;
+            for (int j = 0; res && j < MIX_BUFFERS && len < 480; j++)   /* the mix buffers it feeds */
+                if (res[j] != 0) len += snprintf(sends + len, sizeof sends - len, " %d:%.3g", j, res[j]);
+            sends[len] = 0;
+            fprintf(stderr, "audren:   voice %u: format %u ch %u rate %u pitch %g vol %g mix %d res %d ->%s, slot %d valid %d%d%d%d",
                     k, v->format, v->channels, v->rate, v->pitch, v->volume, (int)v->mix, v->resources[0],
-                    res ? res[0] : 0, res ? res[1] : 0, v->index, v->valid[0], v->valid[1], v->valid[2], v->valid[3]);
+                    sends, v->index, v->valid[0], v->valid[1], v->valid[2], v->valid[3]);
+            for (int f = 0; f < 2; f++)
+                if (v->biquad[f].on)
+                    fprintf(stderr, " biquad%d b %.3f %.3f %.3f a %.3f %.3f", f, v->biquad[f].b[0], v->biquad[f].b[1],
+                            v->biquad[f].b[2], v->biquad[f].a[0], v->biquad[f].a[1]);
+            fprintf(stderr, "\n");
         }
         if (!vin[VIN_IS_NEW]) {
             memcpy(o + 0x10 * k, &v->played, 8);

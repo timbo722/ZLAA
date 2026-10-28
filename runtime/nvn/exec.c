@@ -6,12 +6,16 @@
  * and presents are paced to the display's 60 Hz. The Vulkan renderer will take over the
  * drawing commands.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE                  /* sched_setaffinity */
+#endif
 #include "nvn.h"
 #ifdef LAA_HAVE_SDL
 #include "render/render.h"
 #endif
 #include "render/png.h"
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -279,7 +283,36 @@ static void display_rect(const Window *w, int32_t out[4]) {
     }
 }
 
+/* The thread that presents is the game's main thread, and it decides the frame rate. Android
+ * put it on the Thor's middle cores (2.7 GHz); the fastest core (a Cortex-X3, 3.2 GHz and wider)
+ * finishes a frame sooner. So it is moved there, once: the core with the highest top clock.
+ * LAA_NO_PIN=1: leave it to the scheduler. */
+static void pin_to_fastest_core(void) {
+#ifdef __linux__
+    if (getenv("LAA_NO_PIN")) return;
+    int best = -1;
+    long best_khz = 0;
+    for (int cpu = 0; cpu < 64; cpu++) {
+        char path[96];
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        long khz = 0;
+        if (fscanf(f, "%ld", &khz) == 1 && khz > best_khz) { best_khz = khz; best = cpu; }
+        fclose(f);
+    }
+    if (best < 0) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(best, &set);
+    if (sched_setaffinity(0, sizeof set, &set) == 0)
+        fprintf(stderr, "nvn: the game's main thread runs on cpu %d (%ld MHz)\n", best, best_khz / 1000);
+#endif
+}
+
 void nvn_present(const Window *w, uint64_t texture) {
+    static int pinned;
+    if (!pinned) { pinned = 1; pin_to_fastest_core(); }
     int32_t rect[4];
     display_rect(w, rect);
     frames++;
