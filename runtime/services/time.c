@@ -3,13 +3,12 @@
  *
  *   ISystemClock     wall-clock time, POSIX seconds (user / network / local clocks)
  *   ISteadyClock     seconds since boot, never goes backwards
- *   ITimeZoneService POSIX time <-> calendar date, in the device's own time zone (the C library's
- *                    localtime/mktime: on Android the system setting), so no Switch time-zone
- *                    files are needed. (UTC showed save times hours off.)
+ *   ITimeZoneService POSIX time <-> calendar date, as UTC (the clocks above already tell local
+ *                    time), with the C library's gmtime/timegm: no Switch time-zone files needed.
  *
  * switchbrew.org/wiki/Glue_services#time:a.2C_time:s.2C_time:u
  */
-#define _DEFAULT_SOURCE          /* tm_zone, tm_gmtoff */
+#define _DEFAULT_SOURCE          /* timegm, tm_gmtoff */
 #include "services.h"
 #include "kernel.h"
 #include <stdio.h>
@@ -20,6 +19,16 @@
 static const uint8_t clock_source_id[16] = { 'L', 'A', 'A', 'R', 'e', 'c', 'o', 'm', 'p', 1, 2, 3, 4, 5, 6, 7 };
 
 static int64_t steady_seconds(void) { return (int64_t)(recomp_cntpct() / 19200000); }
+
+/* The clocks tell local wall time (POSIX seconds + the device's UTC offset). The game shows
+ * the clock as it is (it never asks the time zone service to convert), so with UTC its save
+ * times were hours off. The time zone service then works in UTC, not to apply it twice. */
+static int64_t now_local(void) {
+    time_t t = time(NULL);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    return (int64_t)t + tm.tm_gmtoff;
+}
 
 /* SteadyClockTimePoint: i64 seconds, 16-byte clock source id */
 static void out_time_point(IpcCall *call) {
@@ -34,7 +43,7 @@ static void out_time_point(IpcCall *call) {
 static KSharedMemory *time_shm;
 
 static void put_system_clock_context(uint8_t *p) {   /* counter, then 2 x SystemClockContext */
-    int64_t offset = (int64_t)time(NULL) - steady_seconds(), point = steady_seconds();
+    int64_t offset = now_local() - steady_seconds(), point = steady_seconds();
     for (int k = 0; k < 2; k++) {
         memcpy(p + 8 + 0x20 * k, &offset, 8);
         memcpy(p + 16 + 0x20 * k, &point, 8);
@@ -57,12 +66,12 @@ static KSharedMemory *time_shared_memory(void) {
 static void system_clock_dispatch(ServiceObject *self, IpcCall *call) {
     switch (call->cmd) {
     case 0:                     /* GetCurrentTime -> i64 POSIX seconds */
-        ipc_out64(call, (uint64_t)time(NULL));
+        ipc_out64(call, (uint64_t)now_local());
         break;
     case 1: case 3:             /* SetCurrentTime, SetSystemClockContext: ignore */
         break;
     case 2:                     /* GetSystemClockContext -> offset, time point (now = steady + offset) */
-        ipc_out64(call, (uint64_t)((int64_t)time(NULL) - steady_seconds()));
+        ipc_out64(call, (uint64_t)(now_local() - steady_seconds()));
         out_time_point(call);
         break;
     case 4:                     /* GetOperationEventReadableHandle */
@@ -102,7 +111,7 @@ static const ServiceType steady_clock_type = { "time:ISteadyClock", steady_clock
 static void out_calendar(IpcCall *call, int64_t posix) {
     time_t t = (time_t)posix;
     struct tm tm;
-    localtime_r(&t, &tm);
+    gmtime_r(&t, &tm);
     uint8_t cal[8] = { 0 };
     int16_t year = (int16_t)(tm.tm_year + 1900);
     memcpy(cal, &year, 2);
@@ -114,11 +123,9 @@ static void out_calendar(IpcCall *call, int64_t posix) {
     ipc_out_bytes(call, cal, 8);
     ipc_out32(call, (uint32_t)tm.tm_wday);
     ipc_out32(call, (uint32_t)tm.tm_yday);
-    char zone[8] = { 0 };
-    snprintf(zone, sizeof zone, "%s", tm.tm_zone ? tm.tm_zone : "UTC");
-    ipc_out_bytes(call, zone, 8);
-    ipc_out32(call, tm.tm_isdst > 0);
-    ipc_out32(call, (uint32_t)(int32_t)tm.tm_gmtoff);
+    ipc_out_bytes(call, "UTC\0\0\0\0\0", 8);
+    ipc_out32(call, 0);
+    ipc_out32(call, 0);
 }
 
 static void timezone_dispatch(ServiceObject *self, IpcCall *call) {
@@ -152,8 +159,7 @@ static void timezone_dispatch(ServiceObject *self, IpcCall *call) {
         tm.tm_hour = call->in[4];
         tm.tm_min = call->in[5];
         tm.tm_sec = call->in[6];
-        tm.tm_isdst = -1;                             /* (the C library works out daylight saving) */
-        int64_t t = (int64_t)mktime(&tm);
+        int64_t t = (int64_t)timegm(&tm);
         IpcBuffer b = ipc_out_buffer(call, 0);
         void *p = ipc_guest_ptr(b.addr, 8);
         if (p && b.size >= 8) memcpy(p, &t, 8);
