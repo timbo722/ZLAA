@@ -385,6 +385,7 @@ static double async_compile_ms;                  /* (render_stats adds these to 
 static unsigned async_compiles;
 
 static void *compile_thread(void *arg) {
+    host_thread_init();                          /* (off the game's main core) */
     (void)arg;
     for (;;) {
         pthread_mutex_lock(&compile_lock);

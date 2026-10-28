@@ -13,6 +13,7 @@
  * memory: converted from the Tegra block-linear layout to rows (layout.c) and uploaded first.
  */
 #include "render_internal.h"
+#include "png.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,6 +157,110 @@ int render_read_back(uint64_t texture, uint8_t *out) {
     vkCmdCopyImageToBuffer(cmd, h->image, VK_IMAGE_LAYOUT_GENERAL, render_staging_buffer(), 1, &copy);
     render_flush();
     memcpy(out, staging, size);
+    return 0;
+}
+
+/* ---- screenshots without stopping the game: the GPU copies the texture into one of
+ * CAPTURE_SLOTS CPU-visible buffers in order with the frame's work, and capture threads wait
+ * for it and write the PNG (scaled down by `scale`). A frame with no free buffer isn't saved.
+ * Waiting for the copy right away (render_read_back) held each frame up ~100 ms on the Thor, and
+ * a fade-in seen that way isn't the one the game shows. */
+#define CAPTURE_SLOTS 12
+static struct {
+    VkBuffer buffer[CAPTURE_SLOTS];
+    VkDeviceMemory memory[CAPTURE_SLOTS];
+    void *ptr[CAPTURE_SLOTS];
+    VkDeviceSize size;
+    int busy[CAPTURE_SLOTS];
+    struct { int slot; uint64_t serial; uint32_t width, height, scale; int32_t crop[4]; char path[512]; } job[CAPTURE_SLOTS];
+    unsigned head, tail, dropped;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} cap = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+
+static void *capture_thread(void *arg) {
+    host_thread_init();                          /* (off the game's main core) */
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&cap.lock);
+        while (cap.head == cap.tail) pthread_cond_wait(&cap.cond, &cap.lock);
+        __typeof__(cap.job[0]) j = cap.job[cap.tail++ % CAPTURE_SLOTS];
+        pthread_mutex_unlock(&cap.lock);
+        render_wait_done(j.serial);
+        const uint8_t *px = cap.ptr[j.slot];
+        uint32_t x = 0, y = 0, w = j.width, h = j.height;
+        if (j.crop[2] > 0 && j.crop[3] > 0 && (uint32_t)(j.crop[0] + j.crop[2]) <= j.width && (uint32_t)(j.crop[1] + j.crop[3]) <= j.height) {
+            x = (uint32_t)j.crop[0]; y = (uint32_t)j.crop[1]; w = (uint32_t)j.crop[2]; h = (uint32_t)j.crop[3];
+        }
+        uint32_t ow = w / j.scale, oh = h / j.scale;    /* rows upwards: row 0 is the bottom (NVN, as OpenGL) */
+        uint8_t *out = malloc((size_t)ow * oh * 4);
+        if (out) {
+            for (uint32_t oy = 0; oy < oh; oy++) {
+                const uint8_t *row = px + ((size_t)(y + h - 1 - oy * j.scale) * j.width + x) * 4;
+                for (uint32_t ox = 0; ox < ow; ox++) {
+                    memcpy(out + ((size_t)oy * ow + ox) * 4, row + (size_t)ox * j.scale * 4, 4);
+                    out[((size_t)oy * ow + ox) * 4 + 3] = 255;
+                }
+            }
+            if (png_write(j.path, out, ow, oh, (int32_t)ow * 4) == 0) fprintf(stderr, "nvn: wrote %s\n", j.path);
+            free(out);
+        }
+        pthread_mutex_lock(&cap.lock);
+        cap.busy[j.slot] = 0;
+        pthread_mutex_unlock(&cap.lock);
+    }
+    return NULL;
+}
+
+int render_capture(uint64_t texture, const char *path, const int32_t crop[4], uint32_t scale) {
+    HostImage *h = active ? render_image_find(texture) : NULL;
+    if (!h || !h->gpu_written || !(h->aspects & VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
+    VkDeviceSize size = (VkDeviceSize)h->width * h->height * 4;
+    if (!cap.size) {                                 /* (first use: buffers for this size, two threads) */
+        cap.size = size;
+        for (int i = 0; i < CAPTURE_SLOTS; i++) {
+            VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                                      .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+            VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &cap.buffer[i]));
+            VkMemoryRequirements req;
+            vkGetBufferMemoryRequirements(vk.device, cap.buffer[i], &req);
+            VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+                .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+            VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &cap.memory[i]));
+            VK_CHECK(vkBindBufferMemory(vk.device, cap.buffer[i], cap.memory[i], 0));
+            VK_CHECK(vkMapMemory(vk.device, cap.memory[i], 0, size, 0, &cap.ptr[i]));
+        }
+        for (int i = 0; i < 2; i++) {
+            pthread_t t;
+            pthread_create(&t, NULL, capture_thread, NULL);
+            pthread_detach(t);
+        }
+    }
+    if (size > cap.size) return -1;
+    pthread_mutex_lock(&cap.lock);
+    int slot = -1;
+    for (int i = 0; i < CAPTURE_SLOTS && slot < 0; i++)
+        if (!cap.busy[i]) slot = i;
+    if (slot >= 0) cap.busy[slot] = 1;
+    pthread_mutex_unlock(&cap.lock);
+    if (slot < 0) {
+        if (cap.dropped++ % 60 == 0) fprintf(stderr, "render: screenshots can't keep up: %u frames not saved\n", cap.dropped);
+        return 0;
+    }
+    render_image_flush_clear(h);
+    render_end_rendering();
+    VkBufferImageCopy copy = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { h->width, h->height, 1 } };
+    vkCmdCopyImageToBuffer(render_cmd(), h->image, VK_IMAGE_LAYOUT_GENERAL, cap.buffer[slot], 1, &copy);
+    render_barrier(render_cmd());
+    pthread_mutex_lock(&cap.lock);
+    __typeof__(cap.job[0]) *j = &cap.job[cap.head % CAPTURE_SLOTS];
+    *j = (__typeof__(cap.job[0])){ .slot = slot, .serial = render_fence_serial(), .width = h->width, .height = h->height,
+                                   .scale = scale ? scale : 1 };
+    memcpy(j->crop, crop, sizeof j->crop);
+    snprintf(j->path, sizeof j->path, "%s", path);
+    cap.head++;
+    pthread_cond_signal(&cap.cond);
+    pthread_mutex_unlock(&cap.lock);
     return 0;
 }
 

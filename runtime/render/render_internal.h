@@ -5,6 +5,7 @@
 #define RENDER_INTERNAL_H
 
 #include "render.h"
+#include "kernel.h"                          /* (host_thread_init) */
 #include <pthread.h>
 #include "vk.h"
 #include "nvn/nvn.h"
@@ -30,6 +31,7 @@ typedef struct HostImage {
     uint64_t hot_until;              /* changed recently: check every frame until this frame */
     uint64_t gpu_frame;              /* frame of the last GPU write */
     int hash_valid;                  /* `hash` describes guest memory as it is now */
+    int preloaded;                   /* uploaded before its first use: that use checks the hash */
     struct ImageView *views;         /* views made for sampling it (image.c) */
     VkImageAspectFlags pending_clear;   /* cleared, but not yet: see render_image_clear */
     VkClearValue clear_value;

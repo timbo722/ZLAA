@@ -3,6 +3,9 @@
  * builders. Layout math (sizes, block-linear) is in layout.c.
  */
 #include "nvn.h"
+#ifdef LAA_HAVE_SDL
+#include "render/render.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -85,6 +88,9 @@ static void nvnTextureInitialize(CPU *c) {
         fprintf(stderr, "nvn: texture %#llx: storage %#llx %ux%ux%u format %#x target %u levels %u flags %#x\n",
                 (unsigned long long)ARG(0), (unsigned long long)t->address, b->d.width, b->d.height, b->d.depth,
                 b->d.format, b->d.target, b->d.levels, b->d.flags);
+#ifdef LAA_HAVE_SDL
+    if (render_active()) render_texture_made(t);
+#endif
     RET(1);
 }
 #define TEX ((Texture *)gptr(ARG(0)))

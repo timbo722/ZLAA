@@ -11,6 +11,8 @@
 #include "render/shader/builtin/builtin_shaders.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 typedef struct { uint64_t address, size; } Range;
 
@@ -722,6 +724,18 @@ void render_stats(void) {
     memset(&stats, 0, sizeof stats);
 }
 
+/* LAA_TRACE_SYNC: where a slow command's time went (exec.c prints it): shaders, resources
+ * (descriptors, textures), render pass begin, pipeline */
+int render_prof_on;
+double render_prof[4];
+static double prof_clock(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+#define PROF(i, stmt) do { double prof_t0 = render_prof_on ? prof_clock() : 0; stmt; \
+                           if (render_prof_on) render_prof[i] += prof_clock() - prof_t0; } while (0)
+
 static void draw(const Cmd *r, int indexed) {
     submit_early();
     const Program *p = &st.program;
@@ -730,14 +744,15 @@ static void draw(const Cmd *r, int indexed) {
         stats.no_shader++;
         return;
     }
-    HostShader *vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX, 0);
-    HostShader *fs = render_shader(p->code[STAGE_FRAGMENT], p->control[STAGE_FRAGMENT], SHADER_FRAGMENT, 0);
+    HostShader *vs, *fs;
+    PROF(0, vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX, 0);
+            fs = render_shader(p->code[STAGE_FRAGMENT], p->control[STAGE_FRAGMENT], SHADER_FRAGMENT, 0));
     if (!vs->module || !fs->module) { stats.failed_shader++; return; }
     /* Vulkan wants every input the fragment shader reads to be an output of the vertex shader
      * (the Adreno driver refuses the pipeline otherwise): a vertex shader variant adds them */
     uint32_t missing = fs->info.inputs & ~vs->info.outputs;
     if (missing) {
-        vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX, missing);
+        PROF(0, vs = render_shader(p->code[STAGE_VERTEX], p->control[STAGE_VERTEX], SHADER_VERTEX, missing));
         if (!vs->module) { stats.failed_shader++; return; }
     }
     stats.other++;                                   /* (until it is done, below) */
@@ -770,6 +785,7 @@ static void draw(const Cmd *r, int indexed) {
     }
 
     /* resources first: making a descriptor set may have to submit work (which ends rendering) */
+    double prof_t0 = render_prof_on ? prof_clock() : 0;
     VkDescriptorSet set = new_set(render_set_layout());
     VkWriteDescriptorSet writes[2 * 50];
     VkDescriptorBufferInfo buffers[2 * 18];
@@ -778,7 +794,10 @@ static void draw(const Cmd *r, int indexed) {
     fill_stage(vs, SHADER_VERTEX, writes, &nw, buffers, &nb, images, &ni, set);
     fill_stage(fs, SHADER_FRAGMENT, writes, &nw, buffers, &nb, images, &ni, set);
     vkUpdateDescriptorSets(vk.device, nw, writes, 0, NULL);
-    if (begin_rendering() != 0) return;
+    if (render_prof_on) render_prof[1] += prof_clock() - prof_t0;
+    int began;
+    PROF(2, began = begin_rendering());
+    if (began != 0) return;
 
     PipelineKey k;
     memset(&k, 0, sizeof k);
@@ -817,7 +836,8 @@ static void draw(const Cmd *r, int indexed) {
                                  st.blend[i].dst_alpha, st.blend[i].eq_color, st.blend[i].eq_alpha };
     }
     k.depth_format = st.depth ? st.depth->format : VK_FORMAT_UNDEFINED;
-    VkPipeline pipeline = render_pipeline(&k);
+    VkPipeline pipeline;
+    PROF(3, pipeline = render_pipeline(&k));
     if (!pipeline) return;
 
     VkCommandBuffer cmd = render_cmd();

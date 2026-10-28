@@ -10,9 +10,11 @@
 #include "render_internal.h"
 #include "astc.h"
 #include "png.h"
+#include <pthread.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* NVNformat -> VkFormat (0 = not supported yet) */
 static const VkFormat vk_formats[] = {
@@ -215,7 +217,12 @@ HostImage *render_image(const Texture *t) {
     create(h);
     h->next = buckets[b];
     buckets[b] = h;
-    h->needs_upload = 1;
+    if (t->d.flags & TEXTURE_FLAG_COMPRESSIBLE) {   /* (its guest memory means nothing: start it at 0 */
+        static const VkClearValue zero;              /* rather than copying megabytes of it, cheap */
+        render_image_clear(h, &zero, h->aspects);    /* as a pass's loadOp) */
+    } else {
+        h->needs_upload = 1;
+    }
     return h;
 }
 
@@ -265,6 +272,7 @@ static uint64_t guest_hash(const HostImage *h) {
 
 void render_image_gpu_wrote(HostImage *h) {
     h->gpu_written = 1;
+    h->preloaded = 0;
     h->needs_upload = 0;
     h->gpu_frame = frame_no;
     h->hash_valid = 0;
@@ -272,6 +280,12 @@ void render_image_gpu_wrote(HostImage *h) {
 
 static void check_cpu_writes(HostImage *h) {
     if (h->needs_upload || h->checked == frame_no) return;
+    if (h->preloaded) {                              /* (first use: did the game write it after making it?) */
+        h->preloaded = 0;
+        h->checked = frame_no;
+        if (guest_hash(h) != h->hash) h->needs_upload = 1;
+        return;
+    }
     if (h->gpu_written && frame_no - h->gpu_frame < GPU_QUIET) return;
     int hot = h->hot_until > frame_no;
     uint64_t size = storage_bytes(h);
@@ -453,8 +467,8 @@ void render_upload(HostImage *h) {
     uint8_t *blocks = h->astc_decode ? malloc(most) : NULL;
     uint64_t offset;
     if (render_tracing())
-        fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u: %llu bytes\n", (unsigned long long)h->address,
-                s.width, s.height, s.depth, h->desc.format, s.levels, s.layers, (unsigned long long)total);
+        fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u flags %#x: %llu bytes\n", (unsigned long long)h->address,
+                s.width, s.height, s.depth, h->desc.format, s.levels, s.layers, h->desc.flags, (unsigned long long)total);
     uint8_t *out = render_staging(total, &offset);
     VkBufferImageCopy copies[16];
     uint32_t ncopies = 0;
@@ -562,6 +576,47 @@ HostImage *render_image_find(uint64_t texture) {
     for (HostImage *h = buckets[bucket_of(t->address)]; h; h = h->next)
         if (h->address == t->address && same_image(&h->desc, &t->d)) return h;
     return NULL;
+}
+
+/* ---- preloading ----
+ * A game usually fills a texture's memory before making it (the file is read into a memory
+ * pool, then its textures are made there), and draws with it later. Uploading at the first draw
+ * put all of a new scene's textures into its first frame (~50 MB, 100 ms on the Thor) while the
+ * game's fade-in had already started. So made textures are queued and uploaded at presents
+ * (during the loading screen), a few ms each; their first use checks the memory didn't change. */
+#define PRELOAD_MAX 4096
+static Texture preload_queue[PRELOAD_MAX];
+static unsigned preload_head, preload_tail;
+static pthread_mutex_t preload_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void render_texture_made(const Texture *t) {
+    if (t->d.flags & TEXTURE_FLAG_COMPRESSIBLE) return;
+    pthread_mutex_lock(&preload_lock);
+    if (preload_head - preload_tail < PRELOAD_MAX) preload_queue[preload_head++ % PRELOAD_MAX] = *t;
+    pthread_mutex_unlock(&preload_lock);
+}
+
+void render_preload(double ms) {
+    static int off = -1;                             /* LAA_NO_PRELOAD=1: upload at first use only */
+    if (off < 0) off = getenv("LAA_NO_PRELOAD") != NULL;
+    if (off) return;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        Texture t;
+        pthread_mutex_lock(&preload_lock);
+        int any = preload_head != preload_tail;
+        if (any) t = preload_queue[preload_tail++ % PRELOAD_MAX];
+        pthread_mutex_unlock(&preload_lock);
+        if (!any) return;
+        HostImage *h = render_image(&t);
+        if (h && h->needs_upload) {
+            render_upload(h);
+            h->preloaded = 1;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if ((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6 > ms) return;
+    }
 }
 
 HostImage *render_image_target(uint64_t texture) {

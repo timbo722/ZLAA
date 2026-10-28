@@ -122,6 +122,11 @@ typedef struct KThread {
 } KThread;
 
 KThread *kthread_current(void);
+/* The game's main thread gets the fastest core to itself (nvn/exec.c pins it there). Threads made
+ * after that would inherit its one-core mask: each new host thread calls host_thread_init to run
+ * on the other cores instead. */
+void host_main_core(int cpu);
+void host_thread_init(void);
 /* Make the main thread (not started), start it (0 on success), and wait up to timeout_ms
  * for it to exit (returns whether it has). */
 KThread *kthread_create_main(uint64_t entry, uint64_t stack_top, int priority, int core);

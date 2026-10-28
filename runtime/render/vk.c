@@ -9,6 +9,7 @@
  *   5. swapchain: the images that are shown in the window, one after another
  */
 #include "vk.h"
+#include "kernel.h"                          /* (host_thread_init) */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <stdio.h>
@@ -320,6 +321,7 @@ void vk_save_pipeline_cache(void) {
 }
 
 static void *save_cache_now(void *arg) {
+    host_thread_init();                          /* (off the game's main core) */
     (void)arg;
     size_t size = 0;
     if (vkGetPipelineCacheData(vk.device, vk.pipeline_cache, &size, NULL) != VK_SUCCESS || !size) {

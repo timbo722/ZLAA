@@ -164,6 +164,16 @@ int render_serial_done(uint64_t serial) {
 }
 
 /* Wait until the GPU has finished submission `serial` (at most timeout_ns); 0 if it has */
+void render_wait_done(uint64_t serial) {
+    while (serial > __atomic_load_n(&submitted, __ATOMIC_ACQUIRE)) {
+        struct timespec t = { 0, 500000 };
+        nanosleep(&t, NULL);
+    }
+    VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
+                               .pSemaphores = &timeline, .pValues = &serial };
+    VK_CHECK(vkWaitSemaphores(vk.device, &wi, UINT64_MAX));
+}
+
 int render_wait_serial(uint64_t serial, uint64_t timeout_ns) {
     if (!ready || serial == 0) return 0;
     /* fenced in a submission another thread is still recording (under the GPU lock): it is
@@ -267,6 +277,7 @@ static pthread_mutex_t recycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t recycle_cond = PTHREAD_COND_INITIALIZER;
 
 static void *recycler(void *arg) {
+    host_thread_init();                          /* (off the game's main core) */
     (void)arg;
     for (;;) {
         pthread_mutex_lock(&recycle_lock);

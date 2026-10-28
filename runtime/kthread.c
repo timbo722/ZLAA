@@ -12,6 +12,7 @@
  * the tag with atomic instructions, so the rules here must match Horizon exactly
  * (we follow Atmosphere's kernel, mesosphere: KConditionVariable and KAddressArbiter).
  */
+#define _GNU_SOURCE                          /* (sched_setaffinity) */
 #include "kernel.h"
 #include "guest_memory.h"
 #include "nvn/nvn.h"
@@ -149,6 +150,7 @@ static KThread *new_thread(uint64_t entry, uint64_t arg, uint64_t stack_top, int
 }
 
 static void *thread_main(void *p) {
+    host_thread_init();
     KThread *t = p;
     cur_thread = t;
     CPU *c = &t->cpu;
@@ -165,6 +167,28 @@ static void *thread_main(void *p) {
      * always call svcExitThread instead, so returning here is treated the same way. */
     svc_exit_thread(c);
     return NULL;
+}
+
+static cpu_set_t other_cores;
+static int have_other_cores;
+
+void host_main_core(int cpu) {
+#ifdef __linux__
+    cpu_set_t all;                                   /* (LAA_NO_SPREAD=1: they inherit it, as before) */
+    if (getenv("LAA_NO_SPREAD") || sched_getaffinity(0, sizeof all, &all) != 0) return;
+    CPU_CLR(cpu, &all);
+    if (!CPU_COUNT(&all)) return;
+    other_cores = all;
+    __atomic_store_n(&have_other_cores, 1, __ATOMIC_RELEASE);
+#else
+    (void)cpu;
+#endif
+}
+
+void host_thread_init(void) {
+#ifdef __linux__
+    if (__atomic_load_n(&have_other_cores, __ATOMIC_ACQUIRE)) sched_setaffinity(0, sizeof other_cores, &other_cores);
+#endif
 }
 
 static int start_host_thread(KThread *t) {

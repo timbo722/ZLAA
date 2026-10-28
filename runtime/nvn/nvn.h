@@ -257,6 +257,7 @@ enum {                              /* NVNtextureTarget */
     TARGET_RECTANGLE, TARGET_CUBE, TARGET_CUBE_ARRAY, TARGET_BUFFER,
 };
 enum { TEXTURE_FLAG_LINEAR = 0x10 }; /* NVNtextureFlags: pitch-linear storage (rows of `stride` bytes) */
+enum { TEXTURE_FLAG_COMPRESSIBLE = 0x8 }; /* GPU-compressed storage: render targets, never filled by the CPU */
 
 typedef struct {                    /* a texture's size in texels, for layout */
     const FormatInfo *fmt;

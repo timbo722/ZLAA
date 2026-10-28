@@ -618,10 +618,12 @@ typedef struct { uint32_t pc; Stack st; } Work;
 
 /* Find every instruction reachable from the start, and the target of every jump. */
 static int discover(T *t) {
-    uint32_t limit = t->code_size;
-    int32_t *index = calloc(limit / 8 + 1, sizeof *index);    /* pc/8 -> instruction index + 1 */
+    uint32_t limit = t->code_size;                   /* (the rest of the memory pool: megabytes) */
+    uint32_t cap = 4096;                             /* index: pc/8 -> instruction index + 1, grown as */
+    int32_t *index = calloc(cap, sizeof *index);     /* the shader turns out longer */
     Work *work = malloc(sizeof(Work) * 4096);
-    t->inst = calloc(MAX_INST, sizeof *t->inst);
+    uint32_t inst_cap = 512;
+    t->inst = malloc(inst_cap * sizeof *t->inst);
     int nwork = 0;
     work[nwork++] = (Work){ 0, { 0 } };
     while (nwork && !t->info->error[0]) {
@@ -631,8 +633,15 @@ static int discover(T *t) {
         for (;;) {
             if (is_sched(pc)) pc += 8;
             if (pc + 8 > limit) { fail(t, "code runs past its end at %#x", pc); break; }
+            if (pc / 8 >= cap) {
+                uint32_t more = cap * 2 > pc / 8 + 1 ? cap * 2 : pc / 8 + 1;
+                index = realloc(index, more * sizeof *index);
+                memset(index + cap, 0, (more - cap) * sizeof *index);
+                cap = more;
+            }
             if (index[pc / 8]) break;                        /* already seen */
             if (t->ninst == MAX_INST) { fail(t, "shader too long"); break; }
+            if (t->ninst == inst_cap) t->inst = realloc(t->inst, (inst_cap *= 2) * sizeof *t->inst);
             uint64_t w;
             memcpy(&w, t->code + pc, 8);
             Inst *in = &t->inst[t->ninst];
@@ -697,7 +706,16 @@ static int discover(T *t) {
         for (uint32_t j = i; j > 0 && t->inst[j - 1].pc > t->inst[j].pc; j--) {
             Inst tmp = t->inst[j]; t->inst[j] = t->inst[j - 1]; t->inst[j - 1] = tmp;
         }
-    memset(index, 0, (limit / 8 + 1) * sizeof *index);
+    uint32_t span = 0;                               /* (every pc and jump target, below) */
+    for (uint32_t i = 0; i < t->ninst; i++) {
+        const Inst *in = &t->inst[i];
+        if (in->pc / 8 >= span) span = in->pc / 8 + 1;
+        if (in->target >= 0 && (uint32_t)in->target / 8 >= span) span = (uint32_t)in->target / 8 + 1;
+        for (int k = 0; k < in->ntargets; k++)
+            if (in->targets[k] >= 0 && (uint32_t)in->targets[k] / 8 >= span) span = (uint32_t)in->targets[k] / 8 + 1;
+    }
+    free(index);
+    index = calloc(span, sizeof *index);
     for (uint32_t i = 0; i < t->ninst; i++) index[t->inst[i].pc / 8] = (int32_t)i + 1;
     t->inst[0].leader = 1;
     for (uint32_t i = 0; i < t->ninst; i++) {

@@ -10,6 +10,7 @@
 #define _GNU_SOURCE                  /* sched_setaffinity */
 #endif
 #include "nvn.h"
+#include "kernel.h"
 #ifdef LAA_HAVE_SDL
 #include "render/render.h"
 #endif
@@ -19,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <string.h>
 #include <time.h>
 
 static int sync_tracing(void);
@@ -33,6 +35,8 @@ static void gpu_write(uint64_t address, const void *data, uint32_t size) {
 #endif
     memcpy(gptr(address), data, size);
 }
+
+static double now_ms(void);
 
 static void run_list(uint64_t at, int depth) {
     if (depth > 8) { fprintf(stderr, "nvn: command lists call each other too deeply\n"); return; }
@@ -101,7 +105,16 @@ static void run_list(uint64_t at, int depth) {
             break;
         default:
 #ifdef LAA_HAVE_SDL
-            if (render_active()) render_command(r);
+            if (render_active()) {
+                double t0 = sync_tracing() ? now_ms() : 0;
+                render_prof_on = t0 != 0;
+                render_command(r);
+                if (t0 && now_ms() - t0 > 1.0)           /* (LAA_TRACE_SYNC: the slow ones) */
+                    fprintf(stderr, "sync: %.2f slow %s: %.2f ms (shaders %.2f, resources %.2f, pass %.2f, pipeline %.2f)\n",
+                            now_ms(), nvn_command_names[r->op], now_ms() - t0, render_prof[0], render_prof[1], render_prof[2],
+                            render_prof[3]);
+                if (t0) memset(render_prof, 0, sizeof render_prof);
+            }
 #endif
             break;
         }
@@ -209,6 +222,16 @@ static void screenshot(uint64_t texture, const int32_t crop[4]) {
         to = getenv("LAA_SCREENSHOT_TO") ? strtoull(getenv("LAA_SCREENSHOT_TO"), NULL, 0) : ~0ull;
     }
     if (!*dir || !texture || !every || frames % every || frames < from || frames > to) return;
+    char path[4096];
+    snprintf(path, sizeof path, "%s/frame_%06" PRIu64 ".png", dir, frames);
+#ifdef LAA_HAVE_SDL
+    static int scale = -1;                           /* LAA_SCREENSHOT_SCALE=n: 1/n of the size (with a GPU) */
+    if (scale < 0) scale = getenv("LAA_SCREENSHOT_SCALE") ? atoi(getenv("LAA_SCREENSHOT_SCALE")) : 1;
+    pthread_mutex_lock(&gpu_lock);
+    int captured = render_active() && render_capture(texture, path, crop, scale > 0 ? (uint32_t)scale : 1) == 0;
+    pthread_mutex_unlock(&gpu_lock);
+    if (captured) return;
+#endif
     const Texture *t = gptr(texture);
     TexShape s;
     tex_shape(&t->d, &s);
@@ -225,8 +248,6 @@ static void screenshot(uint64_t texture, const int32_t crop[4]) {
 #endif
     if (!from_gpu) tex_copy_level(gptr(t->address), rgba, &s, &l, region, (uint64_t)s.width * 4, 0, 1);
     for (size_t i = 3; i < (size_t)s.width * s.height * 4; i += 4) rgba[i] = 255;   /* opaque */
-    char path[4096];
-    snprintf(path, sizeof path, "%s/frame_%06" PRIu64 ".png", dir, frames);
     /* only the window's crop is shown; row 0 is the bottom of the screen (NVN's default, as in
      * OpenGL), so rows are written upwards */
     uint32_t x = 0, y = 0, w = s.width, h = s.height;
@@ -255,10 +276,14 @@ void nvn_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const 
 void nvn_pool_changed(uint64_t storage, uint64_t size, int created) {
 #ifdef LAA_HAVE_SDL
     if (render_active()) {
+        double t0 = now_ms();
         pthread_mutex_lock(&gpu_lock);
         if (created) render_pool_created(storage, size);
         else render_pool_destroyed(storage, size);
         pthread_mutex_unlock(&gpu_lock);
+        if (sync_tracing())
+            fprintf(stderr, "sync: %.2f pool %#" PRIx64 " (+%#" PRIx64 ") %s on thread %d in %.2f ms\n", now_ms(), storage, size,
+                    created ? "made" : "finalized", kthread_current() ? (int)kthread_current()->id : -1, now_ms() - t0);
     }
 #else
     (void)storage; (void)size; (void)created;
@@ -319,6 +344,7 @@ static void pin_to_fastest_core(void) {
         fclose(f);
     }
     if (best < 0) return;
+    host_main_core(best);                            /* (first: which cores the other threads get) */
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(best, &set);
@@ -386,6 +412,7 @@ void nvn_present(const Window *w, uint64_t texture) {
         present_serial[1] = present_serial[0];       /* (LAA_FRAME_LAG) */
         present_serial[0] = render_fence_serial();
         render_present(texture, rect);
+        render_preload(3.0);                         /* (textures made since: ahead of their first use) */
         if (sync_tracing()) fprintf(stderr, "sync: %.2f presented frame %" PRIu64 "\n", now_ms(), frames);
         pthread_mutex_unlock(&gpu_lock);
         if (frame_stats > 0) fs.present += now_ms() - t0;

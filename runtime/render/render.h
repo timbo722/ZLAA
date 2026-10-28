@@ -20,18 +20,28 @@ void render_command(const Cmd *r);
 void render_submitted(void);
 /* If the GPU rendered this texture, copy its level 0 (32-bit pixels) to out and return 0. */
 int render_read_back(uint64_t texture, uint8_t *out);
+/* The same, saved as a PNG (that crop of it, scaled down `scale` times) by a capture thread once
+ * the GPU gets there: the game doesn't wait. 0 if it will be (or was dropped: too many waiting). */
+int render_capture(uint64_t texture, const char *path, const int32_t crop[4], uint32_t scale);
 void render_stats(void);             /* print and reset draw statistics */
 extern double render_compile_ms;      /* time creating shaders and pipelines; how many pipelines */
 extern unsigned render_compiles;
 extern double render_gpu_wait_ms;    /* total time waiting for the GPU's submissions to finish */
 /* Replace a 32-bit texture's level 0 with these pixels (rows of width * 4 bytes) */
 void render_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width, uint32_t height);
+/* The game made a texture (nvnTextureInitialize, any thread): it is uploaded ahead of its first
+ * use, a little at each present (render_preload: up to `ms` milliseconds) */
+void render_texture_made(const Texture *t);
+void render_preload(double ms);
+extern int render_prof_on;          /* LAA_TRACE_SYNC: time draws' parts into render_prof (draw.c) */
+extern double render_prof[4];
 /* The CPU wrote texels into a texture's guest memory (region in blocks: x, y, z, w, h, d). */
 void render_texels_written(uint64_t texture, uint32_t level, uint32_t layer, const uint32_t region[6]);
 /* The GPU works behind the CPU (submit.c): */
 void render_flush(void);             /* submit what was recorded and wait until the GPU has done everything */
 uint64_t render_fence_serial(void);  /* the GPU submission that finishes the work recorded so far */
 int render_wait_serial(uint64_t serial, uint64_t timeout_ns);   /* 0: finished, -1: timeout */
+void render_wait_done(uint64_t serial);   /* the same, from any thread, not counted as the game waiting */
 uint64_t render_serial_completed(void);   /* the newest submission the GPU has finished */
 /* Write guest memory in order with the GPU's work (a GPU write into its pool when it has one) */
 void render_guest_write(uint64_t address, const void *data, uint32_t size);
