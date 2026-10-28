@@ -367,10 +367,14 @@ static VkPipeline create(const PipelineKey *k) {
 }
 
 /* New pipelines are compiled by background threads: the driver takes several ms for one, and
- * walking into a new part of the village needed dozens (frames of 100+ ms). Until one is ready,
- * the draws that need it are skipped (the object appears a frame or two late). The pipeline
- * cache makes it near-instant the next time. LAA_SYNC_PIPELINES=1: compile right away instead
- * (screenshots that must show everything). */
+ * walking into a new part of the village needed dozens (frames of 100+ ms). A draw whose pipeline
+ * isn't ready waits for it while the frame's budget lasts (COMPILE_WAIT_MS: frames have that much
+ * to spare now; with the pipeline cache a compile takes ~1 ms). Beyond it the draw is skipped, the
+ * object appearing a frame or two late: skipping all of them made the world pop in after the HUD
+ * when a save loaded. LAA_SYNC_PIPELINES=1: compile right away (screenshots that must show all). */
+#define COMPILE_WAIT_MS 6.0
+static double frame_wait_ms;                     /* waited for compiles this frame */
+static uint64_t wait_frame;
 #define COMPILE_THREADS 2
 #define COMPILE_QUEUE 1024
 static Pipeline *compile_queue[COMPILE_QUEUE];
@@ -420,9 +424,18 @@ VkPipeline render_pipeline(const PipelineKey *k) {
         }
     }
     unsigned b = hash(k, sizeof *k) & (PIPELINE_BUCKETS - 1);
+    if (nvn_frame_count() != wait_frame) { wait_frame = nvn_frame_count(); frame_wait_ms = 0; }
     for (Pipeline *p = pipeline_buckets[b]; p; p = p->next)
-        if (memcmp(&p->key, k, sizeof *k) == 0)
+        if (memcmp(&p->key, k, sizeof *k) == 0) {
+            if (__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE)) return p->pipeline;
+            double t0 = compile_clock();             /* (wait while the frame's budget lasts) */
+            while (!__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE) && frame_wait_ms + compile_clock() - t0 < COMPILE_WAIT_MS) {
+                struct timespec ts = { 0, 100000 };
+                nanosleep(&ts, NULL);
+            }
+            frame_wait_ms += compile_clock() - t0;
             return __atomic_load_n(&p->ready, __ATOMIC_ACQUIRE) ? p->pipeline : VK_NULL_HANDLE;
+        }
     Pipeline *p = calloc(1, sizeof *p);
     p->key = *k;
     p->next = pipeline_buckets[b];
@@ -434,7 +447,7 @@ VkPipeline render_pipeline(const PipelineKey *k) {
         pthread_cond_signal(&compile_cond);
     }
     pthread_mutex_unlock(&compile_lock);
-    if (queued) return VK_NULL_HANDLE;
+    if (queued) return render_pipeline(k);           /* (found now: waits within the budget) */
     double t0 = compile_clock();                     /* (synchronous: as asked, or the queue is full) */
     p->pipeline = create(k);
     render_compile_ms += compile_clock() - t0;

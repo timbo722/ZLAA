@@ -201,12 +201,14 @@ static struct timespec next_vblank;
  * The picture comes from the texture's guest memory. */
 static void screenshot(uint64_t texture, const int32_t crop[4]) {
     static const char *dir;
-    static uint64_t every;
+    static uint64_t every, from, to;                 /* (+ LAA_SCREENSHOT_FROM / _TO=frame: only then) */
     if (!dir) {
         dir = getenv("LAA_SCREENSHOT") ? getenv("LAA_SCREENSHOT") : "";
         every = getenv("LAA_SCREENSHOT_EVERY") ? strtoull(getenv("LAA_SCREENSHOT_EVERY"), NULL, 0) : 300;
+        from = getenv("LAA_SCREENSHOT_FROM") ? strtoull(getenv("LAA_SCREENSHOT_FROM"), NULL, 0) : 0;
+        to = getenv("LAA_SCREENSHOT_TO") ? strtoull(getenv("LAA_SCREENSHOT_TO"), NULL, 0) : ~0ull;
     }
-    if (!*dir || !texture || !every || frames % every) return;
+    if (!*dir || !texture || !every || frames % every || frames < from || frames > to) return;
     const Texture *t = gptr(texture);
     TexShape s;
     tex_shape(&t->d, &s);

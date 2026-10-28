@@ -189,6 +189,8 @@ static void android_setup(const char **exefs, const char **romfs) {
     const char *internal = SDL_GetAndroidInternalStoragePath();
     snprintf(path, sizeof path, "%s/cache", internal ? internal : base);
     setenv("LAA_CACHE_DIR", path, 0);
+    snprintf(path, sizeof path, "%s/cache/pipelines.bin", base);   /* (where it was before: read once) */
+    setenv("LAA_CACHE_FALLBACK", path, 0);
     snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
     snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
     *exefs = exefs_path;

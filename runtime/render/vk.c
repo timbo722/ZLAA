@@ -276,6 +276,12 @@ static void load_pipeline_cache(void) {
         mkdir(dir, 0755);
         snprintf(cache_path, sizeof cache_path, "%s/pipelines.bin", dir);
         FILE *f = fopen(cache_path, "rb");
+        const char *old = getenv("LAA_CACHE_FALLBACK");   /* (an older place: used if it holds more) */
+        struct stat a, b;
+        if (old && stat(old, &b) == 0 && (stat(cache_path, &a) != 0 || b.st_size > a.st_size)) {
+            if (f) fclose(f);
+            f = fopen(old, "rb");
+        }
         if (f && fseek(f, 0, SEEK_END) == 0 && (size = (size_t)ftell(f)) > 0 && (data = malloc(size))) {
             rewind(f);
             if (fread(data, 1, size, f) != size) size = 0;
