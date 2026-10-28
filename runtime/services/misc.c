@@ -4,6 +4,8 @@
  *   pctl   parental controls: no restrictions are set
  *   aoc:u  add-on content (DLC): none installed
  *   mm:u   multimedia clock requests (video decoding): accepted, nothing to change
+ *   prepo  play reports (usage statistics for Nintendo): accepted and dropped. The pause menu
+ *          sends one when its tabs change: unimplemented, that ended the game.
  *
  * switchbrew.org/wiki/Parental_Control_services, switchbrew.org/wiki/NS_Services#aoc:u
  */
@@ -90,3 +92,21 @@ static void mm_dispatch(ServiceObject *self, IpcCall *call) {
 static const ServiceType mm_type = { "mm:u", mm_dispatch, NULL };
 
 ServiceObject *service_mm_create(void) { return ipc_new_object(&mm_type, NULL); }
+
+/* ---- prepo:u / a / s / m ---- */
+static void prepo_dispatch(ServiceObject *self, IpcCall *call) {
+    (void)self;
+    switch (call->cmd) {
+    case 10300:                 /* GetTransmissionStatus -> u32: idle */
+        ipc_out32(call, 0);
+        break;
+    case 10400:                 /* GetSystemSessionId -> u64 */
+        ipc_out64(call, 0);
+        break;
+    default:                    /* SaveReport(WithUser)(Old/Old2), RequestImmediateTransmission, ...: dropped */
+        break;
+    }
+}
+static const ServiceType prepo_type = { "prepo", prepo_dispatch, NULL };
+
+ServiceObject *service_prepo_create(void) { return ipc_new_object(&prepo_type, NULL); }

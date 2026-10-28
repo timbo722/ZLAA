@@ -19,6 +19,7 @@ ServiceObject *service_apm_create(void);
 ServiceObject *service_pctl_create(void);
 ServiceObject *service_aoc_create(void);
 ServiceObject *service_mm_create(void);
+ServiceObject *service_prepo_create(void);
 ServiceObject *service_nvdrv_create(void);
 ServiceObject *service_time_create(void);
 ServiceObject *service_fsp_create(void);
