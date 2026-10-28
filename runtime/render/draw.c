@@ -53,9 +53,17 @@ static struct {
 
 int render_passes;                                   /* begun so far (LAA_GPU_TIMING_AT) */
 
+/* Dynamic rendering has no dependencies between passes of its own (render pass objects had
+ * subpass dependencies): without a barrier, the GPU may overlap what comes next with this pass.
+ * The Adreno did: a glow pass read its blurred mask while the next pass rendered the mask again
+ * (the purple box behind "Press L+R"). NVN orders these with nvnCommandBufferBarrier; we order
+ * every pass's writes before all that follows (LAA_NO_PASS_BARRIER=1: as before, to compare). */
 void render_end_rendering(void) {
     if (!st.rendering) return;
+    static int no_barrier = -1;
+    if (no_barrier < 0) no_barrier = getenv("LAA_NO_PASS_BARRIER") != NULL;
     vkCmdEndRendering(render_cmd());
+    if (!no_barrier) render_barrier(render_cmd());
     st.rendering = 0;
 }
 
@@ -573,9 +581,11 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
         }
         if (st.sampler_pool.entries && smp_id < st.sampler_pool.count && render_tracing()) {
             const SamplerDesc *d = &((SamplerDesc *)st.sampler_pool.entries)[smp_id];
-            fprintf(stderr, "render:     sampler %u: filt %u/%u wrap %u %u %u cmp %u/%u red %u lod %g..%g bias %g aniso %g\n", smp_id,
-                    d->min_filter, d->mag_filter, d->wrap[0], d->wrap[1], d->wrap[2], d->compare_mode, d->compare_func,
-                    d->reduction, d->lod_min, d->lod_max, d->lod_bias, d->max_anisotropy);
+            float bc[4];
+            memcpy(bc, d->border, sizeof bc);
+            fprintf(stderr, "render:     sampler %u: filt %u/%u wrap %u %u %u cmp %u/%u red %u lod %g..%g bias %g aniso %g border %g,%g,%g,%g\n",
+                    smp_id, d->min_filter, d->mag_filter, d->wrap[0], d->wrap[1], d->wrap[2], d->compare_mode, d->compare_func,
+                    d->reduction, d->lod_min, d->lod_max, d->lod_bias, d->max_anisotropy, bc[0], bc[1], bc[2], bc[3]);
         }
         if (!ii->sampler) { SamplerDesc d = { .wrap = { 1, 1, 1 }, .lod_max = 1000 }; ii->sampler = render_sampler(&d); }
         if (!ii->imageView && render_tracing())

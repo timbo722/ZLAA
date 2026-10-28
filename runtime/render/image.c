@@ -426,6 +426,8 @@ void render_debug_dump(HostImage *h, const char *path) {
                                .imageExtent = { h->width, h->height, 1 } };
     vkCmdCopyImageToBuffer(cmd, tmp, VK_IMAGE_LAYOUT_GENERAL, render_staging_buffer(), 1, &copy);
     render_flush();
+    if (getenv("LAA_DUMP_ALPHA"))                    /* LAA_DUMP_ALPHA=1: the alpha channel as grey instead */
+        for (uint64_t i = 0; i < size; i += 4) staging[i] = staging[i + 1] = staging[i + 2] = staging[i + 3];
     for (uint64_t i = 3; i < size; i += 4) staging[i] = 255;    /* (opaque, to see the colours) */
     /* NVN's images are upside down (OpenGL convention): rows bottom-up */
     if (png_write(path, staging + size - (uint64_t)h->width * 4, h->width, h->height, -(int32_t)h->width * 4) == 0)
