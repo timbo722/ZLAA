@@ -55,9 +55,10 @@ typedef struct {
 enum { SHADER_GL_DEPTH = 1,         /* vertex: clip-space z is -w..w (OpenGL/NVN default) -> 0..w */
        SHADER_DEBUG_CONST = 2,       /* fragment (debugging): colour outputs 0.5, no KIL; with
                                       * (n + 1) << 8 in options: input attribute n instead of 0.5 */
-       SHADER_DEBUG_CAPTURE = 4 };   /* vertex (debugging): also store position and attribute 1 of
+       SHADER_DEBUG_CAPTURE = 4,     /* vertex (debugging): also store position and attribute 1 of
                                       * each vertex at shader_capture_address (slot instance * 4 +
                                       * vertex % 4, 8 floats each, 256 slots) */
+       SHADER_FULL_HALF = 16 };      /* packed-half arithmetic in full 32-bit precision (not RelaxedPrecision) */
 extern uint64_t shader_capture_address;   /* a GPU address (buffer device address) */
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
                      uint32_t constants_size, const uint8_t *control, int options, uint32_t extra_outputs,

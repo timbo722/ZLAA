@@ -81,6 +81,9 @@ static HostShader *make_shader(uint64_t code, uint64_t control, int stage, uint3
         const uint8_t *p = gptr(code);
         /* LAA_DEBUG_FS=address: that fragment shader outputs 0.5 (is it drawing at all?) */
         int options = nvn_depth_mode() == 0 ? SHADER_GL_DEPTH : 0;   /* (z -w..w -> 0..w, unless already 0..w) */
+        static int full_half = -1;                   /* LAA_FULL_HALF=1: packed halves in full precision */
+        if (full_half < 0) full_half = getenv("LAA_FULL_HALF") != NULL;
+        if (full_half) options |= SHADER_FULL_HALF;
         if (!ahead && stage == SHADER_VERTEX && getenv("LAA_DEBUG_VS") && strtoull(getenv("LAA_DEBUG_VS"), NULL, 0) == code) {
             if (!capture_buffer) make_capture_buffer();
             options |= SHADER_DEBUG_CAPTURE;

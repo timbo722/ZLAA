@@ -21,6 +21,15 @@ enum { OUT_F16, OUT_F32, OUT_MRG_H0, OUT_MRG_H1 };
 
 typedef struct { uint32_t h[2]; } Pair;          /* two f32 ids */
 
+/* Maxwell does the arithmetic of these instructions in 16 bits, and the results are rounded to
+ * halves anyway: RelaxedPrecision lets the GPU do the same (the Adreno has fast 16-bit ALUs, and
+ * half the registers). Not for results stored as a 32-bit float (OUT_F32). */
+static uint32_t relaxed(T *t, uint32_t id, int ofmt) {
+    if (ofmt != OUT_F32 && !(t->options & SHADER_FULL_HALF))
+        spv_op(&t->s, SEC_DECO, SpvOpDecorate, 2, id, SpvDecorationRelaxedPrecision);
+    return id;
+}
+
 static uint32_t elem(T *t, uint32_t v2, uint32_t i) { return op2(t, SpvOpCompositeExtract, t->t_f32, v2, i); }
 
 static Pair unpack(T *t, uint32_t u) {
@@ -171,14 +180,16 @@ int emit_half(T *t, const Inst *in) {
     case OP_HADD2R: case OP_HADD2I: case OP_HADD2C: case OP_HADD232I: {
         HalfArgs x;
         half_args(t, in, &x);
-        Pair r = { { op2(t, SpvOpFAdd, t->t_f32, x.a.h[0], x.b.h[0]), op2(t, SpvOpFAdd, t->t_f32, x.a.h[1], x.b.h[1]) } };
+        Pair r = { { relaxed(t, op2(t, SpvOpFAdd, t->t_f32, x.a.h[0], x.b.h[0]), x.ofmt),
+                     relaxed(t, op2(t, SpvOpFAdd, t->t_f32, x.a.h[1], x.b.h[1]), x.ofmt) } };
         half_dest(t, rd, r, x.ofmt, x.sat);
         return 1;
     }
     case OP_HMUL2R: case OP_HMUL2I: case OP_HMUL2C: case OP_HMUL232I: {
         HalfArgs x;
         half_args(t, in, &x);
-        Pair r = { { op2(t, SpvOpFMul, t->t_f32, x.a.h[0], x.b.h[0]), op2(t, SpvOpFMul, t->t_f32, x.a.h[1], x.b.h[1]) } };
+        Pair r = { { relaxed(t, op2(t, SpvOpFMul, t->t_f32, x.a.h[0], x.b.h[0]), x.ofmt),
+                     relaxed(t, op2(t, SpvOpFMul, t->t_f32, x.a.h[1], x.b.h[1]), x.ofmt) } };
         half_dest(t, rd, r, x.ofmt, x.sat);
         return 1;
     }
@@ -186,7 +197,7 @@ int emit_half(T *t, const Inst *in) {
         HalfArgs x;
         half_args(t, in, &x);
         Pair r;
-        for (int i = 0; i < 2; i++) r.h[i] = ext3(t, t->t_f32, GLSLstd450Fma, x.a.h[i], x.b.h[i], x.c.h[i]);
+        for (int i = 0; i < 2; i++) r.h[i] = relaxed(t, ext3(t, t->t_f32, GLSLstd450Fma, x.a.h[i], x.b.h[i], x.c.h[i]), x.ofmt);
         half_dest(t, rd, r, x.ofmt, x.sat);
         return 1;
     }
