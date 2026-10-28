@@ -5,6 +5,9 @@
  * means "use 3 bits of a byte for target", and the compiler does the shifting and masking.
  */
 #include "nvn.h"
+#ifdef LAA_HAVE_SDL
+#include "render/render.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -193,6 +196,9 @@ static void set_shaders(CPU *c, int stride) {
             if (f) { fwrite(gptr(code), 1, 0x10000, f); fclose(f); }
         }
     }
+#ifdef LAA_HAVE_SDL
+    if (render_active()) render_program_made(p);
+#endif
     RET(1);
 }
 static void nvnProgramSetShaders(CPU *c)    { set_shaders(c, 16); }

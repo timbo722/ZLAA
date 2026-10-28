@@ -61,18 +61,15 @@ double render_compile_ms;
 unsigned render_compiles;
 static double compile_clock(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
-HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs) {
-    unsigned b = (unsigned)((code >> 6) * 0x9E3779B1u >> 22) & (SHADER_BUCKETS - 1);
-    for (HostShader *s = shader_buckets[b]; s; s = s->next)
-        if (s->code == code && s->stage == stage && s->extra_outputs == extra_outputs) return s;
-    double t0 = compile_clock();
+static unsigned shader_bucket(uint64_t code) { return (unsigned)((code >> 6) * 0x9E3779B1u >> 22) & (SHADER_BUCKETS - 1); }
+
+/* Translate one shader into a new HostShader (not in the table yet). `ahead`: on the translating
+ * thread, which leaves out the debugging options (they touch the main thread's state). */
+static HostShader *make_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs, int ahead) {
     HostShader *s = calloc(1, sizeof *s);
     s->code = code;
     s->stage = stage;
     s->extra_outputs = extra_outputs;
-    s->next = shader_buckets[b];
-    shader_buckets[b] = s;
-
     uint64_t storage, size;
     if (!nvn_pool_find(code, &storage, &size)) {
         snprintf(s->info.error, sizeof s->info.error, "code isn't in a memory pool");
@@ -84,11 +81,11 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t e
         const uint8_t *p = gptr(code);
         /* LAA_DEBUG_FS=address: that fragment shader outputs 0.5 (is it drawing at all?) */
         int options = nvn_depth_mode() == 0 ? SHADER_GL_DEPTH : 0;   /* (z -w..w -> 0..w, unless already 0..w) */
-        if (stage == SHADER_VERTEX && getenv("LAA_DEBUG_VS") && strtoull(getenv("LAA_DEBUG_VS"), NULL, 0) == code) {
+        if (!ahead && stage == SHADER_VERTEX && getenv("LAA_DEBUG_VS") && strtoull(getenv("LAA_DEBUG_VS"), NULL, 0) == code) {
             if (!capture_buffer) make_capture_buffer();
             options |= SHADER_DEBUG_CAPTURE;
         }
-        if (getenv("LAA_DEBUG_FS") && strtoull(getenv("LAA_DEBUG_FS"), NULL, 0) == code) {
+        if (!ahead && getenv("LAA_DEBUG_FS") && strtoull(getenv("LAA_DEBUG_FS"), NULL, 0) == code) {
             options |= SHADER_DEBUG_CONST;
             if (getenv("LAA_DEBUG_FS_INPUT")) options |= ((int)strtol(getenv("LAA_DEBUG_FS_INPUT"), NULL, 0) + 1) << 8;
         }
@@ -100,10 +97,117 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t e
             s->constants_size = c_size;
         }
     }
+    return s;
+}
+
+static void free_shader(HostShader *s) {
+    if (s->module) vkDestroyShaderModule(vk.device, s->module, NULL);
+    shader_free(&s->info);
+    free(s);
+}
+
+static HostShader *find_shader(uint64_t code, int stage, uint32_t extra_outputs) {
+    for (HostShader *s = shader_buckets[shader_bucket(code)]; s; s = s->next)
+        if (s->code == code && s->stage == stage && s->extra_outputs == extra_outputs) return s;
+    return NULL;
+}
+
+HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t extra_outputs) {
+    HostShader *s = find_shader(code, stage, extra_outputs);
+    if (s) return s;
+    double t0 = compile_clock();
+    s = make_shader(code, control, stage, extra_outputs, 0);
+    unsigned b = shader_bucket(code);
+    s->next = shader_buckets[b];
+    shader_buckets[b] = s;
     if (!s->module) fprintf(stderr, "render: shader %#llx (stage %d) not translated: %s\n",
                             (unsigned long long)code, stage, s->info.error);
     render_compile_ms += compile_clock() - t0;
     return s;
+}
+
+/* ---- translating ahead ----
+ * The game sets up its programs (nvnProgramSetShaders) while it loads, and draws with them
+ * later. Translating at the first draw put ~40 shaders (~0.7 ms each) into a new scene's first
+ * frame. So programs are queued as they are set up and a thread translates them (with the vertex
+ * shader variant the fragment shader needs); the main thread takes the results into the table
+ * at presents (render_adopt_shaders). A draw that comes first just translates for itself, and
+ * the thread's copy is dropped. LAA_NO_SHADERS_AHEAD=1: off. */
+#define AHEAD_MAX 4096
+static Program ahead_queue[AHEAD_MAX];
+static unsigned ahead_head, ahead_tail;
+static HostShader *ahead_done;                       /* translated, for the main thread (chained by next) */
+static pthread_mutex_t ahead_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ahead_cond = PTHREAD_COND_INITIALIZER;
+static double ahead_ms;                              /* time the thread spent (into render_compile_ms) */
+
+static void ahead_finish(HostShader *s) {
+    pthread_mutex_lock(&ahead_lock);
+    s->next = ahead_done;
+    ahead_done = s;
+    pthread_mutex_unlock(&ahead_lock);
+}
+
+static void *ahead_thread(void *arg) {
+    (void)arg;
+    host_thread_init();                          /* (off the game's main core) */
+    for (;;) {
+        pthread_mutex_lock(&ahead_lock);
+        while (ahead_head == ahead_tail) pthread_cond_wait(&ahead_cond, &ahead_lock);
+        Program p = ahead_queue[ahead_tail++ % AHEAD_MAX];
+        pthread_mutex_unlock(&ahead_lock);
+        double t0 = compile_clock();
+        if (p.stages >> STAGE_COMPUTE & 1) {
+            ahead_finish(make_shader(p.code[STAGE_COMPUTE], p.control[STAGE_COMPUTE], SHADER_COMPUTE, 0, 1));
+        } else if ((p.stages >> STAGE_VERTEX & 1) && (p.stages >> STAGE_FRAGMENT & 1)) {
+            HostShader *vs = make_shader(p.code[STAGE_VERTEX], p.control[STAGE_VERTEX], SHADER_VERTEX, 0, 1);
+            HostShader *fs = make_shader(p.code[STAGE_FRAGMENT], p.control[STAGE_FRAGMENT], SHADER_FRAGMENT, 0, 1);
+            uint32_t missing = fs->info.inputs & ~vs->info.outputs;   /* (as draw() asks for it) */
+            if (vs->module && fs->module && missing)
+                ahead_finish(make_shader(p.code[STAGE_VERTEX], p.control[STAGE_VERTEX], SHADER_VERTEX, missing, 1));
+            ahead_finish(vs);
+            ahead_finish(fs);
+        }
+        pthread_mutex_lock(&ahead_lock);
+        ahead_ms += compile_clock() - t0;
+        pthread_mutex_unlock(&ahead_lock);
+    }
+    return NULL;
+}
+
+static void start_ahead_thread(void) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, ahead_thread, NULL) == 0) pthread_detach(t);
+}
+
+void render_program_made(const Program *p) {
+    static int off = -1;
+    if (off < 0) off = getenv("LAA_NO_SHADERS_AHEAD") || getenv("LAA_DEBUG_VS") || getenv("LAA_DEBUG_FS");
+    if (off) return;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, start_ahead_thread);
+    pthread_mutex_lock(&ahead_lock);
+    if (ahead_head - ahead_tail < AHEAD_MAX) ahead_queue[ahead_head++ % AHEAD_MAX] = *p;
+    pthread_cond_signal(&ahead_cond);
+    pthread_mutex_unlock(&ahead_lock);
+}
+
+void render_adopt_shaders(void) {
+    if (!__atomic_load_n(&ahead_done, __ATOMIC_RELAXED)) return;   /* (usually: nothing new) */
+    pthread_mutex_lock(&ahead_lock);
+    HostShader *list = ahead_done;
+    ahead_done = NULL;
+    render_compile_ms += ahead_ms;
+    ahead_ms = 0;
+    pthread_mutex_unlock(&ahead_lock);
+    while (list) {
+        HostShader *s = list;
+        list = s->next;
+        if (find_shader(s->code, s->stage, s->extra_outputs) || !s->module) { free_shader(s); continue; }
+        unsigned b = shader_bucket(s->code);
+        s->next = shader_buckets[b];
+        shader_buckets[b] = s;
+    }
 }
 
 /* ================================================================ layouts */
@@ -375,7 +479,7 @@ static VkPipeline create(const PipelineKey *k) {
 #define COMPILE_WAIT_MS 6.0
 static double frame_wait_ms;                     /* waited for compiles this frame */
 static uint64_t wait_frame;
-#define COMPILE_THREADS 2
+#define COMPILE_THREADS 4
 #define COMPILE_QUEUE 1024
 static Pipeline *compile_queue[COMPILE_QUEUE];
 static unsigned compile_head, compile_tail;
@@ -418,7 +522,8 @@ VkPipeline render_pipeline(const PipelineKey *k) {
     if (sync < 0) {
         sync = getenv("LAA_SYNC_PIPELINES") != NULL;
         render_pipeline_layout();                    /* (made before any thread can use it) */
-        for (int i = 0; !sync && i < COMPILE_THREADS; i++) {
+        int threads = getenv("LAA_COMPILE_THREADS") ? atoi(getenv("LAA_COMPILE_THREADS")) : COMPILE_THREADS;
+        for (int i = 0; !sync && i < threads; i++) {
             pthread_t t;
             pthread_create(&t, NULL, compile_thread, NULL);
             pthread_detach(t);

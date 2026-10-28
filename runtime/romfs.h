@@ -15,5 +15,6 @@
 int romfs_open_dir(const char *host_dir);                 /* 0 on success */
 uint64_t romfs_size(void);
 int romfs_read(uint64_t offset, void *dst, uint64_t size); /* 0 on success */
+const char *romfs_file_at(uint64_t offset);   /* host path of the file there, or NULL (for traces) */
 
 #endif

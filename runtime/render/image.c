@@ -448,7 +448,10 @@ int render_tracing(void) {
 
 /* Copy the texture's guest memory into its image (all levels and layers), through the staging
  * buffer: block-linear -> rows on the CPU (layout.c), then vkCmdCopyBufferToImage. */
+static int uploading_ahead;                          /* (render_preload: for the trace) */
+
 void render_upload(HostImage *h) {
+    uint64_t again = h->checked;                     /* (for the trace: uploaded before) */
     h->pending_clear = 0;                            /* (the whole image is replaced: newer than a clear) */
     h->needs_upload = 0;
     h->gpu_written = 0;                              /* (now the same as guest memory) */
@@ -467,8 +470,9 @@ void render_upload(HostImage *h) {
     uint8_t *blocks = h->astc_decode ? malloc(most) : NULL;
     uint64_t offset;
     if (render_tracing())
-        fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u flags %#x: %llu bytes\n", (unsigned long long)h->address,
-                s.width, s.height, s.depth, h->desc.format, s.levels, s.layers, h->desc.flags, (unsigned long long)total);
+        fprintf(stderr, "render: upload %#llx %ux%ux%u fmt %#x levels %u layers %u flags %#x: %llu bytes%s\n", (unsigned long long)h->address,
+                s.width, s.height, s.depth, h->desc.format, s.levels, s.layers, h->desc.flags, (unsigned long long)total,
+                uploading_ahead ? " (ahead)" : again ? " (again)" : "");
     uint8_t *out = render_staging(total, &offset);
     VkBufferImageCopy copies[16];
     uint32_t ncopies = 0;
@@ -588,9 +592,10 @@ HostImage *render_image_find(uint64_t texture) {
 static Texture preload_queue[PRELOAD_MAX];
 static unsigned preload_head, preload_tail;
 static pthread_mutex_t preload_lock = PTHREAD_MUTEX_INITIALIZER;
+static HostImage *verify_queue[PRELOAD_MAX];        /* uploaded ahead: checked again at later presents */
+static unsigned verify_head, verify_tail;            /* (main thread only) */
 
-void render_texture_made(const Texture *t) {
-    if (t->d.flags & TEXTURE_FLAG_COMPRESSIBLE) return;
+void render_texture_made(const Texture *t) {      /* (render targets too: their image is made ahead) */
     pthread_mutex_lock(&preload_lock);
     if (preload_head - preload_tail < PRELOAD_MAX) preload_queue[preload_head++ % PRELOAD_MAX] = *t;
     pthread_mutex_unlock(&preload_lock);
@@ -608,11 +613,28 @@ void render_preload(double ms) {
         int any = preload_head != preload_tail;
         if (any) t = preload_queue[preload_tail++ % PRELOAD_MAX];
         pthread_mutex_unlock(&preload_lock);
-        if (!any) return;
+        if (!any) break;
         HostImage *h = render_image(&t);
         if (h && h->needs_upload) {
+            uploading_ahead = 1;
             render_upload(h);
+            uploading_ahead = 0;
             h->preloaded = 1;
+            if (verify_head - verify_tail < PRELOAD_MAX) verify_queue[verify_head++ % PRELOAD_MAX] = h;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if ((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6 > ms) return;
+    }
+    /* then the hash check the first use would do, a frame or more after the upload (the loading
+     * screen again): did the game write the memory after making the texture? */
+    while (verify_head != verify_tail) {
+        HostImage *h = verify_queue[verify_tail % PRELOAD_MAX];
+        if (h->preloaded && h->checked == frame_no) return;   /* (uploaded this frame: next time) */
+        verify_tail++;
+        if (h->preloaded) {
+            h->preloaded = 0;
+            h->checked = frame_no;
+            if (guest_hash(h) != h->hash) h->needs_upload = 1;
         }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         if ((t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6 > ms) return;

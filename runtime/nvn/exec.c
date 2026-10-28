@@ -109,7 +109,9 @@ static void run_list(uint64_t at, int depth) {
                 double t0 = sync_tracing() ? now_ms() : 0;
                 render_prof_on = t0 != 0;
                 render_command(r);
-                if (t0 && now_ms() - t0 > 1.0)           /* (LAA_TRACE_SYNC: the slow ones) */
+                static double slow_ms = -1;              /* (LAA_TRACE_SYNC: the slow ones; LAA_TRACE_SLOW_MS=ms) */
+                if (slow_ms < 0) slow_ms = getenv("LAA_TRACE_SLOW_MS") ? atof(getenv("LAA_TRACE_SLOW_MS")) : 1.0;
+                if (t0 && now_ms() - t0 > slow_ms)
                     fprintf(stderr, "sync: %.2f slow %s: %.2f ms (shaders %.2f, resources %.2f, pass %.2f, pipeline %.2f)\n",
                             now_ms(), nvn_command_names[r->op], now_ms() - t0, render_prof[0], render_prof[1], render_prof[2],
                             render_prof[3]);
@@ -412,7 +414,10 @@ void nvn_present(const Window *w, uint64_t texture) {
         present_serial[1] = present_serial[0];       /* (LAA_FRAME_LAG) */
         present_serial[0] = render_fence_serial();
         render_present(texture, rect);
-        render_preload(3.0);                         /* (textures made since: ahead of their first use) */
+        /* textures made since: ahead of their first use. 3 ms a frame, 10 in light frames like a
+         * loading screen's (a new scene's textures are often still queued when it first shows) */
+        render_preload(render_take_frame_draws() < 100 ? 10.0 : 3.0);
+        render_adopt_shaders();
         if (sync_tracing()) fprintf(stderr, "sync: %.2f presented frame %" PRIu64 "\n", now_ms(), frames);
         pthread_mutex_unlock(&gpu_lock);
         if (frame_stats > 0) fs.present += now_ms() - t0;

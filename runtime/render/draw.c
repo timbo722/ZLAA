@@ -736,8 +736,12 @@ static double prof_clock(void) {
 #define PROF(i, stmt) do { double prof_t0 = render_prof_on ? prof_clock() : 0; stmt; \
                            if (render_prof_on) render_prof[i] += prof_clock() - prof_t0; } while (0)
 
+static unsigned frame_draws;                     /* since the last present (render_take_frame_draws) */
+unsigned render_take_frame_draws(void) { unsigned n = frame_draws; frame_draws = 0; return n; }
+
 static void draw(const Cmd *r, int indexed) {
     submit_early();
+    frame_draws++;
     const Program *p = &st.program;
     if (!(p->stages >> STAGE_VERTEX & 1) || !(p->stages >> STAGE_FRAGMENT & 1)) {
         warn_once("draw without a vertex and a fragment shader", p->stages);

@@ -33,6 +33,11 @@ void render_write_texture(uint64_t texture, const uint8_t *rgba, uint32_t width,
  * use, a little at each present (render_preload: up to `ms` milliseconds) */
 void render_texture_made(const Texture *t);
 void render_preload(double ms);
+unsigned render_take_frame_draws(void);   /* draws since the last call (once per present) */
+/* The game set up a program (nvnProgramSetShaders): its shaders are translated ahead, on a thread
+ * (pipeline.c); render_adopt_shaders (at presents) takes the finished ones */
+void render_program_made(const Program *p);
+void render_adopt_shaders(void);
 extern int render_prof_on;          /* LAA_TRACE_SYNC: time draws' parts into render_prof (draw.c) */
 extern double render_prof[4];
 /* The CPU wrote texels into a texture's guest memory (region in blocks: x, y, z, w, h, d). */

@@ -202,6 +202,17 @@ static int file_fd(int f) {
     return fd;
 }
 
+const char *romfs_file_at(uint64_t offset) {
+    if (offset < data_start || offset >= image_size) return NULL;
+    uint64_t d = offset - data_start;
+    int lo = 0, hi = nfiles;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (files[mid].data_off <= d) lo = mid + 1; else hi = mid;
+    }
+    return lo > 0 && d - files[lo - 1].data_off < files[lo - 1].size ? files[lo - 1].host_path : NULL;
+}
+
 int romfs_read(uint64_t offset, void *dst, uint64_t size) {
     uint8_t *out = dst;
     if (offset > image_size || size > image_size - offset) return -1;
