@@ -135,6 +135,14 @@ static int create_device(void) {
         VkExtensionProperties ext[512];
         vkEnumerateDeviceExtensionProperties(vk.gpu, NULL, &n, ext);
         for (uint32_t i = 0; i < n; i++) fprintf(stderr, "vulkan: extension %s\n", ext[i].extensionName);
+        VkPhysicalDevicePushDescriptorPropertiesKHR push = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR };
+        VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &push };
+        vkGetPhysicalDeviceProperties2(vk.gpu, &p2);
+        const VkPhysicalDeviceLimits *l = &p2.properties.limits;
+        fprintf(stderr, "vulkan: limits: dynamic uniform buffers %u per set, uniform buffers %u per stage / %u per set, "
+                "samplers %u per stage, uniform offset alignment %llu, push descriptors %u\n",
+                l->maxDescriptorSetUniformBuffersDynamic, l->maxPerStageDescriptorUniformBuffers, l->maxDescriptorSetUniformBuffers,
+                l->maxPerStageDescriptorSampledImages, (unsigned long long)l->minUniformBufferOffsetAlignment, push.maxPushDescriptors);
     }
 
     float priority = 1.0f;

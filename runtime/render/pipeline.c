@@ -229,8 +229,9 @@ static void make_layout(const int *stages, int nstages, VkDescriptorSetLayout *s
         VkShaderStageFlags flag = stages[s] == SHADER_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT
                                 : stages[s] == SHADER_COMPUTE ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
         uint32_t base = (uint32_t)stages[s] * SHADER_STAGE_BINDINGS;
-        for (uint32_t i = 0; i < 18; i++)
-            b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_CBUF_BINDING + i, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flag, NULL };
+        for (uint32_t i = 0; i < 18; i++)                /* (c0..c15 dynamic: the offset comes at bind time) */
+            b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_CBUF_BINDING + i,
+                i < RENDER_DYNAMIC_CBUFS ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flag, NULL };
         for (uint32_t i = 0; i < SHADER_MAX_TEXTURES; i++)
             b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_TEXTURE_BINDING + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, flag, NULL };
     }

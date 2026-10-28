@@ -71,18 +71,22 @@ void render_end_rendering(void) {
 
 static VkDescriptorPool descriptor_pools[RENDER_CONTEXTS];
 
+static void forget_sets(int context);
+
 void render_submission_done(int context) {
     if (descriptor_pools[context]) vkResetDescriptorPool(vk.device, descriptor_pools[context], 0);
+    forget_sets(context);
 }
 
 static VkDescriptorSet new_set(VkDescriptorSetLayout layout) {
     render_cmd();                                    /* (recording first: starting it empties the pool) */
     VkDescriptorPool *pool = &descriptor_pools[render_context()];
     if (!*pool) {
-        VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 8 },
+        VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 4 },
+                                          { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 4096 * 2 * RENDER_DYNAMIC_CBUFS },
                                           { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 8 } };
         VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4096,
-                                          .poolSizeCount = 2, .pPoolSizes = sizes };
+                                          .poolSizeCount = 3, .pPoolSizes = sizes };
         VK_CHECK(vkCreateDescriptorPool(vk.device, &ci, NULL, pool));
     }
     VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -91,6 +95,61 @@ static VkDescriptorSet new_set(VkDescriptorSetLayout layout) {
     if (vkAllocateDescriptorSets(vk.device, &ai, &set) != VK_SUCCESS) {
         render_submit();                             /* pool full: send the work so far, go on in the next context */
         return new_set(layout);
+    }
+    return set;
+}
+
+/* Sets already made in this submission context, by what is in them (two 64-bit hashes of the
+ * writes, dynamic offsets left out): most draws use the same pools, shaders and textures as
+ * one before them. Emptied with the context's descriptor pool. LAA_NO_SET_CACHE=1: always new. */
+#define SET_CACHE 2048
+typedef struct { uint64_t h1, h2; VkDescriptorSetLayout layout; VkDescriptorSet set; } CachedSet;
+static CachedSet set_cache[RENDER_CONTEXTS][SET_CACHE];
+static unsigned set_cache_used[RENDER_CONTEXTS];
+
+static void hash_in(uint64_t *h1, uint64_t *h2, uint64_t v) {
+    *h1 = (*h1 ^ v) * 0x100000001B3ull;
+    *h2 = (*h2 ^ (v * 0x9E3779B97F4A7C15ull)) * 0xC2B2AE3D27D4EB4Full;
+    *h2 ^= *h2 >> 31;
+}
+
+static void forget_sets(int context) {               /* (recycler thread: the context isn't in use) */
+    memset(set_cache[context], 0, sizeof set_cache[context]);
+    set_cache_used[context] = 0;
+}
+
+static VkDescriptorSet get_set(VkDescriptorSetLayout layout, VkWriteDescriptorSet *writes, uint32_t nw) {
+    static int no_cache = -1;
+    if (no_cache < 0) no_cache = getenv("LAA_NO_SET_CACHE") != NULL;
+    uint64_t h1 = 0xCBF29CE484222325ull, h2 = 0x84222325CBF29CE4ull;
+    hash_in(&h1, &h2, (uint64_t)(uintptr_t)layout);
+    for (uint32_t i = 0; i < nw; i++) {
+        const VkWriteDescriptorSet *w = &writes[i];
+        hash_in(&h1, &h2, (uint64_t)w->dstBinding << 32 | (uint32_t)w->descriptorType);
+        if (w->pBufferInfo) {
+            hash_in(&h1, &h2, (uint64_t)(uintptr_t)w->pBufferInfo->buffer);
+            hash_in(&h1, &h2, w->pBufferInfo->offset ^ w->pBufferInfo->range << 32);
+        } else {
+            hash_in(&h1, &h2, (uint64_t)(uintptr_t)w->pImageInfo->imageView);
+            hash_in(&h1, &h2, (uint64_t)(uintptr_t)w->pImageInfo->sampler);
+        }
+    }
+    render_cmd();
+    int c = render_context();
+    CachedSet *slot = NULL;
+    if (!no_cache)
+        for (unsigned k = 0; k < SET_CACHE; k++) {
+            CachedSet *e = &set_cache[c][(h1 + k) % SET_CACHE];
+            if (!e->set) { slot = e; break; }
+            if (e->h1 == h1 && e->h2 == h2 && e->layout == layout) return e->set;
+        }
+    VkDescriptorSet set = new_set(layout);
+    if (render_context() != c) slot = NULL;          /* (the pool was full: a new context, its own table) */
+    for (uint32_t i = 0; i < nw; i++) writes[i].dstSet = set;
+    vkUpdateDescriptorSets(vk.device, nw, writes, 0, NULL);
+    if (slot && set_cache_used[c] < SET_CACHE * 3 / 4) {
+        *slot = (CachedSet){ h1, h2, layout, set };
+        set_cache_used[c]++;
     }
     return set;
 }
@@ -504,9 +563,11 @@ static void put_buffer_table(uint8_t *at, const Range *r, int n) {
     }
 }
 
+/* The stage's descriptor writes (their set comes later: get_set), and its constant buffers'
+ * dynamic offsets: dyn[slot] for c0..c15 */
 static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, uint32_t *nw,
                       VkDescriptorBufferInfo *buffers, uint32_t *nb, VkDescriptorImageInfo *images, uint32_t *ni,
-                      VkDescriptorSet set) {
+                      uint32_t *dyn) {
     uint32_t base = (uint32_t)stage * SHADER_STAGE_BINDINGS;
     for (int slot = 0; slot < 18; slot++) {
         if (!(sh->info.cbuf_mask >> slot & 1)) continue;
@@ -541,9 +602,15 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
                 warn_once("uniform buffer not usable", addr);
             }
         }
-        writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+        int dynamic = slot < RENDER_DYNAMIC_CBUFS;
+        if (dynamic) {                               /* the offset at bind time, the set without it */
+            dyn[slot] = (uint32_t)bi->offset;
+            bi->offset = 0;
+        }
+        writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstBinding = base + SHADER_CBUF_BINDING + (uint32_t)slot, .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = bi };
+            .descriptorType = dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo = bi };
     }
     for (uint32_t i = 0; i < sh->info.ntextures; i++) {
         const ShaderTexture *tx = &sh->info.textures[i];
@@ -592,7 +659,7 @@ static int fill_stage(HostShader *sh, int stage, VkWriteDescriptorSet *writes, u
             fprintf(stderr, "render:   texture %u: NOT FOUND (handle %#llx: id %u of %u, sampler %u; offset %#x)\n", i,
                     (unsigned long long)handle, tex_id, st.texture_pool.count, smp_id, tx->handle_offset);
         if (!ii->imageView) ii->imageView = render_dummy_view(tx->dim, tx->array);
-        writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+        writes[(*nw)++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstBinding = base + SHADER_TEXTURE_BINDING + i, .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = ii };
     }
@@ -686,13 +753,12 @@ static void dispatch(const Cmd *r, int indirect) {
     if (!pipeline) { stats.failed_shader++; return; }
     if (indirect) memcpy(st.groups, gptr(r->a[0]), 12);   /* (as the CPU sees them now) */
     else for (int i = 0; i < 3; i++) st.groups[i] = (uint32_t)r->a[i];
-    VkDescriptorSet set = new_set(render_compute_set_layout());
     VkWriteDescriptorSet writes[50];
     VkDescriptorBufferInfo buffers[18];
     VkDescriptorImageInfo images[SHADER_MAX_TEXTURES];
-    uint32_t nw = 0, nb = 0, ni = 0;
-    fill_stage(cs, SHADER_COMPUTE, writes, &nw, buffers, &nb, images, &ni, set);
-    vkUpdateDescriptorSets(vk.device, nw, writes, 0, NULL);
+    uint32_t nw = 0, nb = 0, ni = 0, dyn[RENDER_DYNAMIC_CBUFS] = { 0 };
+    fill_stage(cs, SHADER_COMPUTE, writes, &nw, buffers, &nb, images, &ni, dyn);
+    VkDescriptorSet set = get_set(render_compute_set_layout(), writes, nw);
     if (render_tracing())
         fprintf(stderr, "render: dispatch cs %#llx %s %llu x %llu x %llu (local %u x %u x %u)\n", (unsigned long long)cs->code,
                 indirect ? "indirect" : "", (unsigned long long)r->a[0], (unsigned long long)r->a[1],
@@ -705,7 +771,7 @@ static void dispatch(const Cmd *r, int indirect) {
     render_end_rendering();                          /* (no dispatches while rendering) */
     VkCommandBuffer cmd = render_cmd();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_compute_layout(), 0, 1, &set, 0, NULL);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, render_compute_layout(), 0, 1, &set, RENDER_DYNAMIC_CBUFS, dyn);
     if (indirect) {
         VkBuffer b;
         VkDeviceSize off;
@@ -800,14 +866,13 @@ static void draw(const Cmd *r, int indexed) {
 
     /* resources first: making a descriptor set may have to submit work (which ends rendering) */
     double prof_t0 = render_prof_on ? prof_clock() : 0;
-    VkDescriptorSet set = new_set(render_set_layout());
     VkWriteDescriptorSet writes[2 * 50];
     VkDescriptorBufferInfo buffers[2 * 18];
     VkDescriptorImageInfo images[2 * SHADER_MAX_TEXTURES];
-    uint32_t nw = 0, nb = 0, ni = 0;
-    fill_stage(vs, SHADER_VERTEX, writes, &nw, buffers, &nb, images, &ni, set);
-    fill_stage(fs, SHADER_FRAGMENT, writes, &nw, buffers, &nb, images, &ni, set);
-    vkUpdateDescriptorSets(vk.device, nw, writes, 0, NULL);
+    uint32_t nw = 0, nb = 0, ni = 0, dyn[2 * RENDER_DYNAMIC_CBUFS] = { 0 };   /* (in binding order: vertex, fragment) */
+    fill_stage(vs, SHADER_VERTEX, writes, &nw, buffers, &nb, images, &ni, dyn);
+    fill_stage(fs, SHADER_FRAGMENT, writes, &nw, buffers, &nb, images, &ni, dyn + RENDER_DYNAMIC_CBUFS);
+    VkDescriptorSet set = get_set(render_set_layout(), writes, nw);
     if (render_prof_on) render_prof[1] += prof_clock() - prof_t0;
     int began;
     PROF(2, began = begin_rendering());
@@ -856,7 +921,7 @@ static void draw(const Cmd *r, int indexed) {
 
     VkCommandBuffer cmd = render_cmd();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipeline_layout(), 0, 1, &set, 0, NULL);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipeline_layout(), 0, 1, &set, 2 * RENDER_DYNAMIC_CBUFS, dyn);
     VkBuffer vb[16];                                 /* the streams used, bound in runs of neighbours */
     VkDeviceSize voff[16];
     uint32_t used = 0;
