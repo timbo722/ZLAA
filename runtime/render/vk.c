@@ -9,6 +9,7 @@
  *   5. swapchain: the images that are shown in the window, one after another
  */
 #include "vk.h"
+#include "render_internal.h"                 /* (render_load/save_pipeline_keys) */
 #include "kernel.h"                          /* (host_thread_init) */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -304,6 +305,11 @@ static void load_pipeline_cache(void) {
         VK_CHECK(vkCreatePipelineCache(vk.device, &ci, NULL, &vk.pipeline_cache));
     }
     if (data) fprintf(stderr, "vulkan: pipeline cache %s: %zu bytes\n", cache_path, size);
+    if (*cache_path) {                               /* (which pipelines to make ahead: pipeline.c) */
+        char keys[1200];
+        snprintf(keys, sizeof keys, "%.*s/pipeline_keys.bin", (int)(strrchr(cache_path, '/') - cache_path), cache_path);
+        render_load_pipeline_keys(keys);
+    }
     free(data);
 }
 
@@ -316,22 +322,33 @@ static int saving;
 void vk_save_pipeline_cache(void) {
     static time_t last;
     time_t now = time(NULL);
-    if (!*cache_path || (last && now - last < 60)) return;
+    if (!*cache_path) return;
+    int keys_only = last && now - last < 60;         /* (the small list of pipelines: every time) */
     pthread_mutex_lock(&save_lock);
     int busy = saving;
     saving = 1;
     pthread_mutex_unlock(&save_lock);
     if (busy) return;
-    last = now;
+    if (!keys_only) last = now;
     pthread_t t;
-    if (pthread_create(&t, NULL, save_cache_now, NULL) == 0) pthread_detach(t);
+    if (pthread_create(&t, NULL, save_cache_now, keys_only ? (void *)1 : NULL) == 0) pthread_detach(t);
     else { pthread_mutex_lock(&save_lock); saving = 0; pthread_mutex_unlock(&save_lock); }
+}
+
+static void save_keys(void) {
+    char keys[1200];
+    snprintf(keys, sizeof keys, "%.*s/pipeline_keys.bin", (int)(strrchr(cache_path, '/') - cache_path), cache_path);
+    render_save_pipeline_keys(keys);
 }
 
 static void *save_cache_now(void *arg) {
     host_thread_init();                          /* (off the game's main core) */
-    (void)arg;
     size_t size = 0;
+    if (arg) {                                       /* (keys only) */
+        save_keys();
+        pthread_mutex_lock(&save_lock); saving = 0; pthread_mutex_unlock(&save_lock);
+        return NULL;
+    }
     if (vkGetPipelineCacheData(vk.device, vk.pipeline_cache, &size, NULL) != VK_SUCCESS || !size) {
         pthread_mutex_lock(&save_lock); saving = 0; pthread_mutex_unlock(&save_lock);
         return NULL;
@@ -345,6 +362,7 @@ static void *save_cache_now(void *arg) {
         if (fclose(f) == 0 && ok) rename(tmp, cache_path);   /* (a crash mid-write can't damage the old file) */
     }
     free(data);
+    save_keys();
     pthread_mutex_lock(&save_lock);
     saving = 0;
     pthread_mutex_unlock(&save_lock);

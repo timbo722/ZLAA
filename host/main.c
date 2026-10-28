@@ -60,8 +60,45 @@ static void map_face_buttons(SDL_Gamepad *pad) {
            names[letter[1]], names[letter[2]], names[letter[3]]);
 }
 
+static SDL_Gamepad *pad;
+
+/* The Switch button of a gamepad button (0: none) */
+static uint64_t pad_bit(SDL_GamepadButton b) {
+    static const struct { SDL_GamepadButton b; uint64_t bit; } map[] = {
+        { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L },
+        { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, BTN_R }, { SDL_GAMEPAD_BUTTON_START, BTN_PLUS },
+        { SDL_GAMEPAD_BUTTON_BACK, BTN_MINUS }, { SDL_GAMEPAD_BUTTON_DPAD_UP, BTN_UP },
+        { SDL_GAMEPAD_BUTTON_DPAD_DOWN, BTN_DOWN }, { SDL_GAMEPAD_BUTTON_DPAD_LEFT, BTN_LEFT },
+        { SDL_GAMEPAD_BUTTON_DPAD_RIGHT, BTN_RIGHT }, { SDL_GAMEPAD_BUTTON_LEFT_STICK, BTN_LSTICK },
+        { SDL_GAMEPAD_BUTTON_RIGHT_STICK, BTN_RSTICK },
+    };
+    switch (b) {
+    case SDL_GAMEPAD_BUTTON_SOUTH: return face_bit[0];
+    case SDL_GAMEPAD_BUTTON_EAST: return face_bit[1];
+    case SDL_GAMEPAD_BUTTON_WEST: return face_bit[2];
+    case SDL_GAMEPAD_BUTTON_NORTH: return face_bit[3];
+    default: break;
+    }
+    for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (map[i].b == b) return map[i].bit;
+    return 0;
+}
+
+static const struct { SDL_Scancode key; uint64_t bit; } keys[] = {
+    { SDL_SCANCODE_X, BTN_A }, { SDL_SCANCODE_Z, BTN_B }, { SDL_SCANCODE_S, BTN_X }, { SDL_SCANCODE_A, BTN_Y },
+    { SDL_SCANCODE_Q, BTN_L }, { SDL_SCANCODE_W, BTN_R }, { SDL_SCANCODE_1, BTN_ZL }, { SDL_SCANCODE_2, BTN_ZR },
+    { SDL_SCANCODE_RETURN, BTN_PLUS }, { SDL_SCANCODE_BACKSPACE, BTN_MINUS }, { SDL_SCANCODE_T, BTN_UP },
+    { SDL_SCANCODE_G, BTN_DOWN }, { SDL_SCANCODE_F, BTN_LEFT }, { SDL_SCANCODE_H, BTN_RIGHT },
+};
+
+/* Presses as events, so a quick tap isn't lost between two samples (input_press) */
+static void input_event(const SDL_Event *e) {
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && pad && e->gbutton.which == SDL_GetGamepadID(pad))
+        input_press(pad_bit((SDL_GamepadButton)e->gbutton.button));
+    if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat)
+        for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) if (e->key.scancode == keys[i].key) input_press(keys[i].bit);
+}
+
 static void read_input(void) {
-    static SDL_Gamepad *pad;
     if (!pad) {
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
@@ -71,12 +108,6 @@ static void read_input(void) {
     }
     const bool *k = SDL_GetKeyboardState(NULL);
     InputState s = { 0 };
-    static const struct { SDL_Scancode key; uint64_t bit; } keys[] = {
-        { SDL_SCANCODE_X, BTN_A }, { SDL_SCANCODE_Z, BTN_B }, { SDL_SCANCODE_S, BTN_X }, { SDL_SCANCODE_A, BTN_Y },
-        { SDL_SCANCODE_Q, BTN_L }, { SDL_SCANCODE_W, BTN_R }, { SDL_SCANCODE_1, BTN_ZL }, { SDL_SCANCODE_2, BTN_ZR },
-        { SDL_SCANCODE_RETURN, BTN_PLUS }, { SDL_SCANCODE_BACKSPACE, BTN_MINUS }, { SDL_SCANCODE_T, BTN_UP },
-        { SDL_SCANCODE_G, BTN_DOWN }, { SDL_SCANCODE_F, BTN_LEFT }, { SDL_SCANCODE_H, BTN_RIGHT },
-    };
     for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) if (k[keys[i].key]) s.buttons |= keys[i].bit;
     if (k[SDL_SCANCODE_LEFT]) s.lx -= 32767;
     if (k[SDL_SCANCODE_RIGHT]) s.lx += 32767;
@@ -87,19 +118,8 @@ static void read_input(void) {
     if (k[SDL_SCANCODE_I]) s.ry += 32767;
     if (k[SDL_SCANCODE_K]) s.ry -= 32767;
     if (pad) {
-        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH)) s.buttons |= face_bit[0];
-        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST)) s.buttons |= face_bit[1];
-        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_WEST)) s.buttons |= face_bit[2];
-        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_NORTH)) s.buttons |= face_bit[3];
-        static const struct { SDL_GamepadButton b; uint64_t bit; } map[] = {
-            { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, BTN_L },
-            { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, BTN_R }, { SDL_GAMEPAD_BUTTON_START, BTN_PLUS },
-            { SDL_GAMEPAD_BUTTON_BACK, BTN_MINUS }, { SDL_GAMEPAD_BUTTON_DPAD_UP, BTN_UP },
-            { SDL_GAMEPAD_BUTTON_DPAD_DOWN, BTN_DOWN }, { SDL_GAMEPAD_BUTTON_DPAD_LEFT, BTN_LEFT },
-            { SDL_GAMEPAD_BUTTON_DPAD_RIGHT, BTN_RIGHT }, { SDL_GAMEPAD_BUTTON_LEFT_STICK, BTN_LSTICK },
-            { SDL_GAMEPAD_BUTTON_RIGHT_STICK, BTN_RSTICK },
-        };
-        for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (SDL_GetGamepadButton(pad, map[i].b)) s.buttons |= map[i].bit;
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+            if (SDL_GetGamepadButton(pad, (SDL_GamepadButton)b)) s.buttons |= pad_bit((SDL_GamepadButton)b);
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) s.buttons |= BTN_ZL;
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) s.buttons |= BTN_ZR;
         int lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
@@ -288,6 +308,7 @@ int main(int argc, char **argv) {
         while (window && SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) exit(0);
             if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) render_resized();
+            input_event(&e);
         }
         if (window) read_input();
 #endif

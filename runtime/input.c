@@ -23,6 +23,20 @@ void input_set(const InputState *s) {
     pthread_mutex_unlock(&lock);
 }
 
+/* The game reads the controller once a frame. The host samples it every ~10 ms, so a tap shorter
+ * than a frame (a slow one, while loading) could fall between two of the game's reads: presses
+ * are held for PRESS_FRAMES presented frames (the game frame after this one and the next). */
+#define PRESS_FRAMES 2
+static uint64_t press_frame[64];                     /* per button bit: frame of the last press + 1 */
+
+void input_press(uint64_t buttons) {
+    uint64_t frame = nvn_frame_count();
+    pthread_mutex_lock(&lock);
+    for (int b = 0; b < 64; b++)
+        if (buttons >> b & 1) press_frame[b] = frame + 1;
+    pthread_mutex_unlock(&lock);
+}
+
 #define MAX_SCRIPT 512
 enum { STICK_UP = 1, STICK_DOWN = 2, STICK_LEFT = 4, STICK_RIGHT = 8 };
 static struct { uint64_t frame, frames, buttons; uint32_t stick; } script[MAX_SCRIPT];
@@ -66,11 +80,13 @@ static void load_script(void) {
 }
 
 InputState input_get(void) {
+    uint64_t frame = nvn_frame_count();
     pthread_mutex_lock(&lock);
     InputState s = host;
+    for (int b = 0; b < 64; b++)
+        if (press_frame[b] && frame + 1 - press_frame[b] < PRESS_FRAMES + 1) s.buttons |= 1ull << b;
     pthread_mutex_unlock(&lock);
     if (nscript < 0) load_script();
-    uint64_t frame = nvn_frame_count();
     for (int i = 0; i < nscript; i++) {
         if (frame < script[i].frame || frame >= script[i].frame + script[i].frames) continue;
         s.buttons |= script[i].buttons;

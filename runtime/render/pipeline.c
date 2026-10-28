@@ -195,6 +195,8 @@ void render_program_made(const Program *p) {
     pthread_mutex_unlock(&ahead_lock);
 }
 
+static void pipelines_ahead(void);
+
 void render_adopt_shaders(void) {
     if (!__atomic_load_n(&ahead_done, __ATOMIC_RELAXED)) return;   /* (usually: nothing new) */
     pthread_mutex_lock(&ahead_lock);
@@ -211,6 +213,7 @@ void render_adopt_shaders(void) {
         s->next = shader_buckets[b];
         shader_buckets[b] = s;
     }
+    pipelines_ahead();
 }
 
 /* ================================================================ layouts */
@@ -357,6 +360,9 @@ typedef struct Pipeline {
     PipelineKey key;
     VkPipeline pipeline;
     int ready;                       /* (atomic) compiled, or failed: pipeline is final */
+    int started;                     /* (atomic) a compile thread took it */
+    int remembered;                  /* made from pipeline_keys.bin: not saved again */
+    int next_urgent;                 /* (main thread) moved to the draws' queue */
 } Pipeline;
 
 #define PIPELINE_BUCKETS 1024
@@ -489,27 +495,34 @@ static double frame_wait_ms;                     /* waited for compiles this fra
 static uint64_t wait_frame;
 #define COMPILE_THREADS 4
 #define COMPILE_QUEUE 1024
-static Pipeline *compile_queue[COMPILE_QUEUE];
+static Pipeline *compile_queue[COMPILE_QUEUE];     /* for draws: first */
 static unsigned compile_head, compile_tail;
+static Pipeline *ahead_pipes[COMPILE_QUEUE];       /* remembered ones, made ahead (render_adopt_shaders) */
+static unsigned ahead_pipe_head, ahead_pipe_tail;
 static pthread_mutex_t compile_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t compile_cond = PTHREAD_COND_INITIALIZER;
 static double async_compile_ms;                  /* (render_stats adds these to the main thread's) */
 static unsigned async_compiles;
+
+static void remember(const PipelineKey *k);
 
 static void *compile_thread(void *arg) {
     host_thread_init();                          /* (off the game's main core) */
     (void)arg;
     for (;;) {
         pthread_mutex_lock(&compile_lock);
-        while (compile_head == compile_tail) pthread_cond_wait(&compile_cond, &compile_lock);
-        Pipeline *p = compile_queue[compile_tail++ % COMPILE_QUEUE];
+        while (compile_head == compile_tail && ahead_pipe_head == ahead_pipe_tail) pthread_cond_wait(&compile_cond, &compile_lock);
+        Pipeline *p = compile_head != compile_tail ? compile_queue[compile_tail++ % COMPILE_QUEUE]
+                                                   : ahead_pipes[ahead_pipe_tail++ % COMPILE_QUEUE];
         pthread_mutex_unlock(&compile_lock);
+        if (__atomic_exchange_n(&p->started, 1, __ATOMIC_ACQ_REL)) continue;   /* (in both queues: done once) */
         double t0 = compile_clock();
         VkPipeline v = create(&p->key);
         pthread_mutex_lock(&compile_lock);
         async_compile_ms += compile_clock() - t0;
         async_compiles++;
         pthread_mutex_unlock(&compile_lock);
+        if (v && !p->remembered) remember(&p->key);
         p->pipeline = v;
         __atomic_store_n(&p->ready, 1, __ATOMIC_RELEASE);
     }
@@ -525,23 +538,35 @@ void render_collect_compile_stats(void) {         /* (render_stats: once in a wh
     pthread_mutex_unlock(&compile_lock);
 }
 
-VkPipeline render_pipeline(const PipelineKey *k) {
-    static int sync = -1;
-    if (sync < 0) {
-        sync = getenv("LAA_SYNC_PIPELINES") != NULL;
-        render_pipeline_layout();                    /* (made before any thread can use it) */
-        int threads = getenv("LAA_COMPILE_THREADS") ? atoi(getenv("LAA_COMPILE_THREADS")) : COMPILE_THREADS;
-        for (int i = 0; !sync && i < threads; i++) {
-            pthread_t t;
-            pthread_create(&t, NULL, compile_thread, NULL);
-            pthread_detach(t);
-        }
+static int sync_pipelines = -1;
+
+static void start_compile_threads(void) {        /* (main thread) */
+    if (sync_pipelines >= 0) return;
+    sync_pipelines = getenv("LAA_SYNC_PIPELINES") != NULL;
+    render_pipeline_layout();                    /* (made before any thread can use it) */
+    int threads = getenv("LAA_COMPILE_THREADS") ? atoi(getenv("LAA_COMPILE_THREADS")) : COMPILE_THREADS;
+    for (int i = 0; !sync_pipelines && i < threads; i++) {
+        pthread_t t;
+        pthread_create(&t, NULL, compile_thread, NULL);
+        pthread_detach(t);
     }
+}
+
+VkPipeline render_pipeline(const PipelineKey *k) {
+    start_compile_threads();
+    int sync = sync_pipelines;
     unsigned b = hash(k, sizeof *k) & (PIPELINE_BUCKETS - 1);
     if (nvn_frame_count() != wait_frame) { wait_frame = nvn_frame_count(); frame_wait_ms = 0; }
     for (Pipeline *p = pipeline_buckets[b]; p; p = p->next)
         if (memcmp(&p->key, k, sizeof *k) == 0) {
             if (__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE)) return p->pipeline;
+            if (!__atomic_load_n(&p->started, __ATOMIC_ACQUIRE) && p->remembered && !p->next_urgent) {
+                p->next_urgent = 1;                  /* (still waiting among those made ahead: needed now) */
+                pthread_mutex_lock(&compile_lock);
+                if (compile_head - compile_tail < COMPILE_QUEUE) compile_queue[compile_head++ % COMPILE_QUEUE] = p;
+                pthread_cond_signal(&compile_cond);
+                pthread_mutex_unlock(&compile_lock);
+            }
             double t0 = compile_clock();             /* (wait while the frame's budget lasts) */
             while (!__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE) && frame_wait_ms + compile_clock() - t0 < COMPILE_WAIT_MS) {
                 struct timespec ts = { 0, 100000 };
@@ -563,9 +588,119 @@ VkPipeline render_pipeline(const PipelineKey *k) {
     pthread_mutex_unlock(&compile_lock);
     if (queued) return render_pipeline(k);           /* (found now: waits within the budget) */
     double t0 = compile_clock();                     /* (synchronous: as asked, or the queue is full) */
+    p->started = 1;
     p->pipeline = create(k);
     render_compile_ms += compile_clock() - t0;
     render_compiles++;
+    if (p->pipeline) remember(k);
     __atomic_store_n(&p->ready, 1, __ATOMIC_RELEASE);
     return p->pipeline;
+}
+
+/* ---- remembered pipelines ----
+ * Every pipeline made is written down (LAA_CACHE_DIR/pipeline_keys.bin: its PipelineKey, shaders
+ * by guest address), and on later runs made again AHEAD: as soon as both its shaders are translated
+ * (the game sets up a scene's programs while it loads), on the compile threads, after any a draw
+ * waits for. Before, the first load of a session made 140 pipelines while the scene showed, and
+ * ~260 draws were skipped (things popped in); a second load had them all. The Vulkan pipeline
+ * cache keeps the compiled code; this file says what to compile. LAA_NO_PIPELINES_AHEAD=1: off. */
+#define KEYS_MAGIC 0x314B504C41414Cull                  /* "LAALPK1" */
+static PipelineKey *known;                       /* from the file, not made yet (main thread) */
+static int nknown;
+static PipelineKey *fresh;                       /* made this run, not written yet */
+static int nfresh, fresh_cap;
+static pthread_mutex_t fresh_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void remember(const PipelineKey *k) {
+    PipelineKey r = *k;
+    r.vs = r.fs = VK_NULL_HANDLE;                    /* (this run's handles) */
+    pthread_mutex_lock(&fresh_lock);
+    if (nfresh == fresh_cap) {
+        fresh_cap = fresh_cap ? fresh_cap * 2 : 256;
+        fresh = realloc(fresh, (size_t)fresh_cap * sizeof *fresh);
+    }
+    fresh[nfresh++] = r;
+    pthread_mutex_unlock(&fresh_lock);
+}
+
+void render_load_pipeline_keys(const char *path) {
+    if (getenv("LAA_NO_PIPELINES_AHEAD")) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    uint64_t magic = 0;
+    uint32_t size = 0;
+    if (fread(&magic, 8, 1, f) == 1 && fread(&size, 4, 1, f) == 1 && magic == KEYS_MAGIC && size == sizeof(PipelineKey)) {
+        int cap = 0;
+        PipelineKey k;
+        while (fread(&k, sizeof k, 1, f) == 1) {
+            int dup = 0;                             /* (the file may hold one twice: written by two runs) */
+            for (int i = nknown - 1; i >= 0 && i >= nknown - 64 && !dup; i--) dup = memcmp(&known[i], &k, sizeof k) == 0;
+            if (dup) continue;
+            if (nknown == cap) { cap = cap ? cap * 2 : 1024; known = realloc(known, (size_t)cap * sizeof *known); }
+            known[nknown++] = k;
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "render: %d pipelines remembered (%s)\n", nknown, path);
+}
+
+void render_save_pipeline_keys(const char *path) {   /* (vk.c's cache-saving thread) */
+    pthread_mutex_lock(&fresh_lock);
+    PipelineKey *list = fresh;
+    int n = nfresh;
+    fresh = NULL;
+    nfresh = fresh_cap = 0;
+    pthread_mutex_unlock(&fresh_lock);
+    if (!n) return;
+    FILE *f = fopen(path, "r+b");
+    uint64_t magic = 0;
+    uint32_t size = 0;
+    if (f && (fread(&magic, 8, 1, f) != 1 || fread(&size, 4, 1, f) != 1 || magic != KEYS_MAGIC || size != sizeof(PipelineKey))) {
+        fclose(f);                                   /* (another layout: start again) */
+        f = NULL;
+    }
+    if (!f) {
+        f = fopen(path, "wb");
+        uint64_t m = KEYS_MAGIC;
+        uint32_t sz = sizeof(PipelineKey);
+        if (f) { fwrite(&m, 8, 1, f); fwrite(&sz, 4, 1, f); }
+    }
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        fwrite(list, sizeof *list, (size_t)n, f);
+        fclose(f);
+    }
+    free(list);
+}
+
+/* (render_adopt_shaders, after new shaders) the remembered pipelines whose shaders are there now */
+static void pipelines_ahead(void) {
+    if (!nknown) return;
+    start_compile_threads();
+    for (int i = 0; i < nknown;) {
+        PipelineKey k = known[i];
+        HostShader *vs = find_shader(k.vs_code, SHADER_VERTEX, k.vs_extra), *fs = find_shader(k.fs_code, SHADER_FRAGMENT, 0);
+        if (!vs || !fs || !vs->module || !fs->module) { i++; continue; }
+        k.vs = vs->module;
+        k.fs = fs->module;
+        unsigned b = hash(&k, sizeof k) & (PIPELINE_BUCKETS - 1);
+        int have = 0;
+        for (Pipeline *p = pipeline_buckets[b]; p && !have; p = p->next) have = memcmp(&p->key, &k, sizeof k) == 0;
+        if (!have) {
+            pthread_mutex_lock(&compile_lock);
+            int room = ahead_pipe_head - ahead_pipe_tail < COMPILE_QUEUE;
+            pthread_mutex_unlock(&compile_lock);
+            if (!room) return;                       /* (next time) */
+            Pipeline *p = calloc(1, sizeof *p);
+            p->key = k;
+            p->remembered = 1;
+            p->next = pipeline_buckets[b];
+            pipeline_buckets[b] = p;
+            pthread_mutex_lock(&compile_lock);
+            ahead_pipes[ahead_pipe_head++ % COMPILE_QUEUE] = p;
+            pthread_cond_signal(&compile_cond);
+            pthread_mutex_unlock(&compile_lock);
+        }
+        known[i] = known[--nknown];                  /* (done with it) */
+    }
 }

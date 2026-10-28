@@ -1017,6 +1017,7 @@ static void draw(const Cmd *r, int indexed) {
     k.vs_code = vs->code;
     k.fs_code = fs->code;
     k.vs_inputs = vs->info.inputs;
+    k.vs_extra = missing;
     k.nattribs = (uint8_t)st.nattribs;
     for (uint32_t i = 0; i < st.nattribs; i++) {
         k.attr[i].format = (uint8_t)st.attrib[i].format;

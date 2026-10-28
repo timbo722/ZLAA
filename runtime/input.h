@@ -20,6 +20,9 @@ typedef struct {
 
 /* The host sets what its keyboard/gamepad say; LAA_INPUT_SCRIPT adds scripted presses. */
 void input_set(const InputState *s);
+/* A button went down (an event): the game sees it pressed for at least PRESS_FRAMES of its frames,
+ * even if it is let go sooner (a quick tap during a slow frame was missed) */
+void input_press(uint64_t buttons);
 InputState input_get(void);          /* what the game should see now */
 
 #endif

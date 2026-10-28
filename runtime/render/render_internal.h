@@ -127,12 +127,15 @@ typedef struct {
     uint16_t stencil_ops[2];
     uint8_t blend_enable, logic_op, ncolor, pad;
     uint32_t channel_mask;
+    uint32_t vs_extra;               /* the vertex shader variant's added outputs (render_shader) */
     BlendKey blend[8];
     VkFormat color_format[8], depth_format;
 } PipelineKey;
 VkPipeline render_pipeline(const PipelineKey *k);
 int render_pass_objects(void);                   /* passes with VkRenderPass objects, not dynamic rendering (draw.c) */
 VkRenderPass render_compatible_pass(uint32_t ncolor, const VkFormat *color, VkFormat depth);   /* (thread-safe) */
+void render_load_pipeline_keys(const char *path);   /* remembered pipelines (pipeline.c), from vk.c */
+void render_save_pipeline_keys(const char *path);
 VkPipelineLayout render_pipeline_layout(void);
 VkDescriptorSetLayout render_set_layout(void);
 VkPipelineLayout render_compute_layout(void);    /* compute: its own set (bindings from SHADER_COMPUTE * 64) */
