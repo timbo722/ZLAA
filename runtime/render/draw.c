@@ -1260,6 +1260,19 @@ static void draw(const Cmd *r, int indexed) {
     }
     if (!pass_fs) pass_fs = st.program.code[STAGE_FRAGMENT];
     pass_ndraws++;
+    static int trace_res = -1;                       /* LAA_TRACE_RES=1: the scene's resolution (dynamic) whenever it changes */
+    if (trace_res < 0) trace_res = getenv("LAA_TRACE_RES") != NULL;
+    if (trace_res && st.depth && st.color[0] && st.depth->width >= 1280) {   /* (the main scene: color + depth, full size) */
+        static float last[2];
+        static uint64_t since;
+        if (st.viewport[2] != last[0] || st.viewport[3] != last[1]) {
+            fprintf(stderr, "res: frame %llu: scene %gx%g (was %gx%g for %llu frames)\n", (unsigned long long)nvn_frame_count(),
+                    st.viewport[2], st.viewport[3], last[0], last[1], (unsigned long long)(nvn_frame_count() - since));
+            last[0] = st.viewport[2];
+            last[1] = st.viewport[3];
+            since = nvn_frame_count();
+        }
+    }
     static int watch_draws = -1;                     /* LAA_GPU_WATCH_DRAWS=1: a mark after every draw (finds the one a GPU hang is in) */
     if (watch_draws < 0) watch_draws = getenv("LAA_GPU_WATCH_DRAWS") != NULL;
     if (watch_draws) {
