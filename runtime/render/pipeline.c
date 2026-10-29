@@ -93,7 +93,13 @@ static HostShader *make_shader(uint64_t code, uint64_t control, int stage, uint3
             options |= SHADER_DEBUG_CONST;
             if (getenv("LAA_DEBUG_FS_INPUT")) options |= ((int)strtol(getenv("LAA_DEBUG_FS_INPUT"), NULL, 0) + 1) << 8;
         }
-        if (shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, &s->info) == 0) {
+        int ok = shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, &s->info) == 0;
+        if (ok && s->info.ntextures > RENDER_LAYOUT_TEXTURES) {   /* (not in the set layout: never seen so far) */
+            snprintf(s->info.error, sizeof s->info.error, "%u textures, the layout has %d", s->info.ntextures, RENDER_LAYOUT_TEXTURES);
+            fprintf(stderr, "render: shader %#llx: %s\n", (unsigned long long)code, s->info.error);
+            ok = 0;
+        }
+        if (ok) {
             VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
                                             .codeSize = s->info.words * 4, .pCode = s->info.spirv };
             VK_CHECK(vkCreateShaderModule(vk.device, &ci, NULL, &s->module));
@@ -229,9 +235,9 @@ static VkPipelineLayout pipeline_layout;
 static VkDescriptorSetLayout compute_set_layout;
 static VkPipelineLayout compute_layout;
 
-/* A set layout for some stages: per stage, 18 uniform buffers and 32 textures */
+/* A set layout for some stages: per stage, 18 uniform buffers and RENDER_LAYOUT_TEXTURES textures */
 static void make_layout(const int *stages, int nstages, VkDescriptorSetLayout *set, VkPipelineLayout *layout) {
-    VkDescriptorSetLayoutBinding b[2 * (18 + SHADER_MAX_TEXTURES)];
+    VkDescriptorSetLayoutBinding b[2 * (18 + RENDER_LAYOUT_TEXTURES)];
     uint32_t n = 0;
     for (int s = 0; s < nstages; s++) {
         VkShaderStageFlags flag = stages[s] == SHADER_VERTEX ? VK_SHADER_STAGE_VERTEX_BIT
@@ -240,7 +246,7 @@ static void make_layout(const int *stages, int nstages, VkDescriptorSetLayout *s
         for (uint32_t i = 0; i < 18; i++)                /* (c0..c15 dynamic: the offset comes at bind time) */
             b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_CBUF_BINDING + i,
                 i < RENDER_DYNAMIC_CBUFS ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, flag, NULL };
-        for (uint32_t i = 0; i < SHADER_MAX_TEXTURES; i++)
+        for (uint32_t i = 0; i < RENDER_LAYOUT_TEXTURES; i++)
             b[n++] = (VkDescriptorSetLayoutBinding){ base + SHADER_TEXTURE_BINDING + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, flag, NULL };
     }
     VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
