@@ -435,7 +435,14 @@ static void *present_thread(void *arg) {
             pthread_mutex_unlock(&render_queue_lock);
         }
         uint32_t index;
+        struct timespec ta, tb;
+        clock_gettime(CLOCK_MONOTONIC, &ta);
         VkResult r = vkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX, out.acquired[s], VK_NULL_HANDLE, &index);
+        clock_gettime(CLOCK_MONOTONIC, &tb);
+        double acquire_ms = (tb.tv_sec - ta.tv_sec) * 1e3 + (tb.tv_nsec - ta.tv_nsec) / 1e6;
+        /* (Android may hold the window's buffers back: the GPU queue then waits at our copy, and
+         * the game's frames behind it. Normally a few ms.) */
+        if (acquire_ms > 30) fprintf(stderr, "present: acquiring a window image took %.0f ms\n", acquire_ms);
         if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
         else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkAcquireNextImageKHR", r);
         if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
@@ -447,7 +454,9 @@ static void *present_thread(void *arg) {
             render_barrier(cmd);                     /* after the game thread's copy into the slot */
             VkImage dst = vk.images[index];
             barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-            if (width == vk.extent.width && height == vk.extent.height) {
+            static int present_blit = -1;            /* (LAA_PRESENT_BLIT: blit here too) */
+            if (present_blit < 0) present_blit = getenv("LAA_PRESENT_BLIT") != NULL;
+            if (width == vk.extent.width && height == vk.extent.height && !present_blit) {
                 VkImageCopy c = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                                   .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { width, height, 1 } };
                 vkCmdCopyImage(cmd, out.image[s], VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
@@ -472,8 +481,12 @@ static void *present_thread(void *arg) {
             VK_CHECK(vkResetFences(vk.device, 1, &out.copied[s]));
             pthread_mutex_lock(&render_queue_lock);
             VK_CHECK(vkQueueSubmit(vk.queue, 1, &si, out.copied[s]));
+            clock_gettime(CLOCK_MONOTONIC, &ta);
             r = vkQueuePresentKHR(vk.queue, &pi);
+            clock_gettime(CLOCK_MONOTONIC, &tb);
             pthread_mutex_unlock(&render_queue_lock);
+            double present_ms = (tb.tv_sec - ta.tv_sec) * 1e3 + (tb.tv_nsec - ta.tv_nsec) / 1e6;
+            if (present_ms > 30) fprintf(stderr, "present: vkQueuePresentKHR took %.0f ms (holding the queue)\n", present_ms);
             /* (SUBOPTIMAL is fine: Android says it whenever it rotates for us; resizes come as SDL events) */
             if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
             else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkQueuePresentKHR", r);
@@ -532,7 +545,9 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
         blit.srcOffsets[0] = (VkOffset3D){ crop[0], crop[1], 0 };
         blit.srcOffsets[1] = (VkOffset3D){ crop[0] + crop[2], crop[1] + crop[3], 1 };
     }
-    if (from_gpu) {                                  /* (drawn: blits are slow on the Adreno) */
+    static int present_blit = -1;                    /* LAA_PRESENT_BLIT=1: the frame -> slot by vkCmdBlitImage, as before */
+    if (present_blit < 0) present_blit = getenv("LAA_PRESENT_BLIT") != NULL;
+    if (from_gpu && !present_blit) {                 /* (drawn: blits are slow on the Adreno) */
         VkOffset3D sb[2] = { blit.srcOffsets[0], blit.srcOffsets[1] };
         VkOffset3D db[2] = { { 0, 0, 0 }, { (int32_t)out.width, (int32_t)out.height, 1 } };
         render_image_init_layout(cmd, h);

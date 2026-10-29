@@ -78,6 +78,7 @@ void render_pools_reap(void);                     /* free finalized pools the GP
 extern int render_gpu_timing;
 extern int render_passes;
 void render_timestamp(const char *label);
+void render_gpu_mark(const char *label);          /* LAA_GPU_WATCH: the GPU's work so far ends here (submit.c) */
 void render_gpu_timing_frame(uint64_t frame);
 /* A full memory barrier: everything before is done and visible to everything after. */
 void render_barrier(VkCommandBuffer cmd);

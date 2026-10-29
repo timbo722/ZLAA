@@ -191,7 +191,9 @@ void render_pool_destroyed(uint64_t storage, uint64_t size) {
         if (pages == MAP_FAILED) { perror("render: mmap"); return; }
         memcpy(pages, gptr(storage), size);
         if (gmem_place(storage, size, pages) != 0) { munmap(pages, size); return; }
-        if (ngraves == GRAVES) {                     /* (many at once: wait, as before) */
+        static int flush = -1;                       /* LAA_POOL_FLUSH=1: wait for the GPU and free at once, as before */
+        if (flush < 0) flush = getenv("LAA_POOL_FLUSH") != NULL;
+        if (ngraves == GRAVES || flush) {            /* (many at once: wait, as before) */
             render_flush();
             render_pools_reap();
         }

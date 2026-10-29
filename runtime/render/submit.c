@@ -291,6 +291,74 @@ void render_gpu_timing_frame(uint64_t frame) {    /* (render_present, after the 
     if (at >= 0 && frame + 1 == (uint64_t)at) { render_gpu_timing = 1; passes_before = render_passes; }
 }
 
+/* ---- LAA_GPU_WATCH=ms: submissions that take the GPU longer than that are printed with their
+ * costliest parts. A timestamp after each render pass, dispatch and copy (render_gpu_mark: outside
+ * passes, so the tiler works as usual, unlike LAA_GPU_TIMING_AT), read when the submission is done.
+ * For GPU stalls that come and go (the game pausing ~400 ms when the sword hits an enemy). ---- */
+#define WATCH_MARKS 256
+static VkQueryPool watch_pool;
+static double watch_ms = -1;
+static struct { int n; uint64_t frame; char label[WATCH_MARKS][60]; } watch[NCTX];
+
+static int watching(void) {
+    if (watch_ms < 0) watch_ms = getenv("LAA_GPU_WATCH") ? atof(getenv("LAA_GPU_WATCH")) : 0;
+    return watch_ms > 0 && vk.limits.timestampComputeAndGraphics;
+}
+
+void render_gpu_mark(const char *label) {
+    if (!watch_pool || !recording || watch[cur].n >= WATCH_MARKS - 2) return;
+    int n = ++watch[cur].n;
+    vkCmdWriteTimestamp(ctx[cur].cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, watch_pool, (uint32_t)(cur * WATCH_MARKS + n));
+    snprintf(watch[cur].label[n], sizeof watch[cur].label[n], "%s", label);
+}
+
+static void watch_begin(void) {                    /* (a context starts recording) */
+    if (!watching()) return;
+    if (!watch_pool) {
+        VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                     .queryCount = NCTX * WATCH_MARKS };
+        VK_CHECK(vkCreateQueryPool(vk.device, &qi, NULL, &watch_pool));
+    }
+    vkCmdResetQueryPool(ctx[cur].cmd, watch_pool, (uint32_t)(cur * WATCH_MARKS), WATCH_MARKS);
+    vkCmdWriteTimestamp(ctx[cur].cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, watch_pool, (uint32_t)(cur * WATCH_MARKS));
+    watch[cur].n = 0;
+    watch[cur].frame = nvn_frame_count();
+}
+
+static void watch_check(int i) {                   /* (the recycler: context i's submission is done) */
+    int n = watch[i].n;
+    if (!watch_pool || n < 1) return;
+    /* each timestamp with its availability: one the GPU never wrote means it was reset before it
+     * got there (a GPU hang: the kernel's "GPU hang detected"); that part is the culprit */
+    static uint64_t q[WATCH_MARKS][2], t[WATCH_MARKS];
+    VkResult r = vkGetQueryPoolResults(vk.device, watch_pool, (uint32_t)(i * WATCH_MARKS), (uint32_t)n + 1, sizeof q, q, 16,
+                                       VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    if (r != VK_SUCCESS && r != VK_NOT_READY) return;
+    for (int k = 0; k <= n; k++) {
+        if (q[k][1]) { t[k] = q[k][0]; continue; }
+        fprintf(stderr, "gpu watch: a submission of frame %llu didn't finish (GPU reset?): the GPU never got past part #%d of %d: %s\n",
+                (unsigned long long)watch[i].frame, k, n, k ? watch[i].label[k] : "(its start)");
+        for (int j = k - 3 > 1 ? k - 3 : 1; j < k; j++) fprintf(stderr, "gpu watch:   (before it, #%d: %s)\n", j, watch[i].label[j]);
+        return;
+    }
+    double period = vk.limits.timestampPeriod / 1e6, total = (double)(t[n] - t[0]) * period;
+    if (total < watch_ms) return;
+    fprintf(stderr, "gpu watch: a submission of frame %llu took %.1f ms on the GPU (%d parts); the costliest:\n",
+            (unsigned long long)watch[i].frame, total, n);
+    int used[WATCH_MARKS] = { 0 };
+    for (int top = 0; top < 8; top++) {
+        int best = -1;
+        double best_ms = 0;
+        for (int k = 1; k <= n; k++) {
+            double ms = (double)(t[k] - t[k - 1]) * period;
+            if (!used[k] && ms > best_ms) { best = k; best_ms = ms; }
+        }
+        if (best < 0) break;
+        used[best] = 1;
+        fprintf(stderr, "gpu watch:   %7.2f ms  #%d %s\n", best_ms, best, watch[i].label[best]);
+    }
+}
+
 /* ---- recording and submitting ---- */
 
 /* ---- the recycler: once the GPU has finished a context's submission, a thread of its own
@@ -314,6 +382,7 @@ static void *recycler(void *arg) {
         VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
                                    .pSemaphores = &timeline, .pValues = &serial };
         VK_CHECK(vkWaitSemaphores(vk.device, &wi, UINT64_MAX));
+        watch_check(i);
         VK_CHECK(vkResetCommandPool(vk.device, ctx[i].pool, 0));
         render_submission_done(i);
         pthread_mutex_lock(&recycle_lock);
@@ -346,6 +415,7 @@ VkCommandBuffer render_cmd(void) {
         if (game_stamps) vkCmdResetQueryPool(c->cmd, game_stamps, (uint32_t)cur * STAMPS_PER_CTX, STAMPS_PER_CTX);
         stamps_used[cur] = 0;
         if (render_gpu_timing) start_stamps(c->cmd);
+        watch_begin();
     }
     return c->cmd;
 }
@@ -361,6 +431,7 @@ void render_submit(void) {
     work = 0;
     render_end_rendering();
     Context *c = &ctx[cur];
+    render_gpu_mark("(the rest, to the end of the submission)");
     render_barrier(c->cmd);                        /* the next submission's work comes after all of this */
     VK_CHECK(vkEndCommandBuffer(c->cmd));
     recording = 0;

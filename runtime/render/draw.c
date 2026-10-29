@@ -58,6 +58,10 @@ int render_passes;                                   /* begun so far (LAA_GPU_TI
  * The Adreno did: a glow pass read its blurred mask while the next pass rendered the mask again
  * (the purple box behind "Press L+R"). NVN orders these with nvnCommandBufferBarrier; we order
  * every pass's writes before all that follows (LAA_NO_PASS_BARRIER=1: as before, to compare). */
+static char pass_label[40];                      /* (LAA_GPU_WATCH: the pass being recorded) */
+static uint64_t pass_fs;
+static int pass_ndraws;
+
 void render_end_rendering_at(const char *file, int line) {
     if (!st.rendering) return;
     if (render_tracing()) fprintf(stderr, "render: pass ended (%s:%d)\n", strrchr(file, '/') ? strrchr(file, '/') + 1 : file, line);
@@ -67,6 +71,9 @@ void render_end_rendering_at(const char *file, int line) {
     else vkCmdEndRendering(render_cmd());
     if (!no_barrier) render_barrier(render_cmd());
     st.rendering = 0;
+    char label[60];
+    snprintf(label, sizeof label, "%s %d draws fs %#llx", pass_label, pass_ndraws, (unsigned long long)pass_fs);
+    render_gpu_mark(label);
 }
 
 /* ---- descriptor sets: from a pool per submission context, emptied when it is reused ---- */
@@ -474,6 +481,10 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
     }
     render_barrier(cmd);
     render_image_gpu_wrote(dst);
+    char label[60];
+    snprintf(label, sizeof label, "copy %ux%u fmt %d -> %ux%u fmt %d", src->width, src->height, src->format, dst->width, dst->height,
+             dst->format);
+    render_gpu_mark(label);
 }
 
 /* CopyBufferToTexture / CopyTextureToBuffer: between guest memory at `address` (rows
@@ -718,6 +729,13 @@ static int begin_rendering(void) {
     }
     st.rendering = 1;
     st.pass_draws = 0;
+    {
+        const HostImage *t = st.color[0] ? st.color[0] : st.depth;
+        snprintf(pass_label, sizeof pass_label, "pass %ux%u c%d d%d", t ? t->width : 0, t ? t->height : 0,
+                 st.color[0] ? st.color[0]->format : 0, st.depth ? st.depth->format : 0);
+        pass_fs = 0;
+        pass_ndraws = 0;
+    }
     render_passes++;
     return 0;
 }
@@ -987,6 +1005,12 @@ static void dispatch(const Cmd *r, int indirect) {
         vkCmdDispatch(cmd, (uint32_t)r->a[0], (uint32_t)r->a[1], (uint32_t)r->a[2]);
     }
     render_barrier(cmd);                             /* its writes, before whatever comes next */
+    {
+        char label[60];
+        snprintf(label, sizeof label, "dispatch cs %#llx %llux%llux%llu", (unsigned long long)cs->code, (unsigned long long)st.groups[0],
+                 (unsigned long long)st.groups[1], (unsigned long long)st.groups[2]);
+        render_gpu_mark(label);
+    }
     stats.dispatches++;
     render_count_work();
 }
@@ -1233,6 +1257,16 @@ static void draw(const Cmd *r, int indexed) {
         vkCmdDrawIndexed(cmd, (uint32_t)r->a[2], (uint32_t)r->a[6], 0, (int32_t)r->a[4], (uint32_t)r->a[5]);
     } else {
         vkCmdDraw(cmd, (uint32_t)r->a[2], (uint32_t)r->a[4], (uint32_t)r->a[1], (uint32_t)r->a[3]);
+    }
+    if (!pass_fs) pass_fs = st.program.code[STAGE_FRAGMENT];
+    pass_ndraws++;
+    static int watch_draws = -1;                     /* LAA_GPU_WATCH_DRAWS=1: a mark after every draw (finds the one a GPU hang is in) */
+    if (watch_draws < 0) watch_draws = getenv("LAA_GPU_WATCH_DRAWS") != NULL;
+    if (watch_draws) {
+        char label[60];
+        snprintf(label, sizeof label, "draw %d vs %#llx fs %#llx n %llu x%llu", pass_ndraws, (unsigned long long)vs->code,
+                 (unsigned long long)fs->code, (unsigned long long)r->a[2], (unsigned long long)(indexed ? r->a[6] : r->a[4]));
+        render_gpu_mark(label);
     }
     stats.other--;
     stats.done++;

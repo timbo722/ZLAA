@@ -26,6 +26,11 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #endif
+#ifdef __linux__
+#include <signal.h>
+#include <ucontext.h>
+#include <dlfcn.h>
+#endif
 
 static int sync_tracing(void);
 
@@ -402,11 +407,160 @@ static void adpf_frame(void) {
 }
 #endif
 
+/* LAA_STALL_PROFILE=ms: when the game's main thread goes that long without presenting, a watchdog
+ * samples where it is (every 2 ms, by a signal: its pc, lr and frame-pointer chain), and when the
+ * frame finally comes, prints the functions the stall was spent in (f_<guest address>: game code).
+ * For pauses the sync trace can't see (no submission, wait or file read in them). */
+#ifdef __linux__
+#define STALL_SAMPLES 512
+#define STALL_DEPTH 20
+static struct {
+    pthread_t thread;
+    uintptr_t stack_lo, stack_hi;
+    volatile double last_present;
+    double threshold;
+    volatile int n;
+    uintptr_t pc[STALL_SAMPLES][STALL_DEPTH];
+} stall;
+
+static void stall_sample(int sig, siginfo_t *si, void *uc_) {
+    (void)sig; (void)si;
+    int i = stall.n;
+    if (i >= STALL_SAMPLES) return;
+    ucontext_t *uc = uc_;
+    uintptr_t *out = stall.pc[i];
+    memset(out, 0, sizeof stall.pc[i]);
+#if defined(__aarch64__)
+    out[0] = (uintptr_t)uc->uc_mcontext.pc;
+    out[1] = (uintptr_t)uc->uc_mcontext.regs[30];
+    uintptr_t fp = (uintptr_t)uc->uc_mcontext.regs[29];
+#else
+    out[0] = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    uintptr_t fp = (uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+#endif
+    for (int d = 2; d < STALL_DEPTH && fp >= stall.stack_lo && fp + 16 <= stall.stack_hi && !(fp & 7); d++) {
+        out[d] = ((uintptr_t *)fp)[1];
+        uintptr_t next = ((uintptr_t *)fp)[0];
+        if (next <= fp) break;
+        fp = next;
+    }
+    stall.n = i + 1;
+}
+
+static const char *stall_name(uintptr_t pc, char *buf, size_t size) {
+    Dl_info info;
+#if defined(__aarch64__)
+    pc &= (1ull << 39) - 1;                          /* (return addresses carry pointer-authentication bits) */
+#endif
+    if (pc && dladdr((void *)pc, &info) && info.dli_sname) return info.dli_sname;
+    snprintf(buf, size, "%#lx", (unsigned long)pc);
+    return buf;
+}
+
+static void stall_report(double ms) {
+    int n = stall.n;
+    struct timespec wall;                            /* (wall clock: to match the system's log, logcat) */
+    clock_gettime(CLOCK_REALTIME, &wall);
+    struct tm tm;
+    localtime_r(&wall.tv_sec, &tm);
+    fprintf(stderr, "stall: %.0f ms without a frame (frame %" PRIu64 ", ended %02d:%02d:%02d.%03ld), %d samples:\n", ms, frames,
+            tm.tm_hour, tm.tm_min, tm.tm_sec, wall.tv_nsec / 1000000, n);
+    /* per function: samples where it is running (self), and where it is anywhere on the stack */
+    static struct { char name[64]; int self, any; } fn[256];
+    int nfn = 0;
+    for (int i = 0; i < n; i++) {
+        const char *seen[STALL_DEPTH];
+        int nseen = 0;
+        for (int d = 0; d < STALL_DEPTH; d++) {
+            if (!stall.pc[i][d]) continue;
+            char buf[32];
+            const char *name = stall_name(stall.pc[i][d], buf, sizeof buf);
+            int k = 0;
+            while (k < nfn && strcmp(fn[k].name, name)) k++;
+            if (k == nfn) {
+                if (nfn == 256) continue;
+                snprintf(fn[nfn++].name, sizeof fn[0].name, "%s", name);
+                fn[k].self = fn[k].any = 0;
+            }
+            int dup = 0;
+            for (int j = 0; j < nseen; j++) dup |= seen[j] == fn[k].name;
+            if (!dup) { fn[k].any++; seen[nseen++] = fn[k].name; }
+            if (d == 0) fn[k].self++;
+        }
+    }
+    if (n) {                                         /* one whole sample, innermost first */
+        fprintf(stderr, "stall:   a sample:");
+        for (int d = 0; d < STALL_DEPTH && stall.pc[n / 2][d]; d++) {
+            char buf[32];
+            fprintf(stderr, " %s", stall_name(stall.pc[n / 2][d], buf, sizeof buf));
+        }
+        fprintf(stderr, "\n");
+    }
+    for (int round = 0; round < 2; round++) {          /* the top 12 by self, then by "on the stack" */
+        fprintf(stderr, "stall:   %s\n", round ? "on the stack:" : "running:");
+        int used[256] = { 0 };
+        for (int top = 0; top < 12; top++) {
+            int best = -1;
+            for (int k = 0; k < nfn; k++)
+                if (!used[k] && (best < 0 || (round ? fn[k].any > fn[best].any : fn[k].self > fn[best].self))) best = k;
+            if (best < 0 || !(round ? fn[best].any : fn[best].self)) break;
+            used[best] = 1;
+            fprintf(stderr, "stall:     %3d%%  %s\n", 100 * (round ? fn[best].any : fn[best].self) / (n ? n : 1), fn[best].name);
+        }
+    }
+}
+
+static void *stall_watch(void *arg) {
+    (void)arg;
+    double stalled_since = 0;
+    for (;;) {
+        struct timespec t = { 0, 2000000 };
+        nanosleep(&t, NULL);
+        double now = now_ms(), last = stall.last_present;
+        if (now - last > stall.threshold) {
+            if (!stalled_since) { stalled_since = last; stall.n = 0; }
+            pthread_kill(stall.thread, SIGURG);
+        } else if (stalled_since) {
+            stall_report(last - stalled_since);
+            stalled_since = 0;
+        }
+    }
+    return NULL;
+}
+
+static void stall_start(void) {
+    const char *env = getenv("LAA_STALL_PROFILE");
+    if (!env) return;
+    stall.threshold = atof(env) > 0 ? atof(env) : 100;
+    stall.thread = pthread_self();
+    pthread_attr_t a;
+    void *lo;
+    size_t size;
+    if (pthread_getattr_np(stall.thread, &a) == 0 && pthread_attr_getstack(&a, &lo, &size) == 0) {
+        stall.stack_lo = (uintptr_t)lo;
+        stall.stack_hi = (uintptr_t)lo + size;
+        pthread_attr_destroy(&a);
+    }
+    struct sigaction sa = { 0 };
+    sa.sa_sigaction = stall_sample;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigaction(SIGURG, &sa, NULL);
+    stall.last_present = now_ms();
+    pthread_t t;
+    pthread_create(&t, NULL, stall_watch, NULL);
+    pthread_detach(t);
+    fprintf(stderr, "nvn: stall profiler on (frames over %.0f ms)\n", stall.threshold);
+}
+#endif
+
 void nvn_present(const Window *w, uint64_t texture) {
     static int pinned;
     if (!pinned) {
         pinned = 1;
         pin_to_fastest_core();
+#ifdef __linux__
+        stall_start();
+#endif
 #ifdef __ANDROID__
         adpf_start();
 #endif
@@ -417,6 +571,9 @@ void nvn_present(const Window *w, uint64_t texture) {
     int32_t rect[4];
     display_rect(w, rect);
     frames++;
+#ifdef __linux__
+    stall.last_present = now_ms();
+#endif
     /* LAA_PEEK=address,words,frame: print guest memory as floats (and hex) at that frame (debugging) */
     static uint64_t peek_addr, peek_words, peek_frame;
     static int peek_init;
