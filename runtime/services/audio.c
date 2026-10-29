@@ -244,12 +244,38 @@ static void *frame_thread(void *arg) {
         if (next.tv_nsec >= 1000000000) { next.tv_sec++; next.tv_nsec -= 1000000000; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
         float mix[OUT_FRAMES][2] = { { 0 } };
+        static int stats = -1;                       /* LAA_AUDIO_STATS=1: mixing time and voices, every 2 s */
+        static double busy_us;
+        static unsigned frames, voices, mixes, with_data, audible;
+        if (stats < 0) stats = getenv("LAA_AUDIO_STATS") != NULL;
+        struct timespec t0, t1;
+        if (stats) clock_gettime(CLOCK_MONOTONIC, &t0);
         pthread_mutex_lock(&renderers_lock);
         for (int k = 0; k < MAX_RENDERERS; k++) {
             if (renderers[k] && renderers[k]->running) {
                 renderers[k]->elapsed_frames++;
                 renderer_render(renderers[k], mix);
                 kevent_signal(renderers[k]->event);
+                if (stats) {
+                    for (uint32_t v = 0; v < renderers[k]->p.voices; v++) {
+                        const Voice *x = &renderers[k]->voices[v];
+                        if (x->state != VOICE_STARTED) continue;
+                        voices++;
+                        with_data += x->valid[x->index];
+                        audible += x->valid[x->index] && (x->volume != 0 || x->previous_volume != 0);
+                    }
+                    mixes += renderers[k]->nmixes;
+                }
+            }
+        }
+        if (stats) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            busy_us += (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
+            if (++frames == 400) {
+                fprintf(stderr, "audio: %.0f us mixing per 5 ms frame (%.1f%% of a core), %.1f voices started, %.1f with "
+                        "data, %.1f of them not silent, %u mixes\n", busy_us / frames, busy_us / frames / 50, (double)voices / frames,
+                        (double)with_data / frames, (double)audible / frames, mixes / frames);
+                busy_us = 0; frames = voices = mixes = with_data = audible = 0;
             }
         }
         for (int k = 0; k < MAX_OUTS; k++)
@@ -458,8 +484,21 @@ static float *mix_buffer(Renderer *r, uint32_t mix, uint32_t buffer) {
 
 /* Play one frame of a voice into its mix: resampled (linear) from rate x pitch to the
  * renderer's rate, the volume ramping from last frame's. */
+/* A started voice with nothing queued whose last samples and filters are all zero makes only
+ * silence: skipped (the game keeps ~96 voices started, ~13 with something to play; resampling,
+ * filtering and mixing the rest was most of the mixer's time) */
+static int voice_silent(const Voice *v) {
+    if (v->valid[v->index]) return 0;
+    for (uint32_t c = 0; c < v->channels && c < MAX_CHANNELS; c++) {
+        if (v->last[0][c] != 0 || v->last[1][c] != 0) return 0;
+        for (int f = 0; f < 2; f++) if (v->biquad_state[f][c][0] != 0 || v->biquad_state[f][c][1] != 0) return 0;
+    }
+    return 1;
+}
+
 static void voice_render(Renderer *r, Voice *v) {
     if (v->state != VOICE_STARTED || !v->rate) return;
+    if (voice_silent(v)) { v->previous_volume = v->volume; return; }
     uint32_t n = r->p.sample_count, channels = v->channels;
     static float in[MAX_CHANNELS][MAX_SAMPLES];
     double step = (double)v->rate * v->pitch / r->p.sample_rate;
