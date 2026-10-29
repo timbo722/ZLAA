@@ -189,7 +189,11 @@ void render_program_made(const Program *p) {
     if (off < 0) off = getenv("LAA_NO_SHADERS_AHEAD") || getenv("LAA_DEBUG_VS") || getenv("LAA_DEBUG_FS");
     if (off) return;
     static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, start_ahead_thread);
+    static int started;                              /* (pthread_once on every call cost ~0.5%) */
+    if (!__atomic_load_n(&started, __ATOMIC_ACQUIRE)) {
+        pthread_once(&once, start_ahead_thread);
+        __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
+    }
     pthread_mutex_lock(&ahead_lock);
     if (ahead_head - ahead_tail < AHEAD_MAX) ahead_queue[ahead_head++ % AHEAD_MAX] = *p;
     pthread_cond_signal(&ahead_cond);

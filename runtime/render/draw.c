@@ -250,6 +250,7 @@ typedef struct {
     uint8_t color_load[8], depth_load, stencil_load; /* VkAttachmentLoadOp */
 } PassKey;
 static VkRenderPass find_pass(const PassKey *k);
+static void forget_bound(void);                  /* (draw state the command buffer has: below) */
 static VkFramebuffer find_framebuffer(VkRenderPass compat, const VkImageView *views, uint32_t n, uint32_t w, uint32_t h);
 
 /* ---- copies by drawing: a full-screen triangle whose fragment shader reads the source at the
@@ -366,6 +367,7 @@ void render_draw_copy(VkCommandBuffer cmd, VkImageView src_view, uint32_t src_w,
             .pDepthAttachment = color ? NULL : &att, .pStencilAttachment = !color && has_stencil ? &att : NULL };
         vkCmdBeginRendering(cmd, &ri);
     }
+    forget_bound();                                  /* (another layout and static state: draws set theirs again) */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dc_layout, 0, 1, &set, 0, NULL);
     VkViewport v = { (float)db[0].x, (float)db[0].y, dw, dh, 0, 1 };
@@ -1019,6 +1021,29 @@ static double prof_clock(void) {
 static unsigned frame_draws;                     /* since the last present (render_take_frame_draws) */
 unsigned render_take_frame_draws(void) { unsigned n = frame_draws; frame_draws = 0; return n; }
 
+/* What the command buffer being recorded already has bound and set by earlier draws: calls that
+ * would change nothing are skipped (the Adreno driver was ~18% of the game's main thread, ~17
+ * calls a draw). All the game's pipelines have the same layout and dynamic states, so these stay
+ * valid across pipeline binds. Forgotten when a new command buffer is recorded (its serial) and
+ * when one of our own pipelines is bound (copies: another layout and static state). */
+static struct {
+    uint64_t serial;                                 /* 0: nothing known */
+    VkPipeline pipeline;
+    VkDescriptorSet set;
+    uint32_t dyn[2 * RENDER_DYNAMIC_CBUFS];
+    VkBuffer vb[16];
+    VkDeviceSize voff[16];
+    VkBuffer ib;
+    VkDeviceSize ioff;
+    VkIndexType itype;
+    VkViewport vp;
+    VkRect2D sc;
+    float blend[4], bias[3];
+    uint32_t stencil[6];                             /* reference, compare mask, write mask: front, back */
+} bound;
+
+static void forget_bound(void) { bound.serial = 0; }
+
 static void draw(const Cmd *r, int indexed) {
     submit_early();
     frame_draws++;
@@ -1126,8 +1151,22 @@ static void draw(const Cmd *r, int indexed) {
     if (!pipeline) return;
 
     VkCommandBuffer cmd = render_cmd();
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipeline_layout(), 0, 1, &set, 2 * RENDER_DYNAMIC_CBUFS, dyn);
+    static int no_cache = -1;                        /* LAA_NO_STATE_CACHE=1: every call every draw (to compare) */
+    if (no_cache < 0) no_cache = getenv("LAA_NO_STATE_CACHE") != NULL;
+    int known = !no_cache && bound.serial == render_fence_serial();
+    if (!known) {
+        memset(&bound, 0, sizeof bound);
+        bound.serial = render_fence_serial();
+    }
+    if (!known || bound.pipeline != pipeline) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        bound.pipeline = pipeline;
+    }
+    if (!known || bound.set != set || memcmp(bound.dyn, dyn, sizeof bound.dyn)) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, render_pipeline_layout(), 0, 1, &set, 2 * RENDER_DYNAMIC_CBUFS, dyn);
+        bound.set = set;
+        memcpy(bound.dyn, dyn, sizeof bound.dyn);
+    }
     VkBuffer vb[16];                                 /* the streams used, bound in runs of neighbours */
     VkDeviceSize voff[16];
     uint32_t used = 0;
@@ -1141,6 +1180,10 @@ static void draw(const Cmd *r, int indexed) {
         }
         used |= 1u << s;
     }
+    for (uint32_t s = 0; s < 16; s++) {                 /* (streams already bound as they are: dropped) */
+        if ((used >> s & 1) && known && bound.vb[s] == vb[s] && bound.voff[s] == voff[s]) used &= ~(1u << s);
+        if (used >> s & 1) { bound.vb[s] = vb[s]; bound.voff[s] = voff[s]; }
+    }
     for (uint32_t s = 0; s < 16; s++) {
         if (!(used >> s & 1)) continue;
         uint32_t n = 1;
@@ -1151,26 +1194,42 @@ static void draw(const Cmd *r, int indexed) {
     VkViewport vp = { st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3], st.depth_range[0], st.depth_range[1] };
     if (vp.width <= 0) vp.width = 1;
     if (vp.height == 0) vp.height = 1;
-    vkCmdSetViewport(cmd, 0, 1, &vp);
+    if (!known || memcmp(&bound.vp, &vp, sizeof vp)) { vkCmdSetViewport(cmd, 0, 1, &vp); bound.vp = vp; }
     VkRect2D sc = { { st.scissor[0] > 0 ? st.scissor[0] : 0, st.scissor[1] > 0 ? st.scissor[1] : 0 },
                     { (uint32_t)(st.scissor[2] > 0 ? st.scissor[2] : 0), (uint32_t)(st.scissor[3] > 0 ? st.scissor[3] : 0) } };
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdSetBlendConstants(cmd, st.blend_color);
-    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_ref[0]);
-    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_ref[1]);
-    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_value_mask[0]);
-    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_value_mask[1]);
-    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_mask[0]);
-    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_mask[1]);
-    vkCmdSetDepthBias(cmd, st.polygon_offset[1], st.polygon_offset[2], st.polygon_offset[0]);
-    vkCmdSetLineWidth(cmd, 1.0f);
+    if (!known || memcmp(&bound.sc, &sc, sizeof sc)) { vkCmdSetScissor(cmd, 0, 1, &sc); bound.sc = sc; }
+    if (!known || memcmp(bound.blend, st.blend_color, sizeof bound.blend)) {
+        vkCmdSetBlendConstants(cmd, st.blend_color);
+        memcpy(bound.blend, st.blend_color, sizeof bound.blend);
+    }
+    const uint32_t stencil[6] = { st.stencil_ref[0], st.stencil_ref[1], st.stencil_value_mask[0], st.stencil_value_mask[1],
+                                  st.stencil_mask[0], st.stencil_mask[1] };
+    if (!known || memcmp(bound.stencil, stencil, sizeof stencil)) {
+        vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_ref[0]);
+        vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_ref[1]);
+        vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_value_mask[0]);
+        vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_value_mask[1]);
+        vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_BIT, st.stencil_mask[0]);
+        vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_BACK_BIT, st.stencil_mask[1]);
+        memcpy(bound.stencil, stencil, sizeof stencil);
+    }
+    const float bias[3] = { st.polygon_offset[1], st.polygon_offset[2], st.polygon_offset[0] };
+    if (!known || memcmp(bound.bias, bias, sizeof bias)) {
+        vkCmdSetDepthBias(cmd, bias[0], bias[1], bias[2]);
+        memcpy(bound.bias, bias, sizeof bias);
+    }
+    if (!known) vkCmdSetLineWidth(cmd, 1.0f);
     if (indexed) {
         static const VkIndexType types[3] = { VK_INDEX_TYPE_UINT8_EXT, VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32 };
         if (r->a[1] == 0) { warn_once("8-bit indices", 0); return; }
         VkBuffer b;
         VkDeviceSize off;
         if (render_guest_buffer(r->a[3], &b, &off) != 0) { warn_once("index buffer not in a memory pool", r->a[3]); return; }
-        vkCmdBindIndexBuffer(cmd, b, off, types[r->a[1] < 3 ? r->a[1] : 2]);
+        VkIndexType type = types[r->a[1] < 3 ? r->a[1] : 2];
+        if (!known || bound.ib != b || bound.ioff != off || bound.itype != type) {
+            vkCmdBindIndexBuffer(cmd, b, off, type);
+            bound.ib = b; bound.ioff = off; bound.itype = type;
+        }
         vkCmdDrawIndexed(cmd, (uint32_t)r->a[2], (uint32_t)r->a[6], 0, (int32_t)r->a[4], (uint32_t)r->a[5]);
     } else {
         vkCmdDraw(cmd, (uint32_t)r->a[2], (uint32_t)r->a[4], (uint32_t)r->a[1], (uint32_t)r->a[3]);

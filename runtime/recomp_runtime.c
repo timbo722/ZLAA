@@ -39,10 +39,13 @@ static void dispatch_put(uint64_t addr, RecompFunc fn) {
     dispatch[k].addr = addr;
 }
 
+static int dispatch_ready;
+
 static void dispatch_build(void) {
     dispatch = calloc(1u << DISPATCH_BITS, sizeof *dispatch);
     if (!dispatch) { fprintf(stderr, "recomp: out of memory\n"); abort(); }
     for (uint64_t i = 0; i < recomp_func_count; i++) dispatch_put(recomp_func_table[i].addr, recomp_func_table[i].fn);
+    __atomic_store_n(&dispatch_ready, 1, __ATOMIC_RELEASE);
 }
 
 void recomp_set_target(uint64_t addr, RecompFunc fn) {
@@ -51,7 +54,8 @@ void recomp_set_target(uint64_t addr, RecompFunc fn) {
 }
 
 void recomp_call_addr(CPU *c, uint64_t addr) {
-    pthread_once(&dispatch_once, dispatch_build);
+    /* (a flag once it is built: pthread_once on every call was ~1% of the main thread) */
+    if (__builtin_expect(!__atomic_load_n(&dispatch_ready, __ATOMIC_ACQUIRE), 0)) pthread_once(&dispatch_once, dispatch_build);
     for (uint64_t k = dispatch_slot(addr); dispatch[k].addr; k = (k + 1) & ((1u << DISPATCH_BITS) - 1))
         if (dispatch[k].addr == addr) { dispatch[k].fn(c); return; }
     RecompFunc fn = recomp_override ? recomp_override(addr) : NULL;
