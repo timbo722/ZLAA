@@ -144,7 +144,8 @@ VkPipeline render_compute_pipeline(HostShader *cs);
 VkCompareOp render_compare_op(uint32_t nvn_func);
 
 /* ---- command execution (draw.c) ---- */
-void render_end_rendering(void);                 /* close the current vkCmdBeginRendering */
+void render_end_rendering_at(const char *file, int line);   /* close the current render pass */
+#define render_end_rendering() render_end_rendering_at(__FILE__, __LINE__)   /* (the trace says who ended it) */
 void render_submission_done(int context);        /* the GPU finished that context's work: reuse it */
 
 #endif

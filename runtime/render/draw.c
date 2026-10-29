@@ -58,8 +58,9 @@ int render_passes;                                   /* begun so far (LAA_GPU_TI
  * The Adreno did: a glow pass read its blurred mask while the next pass rendered the mask again
  * (the purple box behind "Press L+R"). NVN orders these with nvnCommandBufferBarrier; we order
  * every pass's writes before all that follows (LAA_NO_PASS_BARRIER=1: as before, to compare). */
-void render_end_rendering(void) {
+void render_end_rendering_at(const char *file, int line) {
     if (!st.rendering) return;
+    if (render_tracing()) fprintf(stderr, "render: pass ended (%s:%d)\n", strrchr(file, '/') ? strrchr(file, '/') + 1 : file, line);
     static int no_barrier = -1;
     if (no_barrier < 0) no_barrier = getenv("LAA_NO_PASS_BARRIER") != NULL;
     if (render_pass_objects()) vkCmdEndRenderPass(render_cmd());
@@ -183,11 +184,19 @@ static void warn_once(const char *what, uint64_t key) {
     fprintf(stderr, "render: %s (%#llx)\n", what, (unsigned long long)key);
 }
 
+/* The same targets again (the game sets them often) keep the pass going: on the tiler, ending
+ * it stores the whole target to memory and the next pass loads it back (1080p main scene:
+ * two such splits, ~1 ms). */
 static void set_render_targets(const RenderTargets *rt) {
+    HostImage *color[8], *depth = render_image_target(rt->depth.texture);
+    for (int i = 0; i < 8; i++) color[i] = i < (int)rt->count ? render_image_target(rt->color[i].texture) : NULL;
+    if (st.rendering && rt->count == st.rt.count && depth == st.depth && !memcmp(color, st.color, sizeof color) &&
+        !memcmp(rt->color, st.rt.color, rt->count * sizeof rt->color[0]) && !memcmp(&rt->depth, &st.rt.depth, sizeof rt->depth))
+        return;
     render_end_rendering();
     st.rt = *rt;
-    for (int i = 0; i < 8; i++) st.color[i] = i < (int)rt->count ? render_image_target(rt->color[i].texture) : NULL;
-    st.depth = render_image_target(rt->depth.texture);
+    memcpy(st.color, color, sizeof color);
+    st.depth = depth;
 }
 
 /* a color value as Vulkan wants it: float, int or uint bits (sub: 0 float, 1 int, 2 uint) */
@@ -235,12 +244,22 @@ static int can_blit(VkFormat f, VkFormatFeatureFlags need) {
     return (p.optimalTilingFeatures & need) == need;
 }
 
-/* ---- scaled depth copies by drawing, for GPUs that can't blit depth formats (the Thor's D24S8):
- * a full-screen triangle whose fragment shader writes the source's depth at the matching point ---- */
+typedef struct {
+    uint32_t ncolor;
+    VkFormat color[8], depth;
+    uint8_t color_load[8], depth_load, stencil_load; /* VkAttachmentLoadOp */
+} PassKey;
+static VkRenderPass find_pass(const PassKey *k);
+static VkFramebuffer find_framebuffer(VkRenderPass compat, const VkImageView *views, uint32_t n, uint32_t w, uint32_t h);
+
+/* ---- copies by drawing: a full-screen triangle whose fragment shader reads the source at the
+ * matching point and writes it: depth (scaled depth copies, which the Thor can't blit for D24S8)
+ * and color (copies between formats and scaled ones: vkCmdBlitImage was ~20% of the Thor's GPU
+ * work, ~0.7-0.9 ms for each 1080p copy) ---- */
 static VkDescriptorSetLayout dc_set_layout;
 static VkPipelineLayout dc_layout;
-static VkSampler dc_sampler;
-static struct { VkFormat format; VkPipeline pipeline; } dc_pipelines[4];
+static VkSampler dc_sampler, dc_linear;
+static struct { VkFormat format; VkPipeline pipeline; } dc_pipelines[16];
 
 static VkShaderModule builtin_module(const uint32_t *code, size_t bytes) {
     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code };
@@ -249,8 +268,9 @@ static VkShaderModule builtin_module(const uint32_t *code, size_t bytes) {
     return m;
 }
 
-static VkPipeline depth_copy_pipeline(VkFormat format) {
-    for (int i = 0; i < 4; i++) if (dc_pipelines[i].pipeline && dc_pipelines[i].format == format) return dc_pipelines[i].pipeline;
+/* The pipeline that copies into `format` (depth or color) */
+static VkPipeline copy_pipeline(VkFormat format) {
+    for (int i = 0; i < 16; i++) if (dc_pipelines[i].pipeline && dc_pipelines[i].format == format) return dc_pipelines[i].pipeline;
     if (!dc_layout) {
         VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b };
@@ -263,9 +283,13 @@ static VkPipeline depth_copy_pipeline(VkFormat format) {
             .minFilter = VK_FILTER_NEAREST, .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
         VK_CHECK(vkCreateSampler(vk.device, &si, NULL, &dc_sampler));
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        VK_CHECK(vkCreateSampler(vk.device, &si, NULL, &dc_linear));
     }
+    int color = (render_aspects(format) & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
     VkShaderModule vs = builtin_module(spv_fullscreen_vert, sizeof spv_fullscreen_vert),
-                   fs = builtin_module(spv_depth_copy_frag, sizeof spv_depth_copy_frag);
+                   fs = color ? builtin_module(spv_color_copy_frag, sizeof spv_color_copy_frag)
+                              : builtin_module(spv_depth_copy_frag, sizeof spv_depth_copy_frag);
     VkPipelineShaderStageCreateInfo stages[2] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" },
@@ -280,30 +304,39 @@ static VkPipeline depth_copy_pipeline(VkFormat format) {
     VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                 .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
     VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_ALWAYS };
-    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        .depthTestEnable = !color, .depthWriteEnable = !color, .depthCompareOp = VK_COMPARE_OP_ALWAYS };
+    VkPipelineColorBlendAttachmentState att = { .colorWriteMask = 0xF };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                                               .attachmentCount = color, .pAttachments = &att };
     VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo dy = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                                             .dynamicStateCount = 2, .pDynamicStates = dyn };
-    VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .depthAttachmentFormat = format,
-        .stencilAttachmentFormat = (render_aspects(format) & VK_IMAGE_ASPECT_STENCIL_BIT) ? format : VK_FORMAT_UNDEFINED };
+    VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+    if (color) { ri.colorAttachmentCount = 1; ri.pColorAttachmentFormats = &format; }
+    else {
+        ri.depthAttachmentFormat = format;
+        ri.stencilAttachmentFormat = (render_aspects(format) & VK_IMAGE_ASPECT_STENCIL_BIT) ? format : VK_FORMAT_UNDEFINED;
+    }
     VkGraphicsPipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri,
         .stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp,
         .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cb,
         .pDynamicState = &dy, .layout = dc_layout };
+    if (color && render_pass_objects()) { ci.pNext = NULL; ci.renderPass = render_compatible_pass(1, &format, VK_FORMAT_UNDEFINED); }
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(vk.device, vk.pipeline_cache, 1, &ci, NULL, &p));
     vkDestroyShaderModule(vk.device, vs, NULL);
     vkDestroyShaderModule(vk.device, fs, NULL);
-    for (int i = 0; i < 4; i++) if (!dc_pipelines[i].pipeline) { dc_pipelines[i].format = format; dc_pipelines[i].pipeline = p; break; }
+    for (int i = 0; i < 16; i++) if (!dc_pipelines[i].pipeline) { dc_pipelines[i].format = format; dc_pipelines[i].pipeline = p; break; }
     return p;
 }
 
-/* the depth of src's region sb, scaled into dst's region db (level 0 of both) */
-static void depth_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], const VkOffset3D db[2]) {
-    VkPipeline pipeline = depth_copy_pipeline(dst->format);
+/* src's region sb, scaled into dst's region db (level 0 of both): depth into a depth image, or
+ * color into a color image (through their formats, like a blit: sRGB decoded and encoded) */
+static void draw_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], const VkOffset3D db[2], int linear) {
+    VkPipeline pipeline = copy_pipeline(dst->format);
     VkDescriptorSet set = new_set(dc_set_layout);
-    VkDescriptorImageInfo ii = { dc_sampler, render_image_view(src, &(TextureView){ 0 }, TEXDIM_2D, 0), VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo ii = { linear ? dc_linear : dc_sampler, render_image_view(src, &(TextureView){ 0 }, TEXDIM_2D, 0),
+                                 VK_IMAGE_LAYOUT_GENERAL };
     VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
                                 .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii };
     vkUpdateDescriptorSets(vk.device, 1, &wr, 0, NULL);
@@ -311,15 +344,32 @@ static void depth_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], c
     render_image_init_layout(cmd, src);
     render_image_init_layout(cmd, dst);
     render_barrier(cmd);
-    VkRenderingAttachmentInfo att = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dst->target_view,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
-    int has_stencil = (dst->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
-    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { dst->width, dst->height } },
-        .layerCount = 1, .pDepthAttachment = &att, .pStencilAttachment = has_stencil ? &att : NULL };
-    vkCmdBeginRendering(cmd, &ri);
+    float dw = (float)(db[1].x - db[0].x), dh = (float)(db[1].y - db[0].y);
+    int color = (dst->aspects & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
+    /* a copy over all of dst needn't load it first (on the tiler: no read of the old image) */
+    int whole = db[0].x == 0 && db[0].y == 0 && db[1].x == (int32_t)dst->width && db[1].y == (int32_t)dst->height;
+    if (color && render_pass_objects()) {
+        PassKey k;
+        memset(&k, 0, sizeof k);
+        k.ncolor = 1;
+        k.color[0] = dst->format;
+        k.color_load[0] = (uint8_t)(whole ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD);
+        VkFramebuffer fb = find_framebuffer(render_compatible_pass(1, &dst->format, VK_FORMAT_UNDEFINED), &dst->target_view, 1,
+                                            dst->width, dst->height);
+        VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = find_pass(&k), .framebuffer = fb,
+                                     .renderArea = { { 0, 0 }, { dst->width, dst->height } } };
+        vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    } else {
+        VkRenderingAttachmentInfo att = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dst->target_view,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        int has_stencil = (dst->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { dst->width, dst->height } },
+            .layerCount = 1, .colorAttachmentCount = color, .pColorAttachments = color ? &att : NULL,
+            .pDepthAttachment = color ? NULL : &att, .pStencilAttachment = !color && has_stencil ? &att : NULL };
+        vkCmdBeginRendering(cmd, &ri);
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dc_layout, 0, 1, &set, 0, NULL);
-    float dw = (float)(db[1].x - db[0].x), dh = (float)(db[1].y - db[0].y);
     VkViewport v = { (float)db[0].x, (float)db[0].y, dw, dh, 0, 1 };
     VkRect2D sc = { { db[0].x, db[0].y }, { (uint32_t)dw, (uint32_t)dh } };
     vkCmdSetViewport(cmd, 0, 1, &v);
@@ -330,10 +380,23 @@ static void depth_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], c
                     ((float)sb[0].x - (float)db[0].x * sx) / (float)src->width, ((float)sb[0].y - (float)db[0].y * sy) / (float)src->height };
     vkCmdPushConstants(cmd, dc_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    if (color && render_pass_objects()) vkCmdEndRenderPass(cmd);
+    else vkCmdEndRendering(cmd);
 }
 
-/* CopyTextureToTexture: same size -> vkCmdCopyImage; scaled or different formats -> blit */
+/* Color copies that can be drawn (draw_copy): level 0 of 2D images, one layer, between formats a
+ * float shader reads and writes (blendable: not integer ones). LAA_BLIT_COPIES=1: blit them all. */
+static int draws_copy(const HostImage *src, const HostImage *dst, const VkImageSubresourceLayers *ss, const VkImageSubresourceLayers *ds) {
+    static int blit = -1;
+    if (blit < 0) blit = getenv("LAA_BLIT_COPIES") != NULL;
+    if (blit || src->depth > 1 || dst->depth > 1 || ss->mipLevel || ds->mipLevel || ss->baseArrayLayer || ds->baseArrayLayer ||
+        ss->layerCount != 1 || ds->layerCount != 1 || !(dst->aspects & VK_IMAGE_ASPECT_COLOR_BIT))
+        return 0;
+    return can_blit(src->format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
+           can_blit(dst->format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+}
+
+/* CopyTextureToTexture: same size and format -> vkCmdCopyImage; scaled or different formats -> drawn (draws_copy) or a blit */
 static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint32_t flags) {
     HostImage *src = render_image_ready(src_ref->texture), *dst = render_image_ready(dst_ref->texture);
     if (!src || !dst) return;
@@ -378,8 +441,8 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
         if (force_draw < 0) force_draw = getenv("LAA_DEPTH_COPY_DRAW") != NULL;
         if (!can_blit(src->format, VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !can_blit(dst->format, VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
             force_draw) {
-            depth_copy(src, dst, sb, db);
-            render_barrier(render_cmd());            /* (depth_copy may have moved on to another submission) */
+            draw_copy(src, dst, sb, db, 0);
+            render_barrier(render_cmd());            /* (draw_copy may have moved on to another submission) */
             render_image_gpu_wrote(dst);
             return;
         }
@@ -387,6 +450,11 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
         VkImageBlit b = { .srcSubresource = ss, .srcOffsets = { sb[0], sb[1] }, .dstSubresource = ds,
                           .dstOffsets = { db[0], db[1] } };
         vkCmdBlitImage(cmd, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
+    } else if (draws_copy(src, dst, &ss, &ds)) {
+        draw_copy(src, dst, sb, db, flags & 1);
+        render_barrier(render_cmd());
+        render_image_gpu_wrote(dst);
+        return;
     } else {
         VkImageBlit b = { .srcSubresource = ss, .srcOffsets = { sb[0], sb[1] }, .dstSubresource = ds,
                           .dstOffsets = { db[0], db[1] } };
@@ -466,11 +534,6 @@ int render_pass_objects(void) {
     return on;
 }
 
-typedef struct {
-    uint32_t ncolor;
-    VkFormat color[8], depth;
-    uint8_t color_load[8], depth_load, stencil_load; /* VkAttachmentLoadOp */
-} PassKey;
 typedef struct { PassKey k; VkRenderPass pass; } PassEntry;
 static PassEntry passes[512];
 static int npasses;
@@ -978,6 +1041,7 @@ static void draw(const Cmd *r, int indexed) {
         if (st.depth) fprintf(stderr, " depth %ux%u", st.depth->width, st.depth->height);
         fprintf(stderr, " vp %g,%g %gx%g sc %d,%d %dx%d", st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3],
                 st.scissor[0], st.scissor[1], st.scissor[2], st.scissor[3]);
+        fprintf(stderr, " n %llu x%llu", (unsigned long long)r->a[2], (unsigned long long)(indexed ? r->a[6] : r->a[4]));
         fprintf(stderr, " logic %u blend %#x textures vs %u fs %u", st.color_state.logic_op, st.color_state.blend_enable,
                 vs->info.ntextures, fs->info.ntextures);
         for (int s = 0; s < 6; s++)
@@ -1247,8 +1311,12 @@ void render_command(const Cmd *r) {
         char label[48] = "";
         switch (r->op) {
         case CMD_DRAW_ARRAYS: case CMD_DRAW_ELEMENTS:
-            snprintf(label, sizeof label, "draw fs %#llx%s", (unsigned long long)st.program.code[STAGE_FRAGMENT],
-                     st.pass_draws++ ? "" : " [new pass]");
+            if (st.pass_draws++) snprintf(label, sizeof label, "draw fs %#llx", (unsigned long long)st.program.code[STAGE_FRAGMENT]);
+            else {                                 /* "[pass" + the target: per-pass totals in order (submit.c) */
+                const HostImage *t = st.color[0] ? st.color[0] : st.depth;
+                snprintf(label, sizeof label, "draw [pass %ux%u c%d d%d]", t ? t->width : 0, t ? t->height : 0,
+                         st.color[0] ? st.color[0]->format : 0, st.depth ? st.depth->format : 0);
+            }
             break;
         case CMD_DISPATCH: case CMD_DISPATCH_INDIRECT:
             snprintf(label, sizeof label, "dispatch cs %#llx", (unsigned long long)st.program.code[STAGE_COMPUTE]); break;

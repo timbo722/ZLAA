@@ -111,11 +111,20 @@ void render_timestamps_update(void) {
          * so the game's dynamic resolution picks a lower resolution. Measured walking in Mabe
          * Village: 1.25 -> 1280x720 instead of 1536x864, slow frames 48 instead of 59 of ~1400 (the
          * GPU's tail is mostly full-screen post-processing, which doesn't shrink with it). */
-        static double bias = -1, base_ns;
+        static double bias = -1, base_ns, last_ns;
         static uint64_t base_frame = ~0ull;
         if (bias < 0) bias = getenv("LAA_DRS_BIAS") ? atof(getenv("LAA_DRS_BIAS")) : 1.0;
         if (!(bias >= 0.5 && bias <= 4)) bias = 1;
-        if (pending_stamps[i].frame != base_frame) { base_frame = pending_stamps[i].frame; base_ns = gpu_ns; }
+        static int trace = -1, nstamp;
+        if (trace < 0) trace = getenv("LAA_TRACE_DRS") != NULL;
+        if (pending_stamps[i].frame != base_frame) {
+            if (trace && base_frame % 60 == 0)        /* LAA_TRACE_DRS: what the game measures, once a second */
+                fprintf(stderr, "drs: frame %llu: %d timestamps, last %.2f ms after the first\n", (unsigned long long)base_frame,
+                        nstamp, (last_ns - base_ns) / 1e6);
+            base_frame = pending_stamps[i].frame; base_ns = gpu_ns; nstamp = 0;
+        }
+        last_ns = gpu_ns;
+        nstamp++;
         gpu_ns = base_ns + (gpu_ns - base_ns) * bias;
         uint64_t ticks = (uint64_t)((gpu_ns + stamp_offset_ns) * 384.0 / 625.0);
         uint64_t report[2] = { 0, ticks };
@@ -209,6 +218,8 @@ static int nstamps;
 static char stamp_label[MAX_STAMPS][48];
 static struct { char label[48]; double ms; int count; } timing[512];
 static int ntiming;
+static struct { char label[48]; double ms; } seq[MAX_STAMPS];   /* the frame's commands in order */
+static int nseq;
 
 static void start_stamps(VkCommandBuffer cmd) {
     if (!stamp_pool) {
@@ -239,6 +250,7 @@ static void collect_stamps(void) {                /* (after the GPU finished the
         while (k < ntiming && strcmp(timing[k].label, stamp_label[i])) k++;
         if (k == ntiming && ntiming < 512) snprintf(timing[ntiming++].label, sizeof timing[0].label, "%s", stamp_label[i]);
         if (k < ntiming) { timing[k].ms += ms; timing[k].count++; }
+        if (nseq < MAX_STAMPS) { memcpy(seq[nseq].label, stamp_label[i], sizeof seq[0].label); seq[nseq++].ms = ms; }
     }
     nstamps = 0;
 }
@@ -261,7 +273,20 @@ void render_gpu_timing_frame(uint64_t frame) {    /* (render_present, after the 
                 render_passes - passes_before);
         for (int k = 0; k < ntiming && k < 25; k++)
             fprintf(stderr, "render:   %7.3f ms  %3dx  %s\n", timing[k].ms, timing[k].count, timing[k].label);
-        ntiming = 0;
+        /* in order: each render pass with its draws added up (on the tiler a pass's cost lands on
+         * any of its draws), and the other commands */
+        fprintf(stderr, "render: in order:\n");
+        for (int i = 0; i < nseq;) {
+            const char *pass = strstr(seq[i].label, "[pass ");
+            double ms = seq[i].ms;
+            int n = 1;
+            if (pass)
+                while (i + n < nseq && !strncmp(seq[i + n].label, "draw", 4) && !strstr(seq[i + n].label, "[pass ")) ms += seq[i + n++].ms;
+            if (ms >= 0.05) fprintf(stderr, "render:   %7.3f ms  %s%s\n", ms, pass ? pass : seq[i].label, pass ? "" : "");
+            if (pass && n > 1 && ms >= 0.05) fprintf(stderr, "render:              (%d draws)\n", n);
+            i += n;
+        }
+        ntiming = nseq = 0;
     }
     if (at >= 0 && frame + 1 == (uint64_t)at) { render_gpu_timing = 1; passes_before = render_passes; }
 }

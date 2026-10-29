@@ -345,13 +345,14 @@ static void pin_to_fastest_core(void) {
         if (fscanf(f, "%ld", &khz) == 1 && khz > best_khz) { best_khz = khz; best = cpu; }
         fclose(f);
     }
+    if (getenv("LAA_MAIN_CORE")) best = atoi(getenv("LAA_MAIN_CORE"));   /* (that core instead) */
     if (best < 0) return;
     host_main_core(best);                            /* (first: which cores the other threads get) */
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(best, &set);
     if (sched_setaffinity(0, sizeof set, &set) == 0)
-        fprintf(stderr, "nvn: the game's main thread runs on cpu %d (%ld MHz)\n", best, best_khz / 1000);
+        fprintf(stderr, "nvn: the game's main thread runs on cpu %d\n", best);
 #endif
 }
 

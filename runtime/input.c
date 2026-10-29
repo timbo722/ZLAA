@@ -5,7 +5,8 @@
  *     LAA_INPUT_SCRIPT="2900:L+R,3200:A,3400:A"
  * holds each button (or buttons joined by +) for 10 frames starting at that presented frame, or for n frames with
  * "frame:NAME*n" ("2200:SDOWN*120": walk down for 2 seconds). Names: A B X Y L R ZL ZR PLUS MINUS, the d-pad UP
- * DOWN LEFT RIGHT, the left stick pushed all the way SUP SDOWN SLEFT SRIGHT.
+ * DOWN LEFT RIGHT, the left stick pushed all the way SUP SDOWN SLEFT SRIGHT, the right stick RSUP RSDOWN RSLEFT
+ * RSRIGHT.
  */
 #include "input.h"
 #include "nvn/nvn.h"
@@ -38,7 +39,8 @@ void input_press(uint64_t buttons) {
 }
 
 #define MAX_SCRIPT 512
-enum { STICK_UP = 1, STICK_DOWN = 2, STICK_LEFT = 4, STICK_RIGHT = 8 };
+enum { STICK_UP = 1, STICK_DOWN = 2, STICK_LEFT = 4, STICK_RIGHT = 8, RSTICK_UP = 16, RSTICK_DOWN = 32, RSTICK_LEFT = 64,
+       RSTICK_RIGHT = 128 };
 static struct { uint64_t frame, frames, buttons; uint32_t stick; } script[MAX_SCRIPT];
 static int nscript = -1;
 
@@ -52,6 +54,7 @@ static void load_script(void) {
     };
     static const struct { const char *name; uint32_t dir; } sticks[] = {
         { "SUP", STICK_UP }, { "SDOWN", STICK_DOWN }, { "SLEFT", STICK_LEFT }, { "SRIGHT", STICK_RIGHT },
+        { "RSUP", RSTICK_UP }, { "RSDOWN", RSTICK_DOWN }, { "RSLEFT", RSTICK_LEFT }, { "RSRIGHT", RSTICK_RIGHT },
     };
     while (s && *s && nscript < MAX_SCRIPT) {
         char name[16] = { 0 };
@@ -95,6 +98,10 @@ InputState input_get(void) {
         if (d & STICK_DOWN) s.ly = -32767;
         if (d & STICK_LEFT) s.lx = -32767;
         if (d & STICK_RIGHT) s.lx = 32767;
+        if (d & RSTICK_UP) s.ry = 32767;
+        if (d & RSTICK_DOWN) s.ry = -32767;
+        if (d & RSTICK_LEFT) s.rx = -32767;
+        if (d & RSTICK_RIGHT) s.rx = 32767;
     }
     return s;
 }
