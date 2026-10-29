@@ -3,9 +3,9 @@
  *
  * Presenting runs on its own thread. The game thread (render_present) records, after the
  * frame's rendering, a scaled copy of the shown texture into one of OUT_SLOTS window-sized
- * images (vkCmdBlitImage scales, flips and converts to the window's format), adds the FPS box,
- * and hands the slot over. The present thread acquires a swapchain image, copies the slot into
- * it and presents. Acquiring waits for the display, and Android's queueBuffer sleeps ~2 ms a
+ * images (drawn: scaled, flipped and converted to the window's format; vkCmdBlitImage is slow on
+ * the Adreno), adds the FPS box, and hands the slot over. The present thread acquires a swapchain
+ * image, copies the slot into it (same size and format: a plain copy) and presents. Acquiring waits for the display, and Android's queueBuffer sleeps ~2 ms a
  * frame on the Thor (a system frame-pacing library): neither holds up the game any more. If the
  * game hands over frames faster than the display takes them, the older waiting one is dropped.
  *
@@ -39,6 +39,7 @@ static struct {                      /* textures the GPU didn't render: uploaded
 static struct {
     VkImage image[OUT_SLOTS];        /* window-sized, in the window's format, layout GENERAL */
     VkDeviceMemory memory[OUT_SLOTS];
+    VkImageView view[OUT_SLOTS];     /* (drawn into) */
     uint32_t width, height;
     VkCommandPool pool;              /* the present thread's own (pools are single-threaded) */
     VkCommandBuffer cmd[OUT_SLOTS];  /* the present thread's copy of each slot into the window */
@@ -378,11 +379,16 @@ static void make_out_images(void) {
     render_flush();
     VK_CHECK(vkWaitForFences(vk.device, OUT_SLOTS, out.copied, VK_TRUE, UINT64_MAX));
     for (int i = 0; i < OUT_SLOTS; i++) {
-        if (out.image[i]) { vkDestroyImage(vk.device, out.image[i], NULL); vkFreeMemory(vk.device, out.memory[i], NULL); }
+        if (out.image[i]) {
+            vkDestroyImageView(vk.device, out.view[i], NULL);
+            vkDestroyImage(vk.device, out.image[i], NULL);
+            vkFreeMemory(vk.device, out.memory[i], NULL);
+        }
         VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
             .format = vk.swapchain_format, .extent = { vk.extent.width, vk.extent.height, 1 }, .mipLevels = 1, .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
         VK_CHECK(vkCreateImage(vk.device, &ii, NULL, &out.image[i]));
         VkMemoryRequirements req;
         vkGetImageMemoryRequirements(vk.device, out.image[i], &req);
@@ -390,6 +396,9 @@ static void make_out_images(void) {
             .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
         VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &out.memory[i]));
         VK_CHECK(vkBindImageMemory(vk.device, out.image[i], out.memory[i], 0));
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = out.image[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = vk.swapchain_format, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &out.view[i]));
         barrier(render_cmd(), out.image[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
                 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     }
@@ -438,12 +447,18 @@ static void *present_thread(void *arg) {
             render_barrier(cmd);                     /* after the game thread's copy into the slot */
             VkImage dst = vk.images[index];
             barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-            VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                                 .srcOffsets = { { 0, 0, 0 }, { (int32_t)width, (int32_t)height, 1 } },
-                                 .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                                 .dstOffsets = { { 0, 0, 0 }, { (int32_t)vk.extent.width, (int32_t)vk.extent.height, 1 } } };
-            vkCmdBlitImage(cmd, out.image[s], VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                           width == vk.extent.width && height == vk.extent.height ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+            if (width == vk.extent.width && height == vk.extent.height) {
+                VkImageCopy c = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                  .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { width, height, 1 } };
+                vkCmdCopyImage(cmd, out.image[s], VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+            } else {                                 /* (the window changed size since this slot was written) */
+                VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                     .srcOffsets = { { 0, 0, 0 }, { (int32_t)width, (int32_t)height, 1 } },
+                                     .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                     .dstOffsets = { { 0, 0, 0 }, { (int32_t)vk.extent.width, (int32_t)vk.extent.height, 1 } } };
+                vkCmdBlitImage(cmd, out.image[s], VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                               VK_FILTER_LINEAR);
+            }
             barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0);
             VK_CHECK(vkEndCommandBuffer(cmd));
             VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -516,7 +531,16 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
         blit.srcOffsets[0] = (VkOffset3D){ crop[0], crop[1], 0 };
         blit.srcOffsets[1] = (VkOffset3D){ crop[0] + crop[2], crop[1] + crop[3], 1 };
     }
-    vkCmdBlitImage(cmd, src, src_layout, out.image[s], VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+    if (from_gpu) {                                  /* (drawn: blits are slow on the Adreno) */
+        VkOffset3D sb[2] = { blit.srcOffsets[0], blit.srcOffsets[1] };
+        VkOffset3D db[2] = { { 0, 0, 0 }, { (int32_t)out.width, (int32_t)out.height, 1 } };
+        render_image_init_layout(cmd, h);
+        render_barrier(cmd);
+        render_draw_copy(cmd, render_image_view(h, &(TextureView){ 0 }, TEXDIM_2D, 0), h->width, h->height, sb, out.view[s],
+                         vk.swapchain_format, out.width, out.height, db, 1, 1);
+    } else {
+        vkCmdBlitImage(cmd, src, src_layout, out.image[s], VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+    }
     if (osd.on) osd_draw(cmd, out.image[s]);
     render_barrier(cmd);
     render_submit();

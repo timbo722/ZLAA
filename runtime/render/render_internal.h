@@ -134,6 +134,9 @@ typedef struct {
 VkPipeline render_pipeline(const PipelineKey *k);
 int render_pass_objects(void);                   /* passes with VkRenderPass objects, not dynamic rendering (draw.c) */
 VkRenderPass render_compatible_pass(uint32_t ncolor, const VkFormat *color, VkFormat depth);   /* (thread-safe) */
+void render_draw_copy(VkCommandBuffer cmd, VkImageView src_view, uint32_t src_w, uint32_t src_h, const VkOffset3D sb[2],
+                      VkImageView dst_view, VkFormat dst_format, uint32_t dst_w, uint32_t dst_h, const VkOffset3D db[2],
+                      int linear, int flip);       /* (draw.c: a copy by drawing, outside a pass) */
 void render_load_pipeline_keys(const char *path);   /* remembered pipelines (pipeline.c), from vk.c */
 void render_save_pipeline_keys(const char *path);
 VkPipelineLayout render_pipeline_layout(void);

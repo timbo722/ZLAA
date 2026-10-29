@@ -330,40 +330,38 @@ static VkPipeline copy_pipeline(VkFormat format) {
     return p;
 }
 
-/* src's region sb, scaled into dst's region db (level 0 of both): depth into a depth image, or
- * color into a color image (through their formats, like a blit: sRGB decoded and encoded) */
-static void draw_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], const VkOffset3D db[2], int linear) {
-    VkPipeline pipeline = copy_pipeline(dst->format);
+/* src's region sb, scaled into dst's region db (dst level 0): depth into a depth image, or color into
+ * a color image, through the views' formats like a blit (sRGB decoded and encoded). flip: upside
+ * down (db's top row gets sb's bottom one). Recorded into cmd, outside a render pass. */
+void render_draw_copy(VkCommandBuffer cmd, VkImageView src_view, uint32_t src_w, uint32_t src_h, const VkOffset3D sb[2],
+                      VkImageView dst_view, VkFormat dst_format, uint32_t dst_w, uint32_t dst_h, const VkOffset3D db[2],
+                      int linear, int flip) {
+    VkPipeline pipeline = copy_pipeline(dst_format);
     VkDescriptorSet set = new_set(dc_set_layout);
-    VkDescriptorImageInfo ii = { linear ? dc_linear : dc_sampler, render_image_view(src, &(TextureView){ 0 }, TEXDIM_2D, 0),
-                                 VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo ii = { linear ? dc_linear : dc_sampler, src_view, VK_IMAGE_LAYOUT_GENERAL };
     VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
                                 .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii };
     vkUpdateDescriptorSets(vk.device, 1, &wr, 0, NULL);
-    VkCommandBuffer cmd = render_cmd();
-    render_image_init_layout(cmd, src);
-    render_image_init_layout(cmd, dst);
-    render_barrier(cmd);
     float dw = (float)(db[1].x - db[0].x), dh = (float)(db[1].y - db[0].y);
-    int color = (dst->aspects & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
+    VkImageAspectFlags aspects = render_aspects(dst_format);
+    int color = (aspects & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
     /* a copy over all of dst needn't load it first (on the tiler: no read of the old image) */
-    int whole = db[0].x == 0 && db[0].y == 0 && db[1].x == (int32_t)dst->width && db[1].y == (int32_t)dst->height;
+    int whole = db[0].x == 0 && db[0].y == 0 && db[1].x == (int32_t)dst_w && db[1].y == (int32_t)dst_h;
     if (color && render_pass_objects()) {
         PassKey k;
         memset(&k, 0, sizeof k);
         k.ncolor = 1;
-        k.color[0] = dst->format;
+        k.color[0] = dst_format;
         k.color_load[0] = (uint8_t)(whole ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD);
-        VkFramebuffer fb = find_framebuffer(render_compatible_pass(1, &dst->format, VK_FORMAT_UNDEFINED), &dst->target_view, 1,
-                                            dst->width, dst->height);
+        VkFramebuffer fb = find_framebuffer(render_compatible_pass(1, &dst_format, VK_FORMAT_UNDEFINED), &dst_view, 1, dst_w, dst_h);
         VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = find_pass(&k), .framebuffer = fb,
-                                     .renderArea = { { 0, 0 }, { dst->width, dst->height } } };
+                                     .renderArea = { { 0, 0 }, { dst_w, dst_h } } };
         vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
     } else {
-        VkRenderingAttachmentInfo att = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dst->target_view,
+        VkRenderingAttachmentInfo att = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dst_view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
-        int has_stencil = (dst->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
-        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { dst->width, dst->height } },
+        int has_stencil = (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+        VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { dst_w, dst_h } },
             .layerCount = 1, .colorAttachmentCount = color, .pColorAttachments = color ? &att : NULL,
             .pDepthAttachment = color ? NULL : &att, .pStencilAttachment = !color && has_stencil ? &att : NULL };
         vkCmdBeginRendering(cmd, &ri);
@@ -374,14 +372,25 @@ static void draw_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], co
     VkRect2D sc = { { db[0].x, db[0].y }, { (uint32_t)dw, (uint32_t)dh } };
     vkCmdSetViewport(cmd, 0, 1, &v);
     vkCmdSetScissor(cmd, 0, 1, &sc);
-    /* uv = FragCoord * scale + offset: dst pixel x -> src x = sb0 + (x - db0) * sw / dw, over src's size */
+    /* uv = FragCoord * scale + offset: dst pixel x -> src x = sb0 + (x - db0) * sw / dw, over src's size;
+     * flipped: src y = sb0 + (db1 - y) * sh / dh */
     float sx = (float)(sb[1].x - sb[0].x) / dw, sy = (float)(sb[1].y - sb[0].y) / dh;
-    float pc[4] = { sx / (float)src->width, sy / (float)src->height,
-                    ((float)sb[0].x - (float)db[0].x * sx) / (float)src->width, ((float)sb[0].y - (float)db[0].y * sy) / (float)src->height };
+    float pc[4] = { sx / (float)src_w, sy / (float)src_h,
+                    ((float)sb[0].x - (float)db[0].x * sx) / (float)src_w, ((float)sb[0].y - (float)db[0].y * sy) / (float)src_h };
+    if (flip) { pc[1] = -sy / (float)src_h; pc[3] = ((float)sb[0].y + (float)db[1].y * sy) / (float)src_h; }
     vkCmdPushConstants(cmd, dc_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     if (color && render_pass_objects()) vkCmdEndRenderPass(cmd);
     else vkCmdEndRendering(cmd);
+}
+
+static void draw_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], const VkOffset3D db[2], int linear) {
+    VkCommandBuffer cmd = render_cmd();
+    render_image_init_layout(cmd, src);
+    render_image_init_layout(cmd, dst);
+    render_barrier(cmd);
+    render_draw_copy(cmd, render_image_view(src, &(TextureView){ 0 }, TEXDIM_2D, 0), src->width, src->height, sb,
+                     dst->target_view, dst->format, dst->width, dst->height, db, linear, 0);
 }
 
 /* Color copies that can be drawn (draw_copy): level 0 of 2D images, one layer, between formats a
