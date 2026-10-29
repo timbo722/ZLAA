@@ -123,6 +123,10 @@ if(ANDROID)
     target_link_libraries(main PRIVATE game_code m log android SDL3::SDL3)
     target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1)
     target_compile_options(main PRIVATE -Wall)
+    # Calls between our own functions (the game's f_* calling each other, the runtime) go straight
+    # to them, not through the PLT: in a shared library every global function could be replaced
+    # from outside, so each call took a stub and a GOT load (~2-3% of the CPU). Still exported.
+    target_link_options(main PRIVATE -Wl,-Bsymbolic-functions)
 else()
     # Desktop host program: loads the player's ExeFS and runs the game.
     # ENABLE_EXPORTS (-rdynamic) keeps function names, so crash backtraces show f_<guest address>.
