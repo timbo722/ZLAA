@@ -17,6 +17,7 @@
  */
 #include "services.h"
 #include "kernel.h"
+#include "nvn/nvn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -254,9 +255,8 @@ static void applet_run(LibraryApplet *a) {
     case APPLET_CONTROLLER: {
         /* "Controller support" (pick controllers, press L+R). Answer as if player 1 confirmed:
          * ControllerSupportResultInfo = { s8 player count, pad[3], u32 selected npad id, u32 result }. */
-        uint8_t info[0xC] = { 1 };
-        uint32_t npad = applet_handheld() ? 0x20 : 0;
-        memcpy(info + 4, &npad, 4);
+        uint8_t info[0xC] = { 1 };                    /* npad id 0: player 1's Pro Controller (hid.c) */
+        fprintf(stderr, "am: controller support applet (frame %llu)\n", (unsigned long long)nvn_frame_count());
         hid_connect_controllers();
         queue_push(&a->out, info, sizeof info);
         applet_finish(a);

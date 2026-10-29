@@ -3,13 +3,14 @@
  * memory block that the service keeps writing to; commands only switch devices on and say
  * which controller styles the game supports.
  *
- * A host thread fills it 200 times a second from input.c (keyboard/gamepad/script): we show a
- * Pro Controller as player 1 and the console's attached Joy-Cons ("handheld"), both reporting
- * the same buttons. switchbrew.org/wiki/HID_services, switchbrew.org/wiki/HID_Shared_Memory
+ * A host thread fills it 200 times a second from input.c (keyboard/gamepad/script): we show one
+ * controller, a Pro Controller as player 1 (also in handheld mode).
+ * switchbrew.org/wiki/HID_services, switchbrew.org/wiki/HID_Shared_Memory
  */
 #include "services.h"
 #include "kernel.h"
 #include "input.h"
+#include "nvn/nvn.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,16 +25,14 @@
 #define NPAD_BASE         0x9A00
 #define NPAD_SIZE         0x5000
 #define NPAD_LIFO_FULLKEY 0x28
-#define NPAD_LIFO_HANDHELD 0x378
 #define NPAD_DEVICE_TYPE  0x4188
 #define NPAD_SYSTEM_PROPS 0x4190
 #define NPAD_BATTERY      0x419C
 #define LIFO_ENTRIES      17
 #define LIFO_ENTRY_SIZE   0x30
-enum { NPAD_PLAYER1 = 0, NPAD_HANDHELD = 8 };
-enum { STYLE_FULLKEY = 1, STYLE_HANDHELD = 2 };
-enum { ATTR_CONNECTED = 1, ATTR_WIRED = 2, ATTR_LEFT_CONNECTED = 4, ATTR_LEFT_WIRED = 8, ATTR_RIGHT_CONNECTED = 16,
-       ATTR_RIGHT_WIRED = 32 };
+enum { NPAD_PLAYER1 = 0 };
+enum { STYLE_FULLKEY = 1 };
+enum { ATTR_CONNECTED = 1, ATTR_WIRED = 2 };
 
 static KSharedMemory *hid_shm;
 static uint32_t supported_styles;
@@ -90,11 +89,13 @@ static void npad_setup(uint8_t *npad, uint32_t style, uint32_t device_type) {
     for (int i = 0; i < 3; i++) put32(npad + NPAD_BATTERY + 4 * i, 4);   /* full */
 }
 
+/* One controller, a Pro Controller as player 1, in both modes. Showing the attached Joy-Cons
+ * ("handheld") too made the game see a second controller pressing buttons after it had picked one:
+ * every press opened its controller applet again and was lost. */
 static void *input_thread(void *arg) {
     (void)arg;
-    uint8_t *mem = hid_shm->host;
-    npad_setup(mem + NPAD_BASE + NPAD_PLAYER1 * NPAD_SIZE, STYLE_FULLKEY, 1);
-    npad_setup(mem + NPAD_BASE + NPAD_HANDHELD * NPAD_SIZE, STYLE_HANDHELD, 4 | 8);
+    uint8_t *npad = hid_shm->host + NPAD_BASE + NPAD_PLAYER1 * NPAD_SIZE;
+    npad_setup(npad, STYLE_FULLKEY, 1);
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
     for (uint64_t sampling = 1;; sampling++) {
@@ -103,19 +104,14 @@ static void *input_thread(void *arg) {
          * or when the controller applet connects it */
         int request = connect_request;
         connect_request = 0;
-        if ((s.buttons || request) && (disconnected[NPAD_PLAYER1] || disconnected[NPAD_HANDHELD])) {
-            if (disconnected[NPAD_PLAYER1]) npad_setup(mem + NPAD_BASE + NPAD_PLAYER1 * NPAD_SIZE, STYLE_FULLKEY, 1);
-            if (disconnected[NPAD_HANDHELD]) npad_setup(mem + NPAD_BASE + NPAD_HANDHELD * NPAD_SIZE, STYLE_HANDHELD, 4 | 8);
-            disconnected[NPAD_PLAYER1] = disconnected[NPAD_HANDHELD] = 0;
-            for (int i = 0; i < 10; i++) if (style_set_update_event[i]) kevent_signal(style_set_update_event[i]);
-            fprintf(stderr, "hid: controllers reconnected by %s\n", request ? "the controller applet" : "a button press");
+        if ((s.buttons || request) && disconnected[NPAD_PLAYER1]) {
+            npad_setup(npad, STYLE_FULLKEY, 1);
+            disconnected[NPAD_PLAYER1] = 0;
+            if (style_set_update_event[NPAD_PLAYER1]) kevent_signal(style_set_update_event[NPAD_PLAYER1]);
+            fprintf(stderr, "hid: controller reconnected by %s (frame %llu)\n", request ? "the controller applet" : "a button press",
+                    (unsigned long long)nvn_frame_count());
         }
-        if (!disconnected[0])
-            lifo_write(mem + NPAD_BASE + NPAD_PLAYER1 * NPAD_SIZE + NPAD_LIFO_FULLKEY, sampling, &s,
-                       ATTR_CONNECTED | ATTR_WIRED);
-        if (!disconnected[NPAD_HANDHELD])
-            lifo_write(mem + NPAD_BASE + NPAD_HANDHELD * NPAD_SIZE + NPAD_LIFO_HANDHELD, sampling, &s,
-                       ATTR_CONNECTED | ATTR_WIRED | ATTR_LEFT_CONNECTED | ATTR_LEFT_WIRED | ATTR_RIGHT_CONNECTED | ATTR_RIGHT_WIRED);
+        if (!disconnected[NPAD_PLAYER1]) lifo_write(npad + NPAD_LIFO_FULLKEY, sampling, &s, ATTR_CONNECTED | ATTR_WIRED);
         next.tv_nsec += 5000000;                         /* 200 Hz */
         if (next.tv_nsec >= 1000000000) { next.tv_sec++; next.tv_nsec -= 1000000000; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
@@ -197,12 +193,12 @@ static void hid_dispatch(ServiceObject *self, IpcCall *call) {
         if (i < 0 || disconnected[i]) break;
         disconnected[i] = 1;
         uint8_t *npad = hid_shm->host + NPAD_BASE + (size_t)i * NPAD_SIZE;
-        if (i == NPAD_PLAYER1 || i == NPAD_HANDHELD) {
+        if (i == NPAD_PLAYER1) {
             put32(npad, 0);                               /* no style, no device */
             put32(npad + NPAD_DEVICE_TYPE, 0);
         }
         if (style_set_update_event[i]) kevent_signal(style_set_update_event[i]);
-        fprintf(stderr, "hid: the game disconnected npad %d\n", i);
+        fprintf(stderr, "hid: the game disconnected npad %d (frame %llu)\n", i, (unsigned long long)nvn_frame_count());
         break;
     }
     case 108:                                     /* GetPlayerLedPattern -> u64 */
