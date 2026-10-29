@@ -218,6 +218,13 @@ def follows_abi(lines):
                     return False                        # changed but never saved
                 break                                   # set first: fine
             return False                                # read first: uses its caller's value
+    # the condition flags: a function reading them before setting them uses its caller's (callers
+    # then store their cached flags first: see cache_registers)
+    for t in stmts:
+        if _FLAG_FN_RE.search(t):
+            break
+        if _FLAG_RE.search(t):
+            return False
     return True
 
 
@@ -230,12 +237,32 @@ def _local(m):
     return "XSP" if m.group(0) == "c->sp" else f"X{m.group(1)}"
 
 
+_FLAG_RE = re.compile(r"\bc->([nzcv])\b")
+_FLAG_FNS = {"add64_flags": "add64_fl", "add32_flags": "add32_fl", "logic64_flags": "logic64_fl",
+             "logic32_flags": "logic32_fl", "set_nzcv": "set_nzcv_fl", "fcmp": "fcmp_fl"}
+_FLAG_FN_RE = re.compile(r"\b(" + "|".join(_FLAG_FNS) + r")\(c, ")
+
+
+def _local_flags(l):
+    l = _FLAG_RE.sub(lambda m: "F" + m.group(1).upper(), l)
+    return _FLAG_FN_RE.sub(lambda m: _FLAG_FNS[m.group(1)] + "(&FN, &FZ, &FC, &FV, ", l)
+
+
 def cache_registers(lines):
     lines = [_REG_RE.sub(_local, l) for l in lines]
     used = sorted({n for l in lines for n in re.findall(r"\b(X\d+|XSP)\b", l)},
                   key=lambda n: 99 if n == "XSP" else int(n[1:]))
     if not used:
         return [], lines
+    # The condition flags are locals too (FN FZ FC FV): a compare whose flags only a branch reads
+    # becomes a plain compare, the rest of its flags never computed. By the calling convention a
+    # call doesn't take or keep them, so they are stored only where everything is (jumps out,
+    # functions that don't keep the convention: NON_ABI) and reloaded after each call (unused
+    # reloads compile away).
+    lines = [_local_flags(l) for l in lines]
+    flags = any(re.search(r"\bF[NZCV]\b", l) for l in lines)
+    flag_store = "c->n = FN; c->z = FZ; c->c = FC; c->v = FV; " if flags else ""
+    flag_load = "FN = c->n; FZ = c->z; FC = c->c; FV = c->v; " if flags else ""
     written = [n for n in used if any(re.search(rf"\b{n} = (?!=)", l) for l in lines)]
     field = lambda n: "c->sp" if n == "XSP" else f"c->x[{n[1:]}]"
     store = "".join(f"{field(n)} = {n}; " for n in written)
@@ -265,12 +292,14 @@ def cache_registers(lines):
                 end += 1
             callee, jump = m.group(1), l[end:].lstrip().startswith("return;")
             full = jump or callee in FULL_SYNC_CALLS or callee in NON_ABI
-            res += l[i:m.start()] + "{ " + (store_all if full else store) + l[m.start():end] + " " + \
-                (load_all if full else load) + "}"
+            res += l[i:m.start()] + "{ " + (store_all + flag_store if full else store) + l[m.start():end] + " " + \
+                (load_all if full else load) + flag_load + "}"
             i = end
         l = res + l[i:]
         out.append(re.sub(r"\breturn;", "{ " + store + "return; }", l) if store else l)
     decls = ["    uint64_t " + ", ".join(f"{n} = {field(n)}" for n in used) + ";"]
+    if flags:
+        decls.append("    uint8_t FN = c->n, FZ = c->z, FC = c->c, FV = c->v;")
     return decls, out
 
 

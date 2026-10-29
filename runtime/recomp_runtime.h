@@ -160,6 +160,30 @@ static inline void set_nzcv(CPU *c, int nzcv) {
     c->n = (nzcv >> 3) & 1; c->z = (nzcv >> 2) & 1; c->c = (nzcv >> 1) & 1; c->v = nzcv & 1;
 }
 
+/* The same, into a function's own flag variables (recomp.py caches flags like registers: flags
+ * that are never read then cost nothing, as the C compiler drops their computation) */
+static inline uint64_t add64_fl(uint8_t *fn, uint8_t *fz, uint8_t *fc, uint8_t *fv, uint64_t a, uint64_t b, uint64_t cin) {
+    unsigned __int128 u = (unsigned __int128)a + b + cin;
+    uint64_t r = (uint64_t)u;
+    *fn = (uint8_t)(r >> 63); *fz = r == 0; *fc = (uint8_t)(u >> 64); *fv = (uint8_t)(((~(a ^ b) & (a ^ r)) >> 63) & 1);
+    return r;
+}
+static inline uint64_t add32_fl(uint8_t *fn, uint8_t *fz, uint8_t *fc, uint8_t *fv, uint32_t a, uint32_t b, uint64_t cin) {
+    uint64_t u = (uint64_t)a + b + cin;
+    uint32_t r = (uint32_t)u;
+    *fn = (uint8_t)(r >> 31); *fz = r == 0; *fc = (uint8_t)(u >> 32); *fv = (uint8_t)(((~(a ^ b) & (a ^ r)) >> 31) & 1);
+    return r;
+}
+static inline uint64_t logic64_fl(uint8_t *fn, uint8_t *fz, uint8_t *fc, uint8_t *fv, uint64_t r) {
+    *fn = (uint8_t)(r >> 63); *fz = r == 0; *fc = 0; *fv = 0; return r;
+}
+static inline uint64_t logic32_fl(uint8_t *fn, uint8_t *fz, uint8_t *fc, uint8_t *fv, uint32_t r) {
+    *fn = (uint8_t)(r >> 31); *fz = r == 0; *fc = 0; *fv = 0; return r;
+}
+static inline void set_nzcv_fl(uint8_t *fn, uint8_t *fz, uint8_t *fc, uint8_t *fv, int nzcv) {
+    *fn = (nzcv >> 3) & 1; *fz = (nzcv >> 2) & 1; *fc = (nzcv >> 1) & 1; *fv = nzcv & 1;
+}
+
 static inline uint64_t ror64(uint64_t v, unsigned s) { s &= 63; return s ? (v >> s) | (v << (64 - s)) : v; }
 static inline uint32_t ror32(uint32_t v, unsigned s) { s &= 31; return s ? (v >> s) | (v << (32 - s)) : v; }
 
@@ -248,6 +272,13 @@ static inline void fcmp(CPU *c, double a, double b) {
     else if (a == b)      set_nzcv(c, 0x6);
     else if (a < b)       set_nzcv(c, 0x8);
     else                  set_nzcv(c, 0x2);
+}
+
+static inline void fcmp_fl(uint8_t *fn, uint8_t *fz, uint8_t *fc, uint8_t *fv, double a, double b) {
+    if (a != a || b != b) set_nzcv_fl(fn, fz, fc, fv, 0x3);
+    else if (a == b)      set_nzcv_fl(fn, fz, fc, fv, 0x6);
+    else if (a < b)       set_nzcv_fl(fn, fz, fc, fv, 0x8);
+    else                  set_nzcv_fl(fn, fz, fc, fv, 0x2);
 }
 
 /* NaN tests on raw bits (also catch signalling NaNs, which C can't name) */
