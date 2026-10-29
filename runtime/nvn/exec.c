@@ -22,6 +22,10 @@
 #include <inttypes.h>
 #include <string.h>
 #include <time.h>
+#ifdef __ANDROID__
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
 
 static int sync_tracing(void);
 
@@ -356,9 +360,60 @@ static void pin_to_fastest_core(void) {
 #endif
 }
 
+/* ADPF (Android 13's performance hints, what native games use): the main thread's CPU time each
+ * frame goes to the system with a target, and it picks the lowest clocks that meet it instead of
+ * the highest (less heat). The CPU time, not the time between frames: waits don't count, and at a
+ * lower clock the same work takes longer, so the system finds where it fits. LAA_NO_ADPF=1: off;
+ * LAA_ADPF_TARGET_MS (default 12: margin to 16.7 for the frames that do more). */
+#ifdef __ANDROID__
+static struct {
+    void *session;
+    int (*report)(void *session, int64_t ns);
+    int64_t last_cpu_ns;
+} adpf;
+
+static int64_t thread_cpu_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
+static void adpf_start(void) {
+    if (getenv("LAA_NO_ADPF")) return;
+    void *lib = dlopen("libandroid.so", RTLD_NOW);
+    void *(*get_manager)(void) = lib ? (void *(*)(void))dlsym(lib, "APerformanceHint_getManager") : NULL;
+    void *(*create)(void *, const int32_t *, size_t, int64_t) =
+        lib ? (void *(*)(void *, const int32_t *, size_t, int64_t))dlsym(lib, "APerformanceHint_createSession") : NULL;
+    adpf.report = lib ? (int (*)(void *, int64_t))dlsym(lib, "APerformanceHint_reportActualWorkDuration") : NULL;
+    void *manager = get_manager ? get_manager() : NULL;
+    double target_ms = getenv("LAA_ADPF_TARGET_MS") ? atof(getenv("LAA_ADPF_TARGET_MS")) : 12.0;
+    int32_t tid = (int32_t)gettid();
+    if (manager && create && adpf.report) adpf.session = create(manager, &tid, 1, (int64_t)(target_ms * 1e6));
+    fprintf(stderr, "nvn: performance hints %s (target %.1f ms of the main thread's CPU time a frame)\n",
+            adpf.session ? "on" : "not available", target_ms);
+    adpf.last_cpu_ns = thread_cpu_ns();
+}
+
+static void adpf_frame(void) {
+    if (!adpf.session) return;
+    int64_t now = thread_cpu_ns(), used = now - adpf.last_cpu_ns;
+    adpf.last_cpu_ns = now;
+    if (used > 0) adpf.report(adpf.session, used);
+}
+#endif
+
 void nvn_present(const Window *w, uint64_t texture) {
     static int pinned;
-    if (!pinned) { pinned = 1; pin_to_fastest_core(); }
+    if (!pinned) {
+        pinned = 1;
+        pin_to_fastest_core();
+#ifdef __ANDROID__
+        adpf_start();
+#endif
+    }
+#ifdef __ANDROID__
+    adpf_frame();
+#endif
     int32_t rect[4];
     display_rect(w, rect);
     frames++;
