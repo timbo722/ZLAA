@@ -29,14 +29,21 @@
 /* Messages the system sends the game (AppletMessage) */
 enum { MSG_FOCUS_STATE_CHANGED = 15, MSG_OPERATION_MODE_CHANGED = 30, MSG_PERFORMANCE_MODE_CHANGED = 31 };
 
-/* Handheld for now: the game renders at 720p. (Docked = 1, 1080p.) */
 #define OPERATION_MODE_HANDHELD 0
 #define OPERATION_MODE_DOCKED   1
-/* Docked: the game renders 1920x1080 (the Thor's screen is 1080p, and its GPU is far faster
- * than the Switch's). LAA_HANDHELD=1: handheld, 1280x720. */
+/* Handheld: the game renders up to 1280x720, as a Switch does on its own screen. Docked: up to
+ * 1920x1080, as on a TV. On Android handheld by default (the player, 2026-10-29: the Thor is a
+ * handheld; docked kept the GPU at its top clock, ~1.4 W more): LAA_DOCKED=1 for 1080p. On the
+ * desktop docked by default. LAA_HANDHELD=1: handheld anywhere. */
 static int operation_mode = -1;
 int applet_handheld(void) {
-    if (operation_mode < 0) operation_mode = getenv("LAA_HANDHELD") ? OPERATION_MODE_HANDHELD : OPERATION_MODE_DOCKED;
+    if (operation_mode < 0) {
+#ifdef __ANDROID__
+        operation_mode = getenv("LAA_DOCKED") && !getenv("LAA_HANDHELD") ? OPERATION_MODE_DOCKED : OPERATION_MODE_HANDHELD;
+#else
+        operation_mode = getenv("LAA_HANDHELD") ? OPERATION_MODE_HANDHELD : OPERATION_MODE_DOCKED;
+#endif
+    }
     return operation_mode == OPERATION_MODE_HANDHELD;
 }
 
