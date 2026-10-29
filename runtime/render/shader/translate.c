@@ -7,7 +7,11 @@
  *   - a shader with no jumps is emitted straight;
  *   - otherwise we cut it into basic blocks and emit
  *         pc = 0; loop { switch (pc) { case 0: ...; pc = 3; break; case 1: ... } }
- *     which is structured whatever the jumps are. Each block ends by setting pc.
+ *     which is structured whatever the jumps are. Each block ends by setting pc. A pc that is no
+ *     block, or more than DISPATCH_LIMIT jumps in one invocation, ends the shader (writing its
+ *     outputs) instead of looping on: a translation mistake or a loop that never meets its exit
+ *     hung the GPU until the kernel reset it (~350 ms pauses and frames with black bins on the
+ *     Thor, "GPU hang detected" in dmesg).
  * SSY/SYNC and PBK/BRK (the hardware's "jump back to the point pushed earlier") are resolved
  * here, once, by following the pushes along every path: each SYNC/BRK gets a fixed target.
  */
@@ -845,6 +849,8 @@ static void emit_predicated(T *t, const Inst *in, uint32_t next_block) {
     label(t, merge);
 }
 
+#define DISPATCH_LIMIT 65536
+
 static void emit_program(T *t) {
     if (t->nblocks == 1) {                               /* straight-line code */
         for (uint32_t i = 0; i < t->ninst && !t->terminated; i++) emit_predicated(t, &t->inst[i], 0);
@@ -853,7 +859,8 @@ static void emit_program(T *t) {
     }
     /* pc = 0; loop { switch (pc) { case n: block n } } */
     t->pc_var = local_var(t, t->t_u32, cu(t, 0));
-    uint32_t header = spv_id(&t->s), dispatch = spv_id(&t->s), merge = spv_id(&t->s);
+    uint32_t jumps_var = local_var(t, t->t_u32, cu(t, 0));
+    uint32_t header = spv_id(&t->s), dispatch = spv_id(&t->s), merge = spv_id(&t->s), no_block = spv_id(&t->s);
     t->loop_continue = spv_id(&t->s);
     t->switch_merge = spv_id(&t->s);
     uint32_t *case_label = malloc(t->nblocks * sizeof *case_label);
@@ -868,7 +875,7 @@ static void emit_program(T *t) {
     {
         uint32_t *w = malloc((2 + 2 * t->nblocks) * 4);
         w[0] = pc;
-        w[1] = t->switch_merge;
+        w[1] = no_block;                             /* (default: pc is no block) */
         for (uint32_t b = 0; b < t->nblocks; b++) { w[2 + 2 * b] = b; w[3 + 2 * b] = case_label[b]; }
         spv_inst(&t->s, SEC_BODY, SpvOpSwitch, w, 2 + 2 * t->nblocks);
         free(w);
@@ -890,12 +897,18 @@ static void emit_program(T *t) {
         }
     }
     free(case_label);
+    label(t, no_block);                              /* a pc that is no block: end here */
+    emit_outputs_at_exit(t);
+    spv_op(&t->s, SEC_BODY, SpvOpReturn, 0);
     label(t, t->switch_merge);
     branch(t, t->loop_continue);
-    label(t, t->loop_continue);
-    branch(t, header);
+    label(t, t->loop_continue);                      /* jumps++; on to the next block, or out after too many */
+    uint32_t jumps = op2(t, SpvOpIAdd, t->t_u32, load(t, t->t_u32, jumps_var), cu(t, 1));
+    store(t, jumps_var, jumps);
+    spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, op2(t, SpvOpULessThan, t->t_bool, jumps, cu(t, DISPATCH_LIMIT)), header, merge);
     label(t, merge);
-    spv_op(&t->s, SEC_BODY, SpvOpUnreachable, 0);
+    emit_outputs_at_exit(t);
+    spv_op(&t->s, SEC_BODY, SpvOpReturn, 0);
     t->terminated = 1;
 }
 
