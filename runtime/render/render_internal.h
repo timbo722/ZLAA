@@ -73,6 +73,7 @@ void render_collect_compile_stats(void);          /* background pipeline compile
 #define RENDER_CONTEXTS 8                        /* submissions the CPU may be ahead of the GPU (submit.c) */
 int render_context(void);                        /* the context being recorded (0 .. NCTX-1) */
 int render_serial_done(uint64_t serial);
+void render_pools_reap(void);                     /* free finalized pools the GPU is done with (buffer.c) */
 /* LAA_GPU_TIMING_AT: GPU timestamp after a command, with a label to add its time to */
 extern int render_gpu_timing;
 extern int render_passes;

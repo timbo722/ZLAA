@@ -160,19 +160,42 @@ void render_pool_created(uint64_t storage, uint64_t size) {
     if (export_pool(storage, size, new_import()) == 0) nimports++;
 }
 
+/* A finalized pool's buffer and memory, freed once the GPU is past the last submission that may
+ * use them (render_pools_reap). Waiting for the GPU right there (render_flush) took up to a frame
+ * while holding the GPU lock: the game frees pools on its worker threads as the map streams, and
+ * each one stalled the main thread's frame (most slow frames while walking). The game itself only
+ * finalizes a pool its GPU work is done with (NVN's rule); what still refers to it is ours: work
+ * recorded or in flight. */
+#define GRAVES 256
+static struct { VkBuffer buffer; VkDeviceMemory memory; uint64_t serial; } graves[GRAVES];
+static int ngraves;
+
+void render_pools_reap(void) {                       /* (under the GPU lock: at present and pool changes) */
+    for (int i = 0; i < ngraves;) {
+        if (!render_serial_done(graves[i].serial)) { i++; continue; }
+        vkDestroyBuffer(vk.device, graves[i].buffer, NULL);
+        vkFreeMemory(vk.device, graves[i].memory, NULL);
+        graves[i] = graves[--ngraves];
+    }
+}
+
 void render_pool_destroyed(uint64_t storage, uint64_t size) {
     if (!vk.fd_export) return;
+    render_pools_reap();
     for (int i = 0; i < nimports; i++) {
         Import *im = &imports[i];
         if (im->storage != storage || im->size != size) continue;
-        render_flush();                  /* nothing recorded or running may still use it */
-        /* The game keeps its memory and what's in it: copy that into ordinary pages first */
+        /* The game keeps its memory and what's in it: copy that into ordinary pages, which take
+         * the guest addresses over (the GPU keeps using the Vulkan memory until it is freed) */
         void *pages = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (pages == MAP_FAILED) { perror("render: mmap"); return; }
         memcpy(pages, gptr(storage), size);
         if (gmem_place(storage, size, pages) != 0) { munmap(pages, size); return; }
-        vkDestroyBuffer(vk.device, im->buffer, NULL);
-        vkFreeMemory(vk.device, im->memory, NULL);
+        if (ngraves == GRAVES) {                     /* (many at once: wait, as before) */
+            render_flush();
+            render_pools_reap();
+        }
+        graves[ngraves++] = (typeof(graves[0])){ im->buffer, im->memory, render_fence_serial() };
         *im = imports[--nimports];
         last_import = -1;
         return;

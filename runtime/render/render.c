@@ -491,6 +491,7 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     if (reupload < 0) reupload = getenv("LAA_REUPLOAD") != NULL;
     if (reupload) render_reupload_all();
     render_images_new_frame();
+    render_pools_reap();
     if (!active || !texture) return;
     HostImage *h = render_image_find(texture);
     if (h) render_image_flush_clear(h);              /* (cleared but never drawn into) */
