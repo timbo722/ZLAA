@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     }
     if (c_off > size || c_size > size - c_off) c_off = c_size = 0;
     ShaderInfo info;
-    if (shader_translate(code, size, stage, code + c_off, c_size, have_control ? control : NULL, SHADER_GL_DEPTH, 0, &info) != 0) {
+    if (shader_translate(code, size, stage, code + c_off, c_size, have_control ? control : NULL, SHADER_GL_DEPTH, 0, 0, &info) != 0) {
         printf("%s: FAIL (%s)\n", argv[1], info.error);
         return 1;
     }

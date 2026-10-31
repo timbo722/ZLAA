@@ -11,6 +11,7 @@
 #include "render/shader/shader.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -24,23 +25,55 @@ static HostShader *shader_buckets[SHADER_BUCKETS];
 static VkBuffer capture_buffer;
 static float *capture_ptr;
 
-static void make_capture_buffer(void) {
-    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 256 * 32,
+/* A small buffer that shaders write through its GPU address and the CPU reads (host-visible, coherent) */
+static void *debug_buffer(VkDeviceSize size, VkBuffer *buffer, uint64_t *address) {
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                               .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT };
-    VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &capture_buffer));
+    VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, buffer));
     VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(vk.device, capture_buffer, &req);
+    vkGetBufferMemoryRequirements(vk.device, *buffer, &req);
     VkMemoryAllocateFlagsInfo flags = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
                                         .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
     VkMemoryAllocateInfo mi = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &flags, .allocationSize = req.size,
         .memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
     VkDeviceMemory mem;
+    void *p;
     VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &mem));
-    VK_CHECK(vkBindBufferMemory(vk.device, capture_buffer, mem, 0));
-    VK_CHECK(vkMapMemory(vk.device, mem, 0, VK_WHOLE_SIZE, 0, (void **)&capture_ptr));
+    VK_CHECK(vkBindBufferMemory(vk.device, *buffer, mem, 0));
+    VK_CHECK(vkMapMemory(vk.device, mem, 0, VK_WHOLE_SIZE, 0, &p));
+    VkBufferDeviceAddressInfo ai = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = *buffer };
+    *address = vkGetBufferDeviceAddress(vk.device, &ai);
+    return p;
+}
+
+static void make_capture_buffer(void) {
+    capture_ptr = debug_buffer(256 * 32, &capture_buffer, &shader_capture_address);
     for (int i = 0; i < 256 * 8; i++) capture_ptr[i] = -9;
-    VkBufferDeviceAddressInfo ai = { .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = capture_buffer };
-    shader_capture_address = vkGetBufferDeviceAddress(vk.device, &ai);
+}
+
+/* LAA_SHADER_GUARD=1: shaders that end at the translator's dispatch guard (a jump to no block, or
+ * a loop that never ends: it would hang the GPU) say so in a buffer, checked every frame */
+static VkBuffer guard_buffer;
+static volatile uint32_t *guard_ptr;
+
+void render_guard_init(void) {                       /* (before any shader is translated) */
+    if (!getenv("LAA_SHADER_GUARD")) return;
+    guard_ptr = debug_buffer(16 * SHADER_GUARD_SLOTS, &guard_buffer, &shader_guard_address);
+    memset((void *)guard_ptr, 0, 16 * SHADER_GUARD_SLOTS);
+    fprintf(stderr, "render: LAA_SHADER_GUARD: shaders report hitting the dispatch guard\n");
+}
+
+void render_guard_check(uint64_t frame) {
+    if (!guard_ptr) return;
+    for (int i = 0; i < SHADER_GUARD_SLOTS; i++) {
+        volatile uint32_t *e = guard_ptr + 4 * i;
+        if (!e[2]) continue;
+        uint64_t id = e[0] | (uint64_t)e[1] << 32;
+        fprintf(stderr, "render: frame %llu: shader %#llx hit the dispatch guard: %s\n", (unsigned long long)frame,
+                (unsigned long long)id, e[2] == SHADER_GUARD_NO_BLOCK ? "jump to no block" : e[2] == SHADER_GUARD_JUMPS ? "too many jumps (a loop that never ends)"
+                                                     : "4096 jumps in one invocation (a loop running long)");
+        e[2] = 0;
+    }
 }
 
 void render_capture_print(uint64_t frame) {
@@ -84,6 +117,7 @@ static HostShader *make_shader(uint64_t code, uint64_t control, int stage, uint3
         static int full_half = -1;                   /* LAA_FULL_HALF=1: packed halves in full precision */
         if (full_half < 0) full_half = getenv("LAA_FULL_HALF") != NULL;
         if (full_half) options |= SHADER_FULL_HALF;
+        if (shader_guard_address) options |= SHADER_GUARD_REPORT;
         if (!ahead && stage == SHADER_VERTEX && getenv("LAA_DEBUG_VS") && strtoull(getenv("LAA_DEBUG_VS"), NULL, 0) == code) {
             if (!capture_buffer) make_capture_buffer();
             options |= SHADER_DEBUG_CAPTURE;
@@ -93,7 +127,7 @@ static HostShader *make_shader(uint64_t code, uint64_t control, int stage, uint3
             options |= SHADER_DEBUG_CONST;
             if (getenv("LAA_DEBUG_FS_INPUT")) options |= ((int)strtol(getenv("LAA_DEBUG_FS_INPUT"), NULL, 0) + 1) << 8;
         }
-        int ok = shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, &s->info) == 0;
+        int ok = shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, code, &s->info) == 0;
         if (ok && s->info.ntextures > RENDER_LAYOUT_TEXTURES) {   /* (not in the set layout: never seen so far) */
             snprintf(s->info.error, sizeof s->info.error, "%u textures, the layout has %d", s->info.ntextures, RENDER_LAYOUT_TEXTURES);
             fprintf(stderr, "render: shader %#llx: %s\n", (unsigned long long)code, s->info.error);

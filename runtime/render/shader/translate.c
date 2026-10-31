@@ -11,7 +11,8 @@
  *     block, or more than DISPATCH_LIMIT jumps in one invocation, ends the shader (writing its
  *     outputs) instead of looping on: a translation mistake or a loop that never meets its exit
  *     hung the GPU until the kernel reset it (~350 ms pauses and frames with black bins on the
- *     Thor, "GPU hang detected" in dmesg).
+ *     Thor, "GPU hang detected" in dmesg). With SHADER_GUARD_REPORT the shader also says so
+ *     (report_guard), to find the shader whose translation is wrong.
  * SSY/SYNC and PBK/BRK (the hardware's "jump back to the point pushed earlier") are resolved
  * here, once, by following the pushes along every path: each SYNC/BRK gets a fixed target.
  */
@@ -850,6 +851,21 @@ static void emit_predicated(T *t, const Inst *in, uint32_t next_block) {
 }
 
 #define DISPATCH_LIMIT 65536
+#define DISPATCH_WARN 4096                           /* (SHADER_GUARD_REPORT: reported, not stopped) */
+
+uint64_t shader_guard_address;
+
+/* SHADER_GUARD_REPORT: write id and reason in this shader's slot (shader.h); the runtime reads
+ * and clears it (render_guard_check). Every invocation that gets here writes the same words. */
+static void report_guard(T *t, uint32_t reason) {
+    if (!(t->options & SHADER_GUARD_REPORT) || !shader_guard_address) return;
+    uint64_t at = shader_guard_address + 16ull * shader_guard_slot(t->id);
+    uint32_t base = op2(t, SpvOpCompositeConstruct, t->t_v2u, cu(t, (uint32_t)at), cu(t, (uint32_t)(at >> 32)));
+    uint32_t words[3] = { (uint32_t)t->id, (uint32_t)(t->id >> 32), reason };
+    t->uses_pointers = 1;
+    for (int k = 0; k < 3; k++)
+        spv_op(&t->s, SEC_BODY, SpvOpStore, 4, word_ptr(t, base, 4u * (uint32_t)k), cu(t, words[k]), SpvMemoryAccessAlignedMask, 4);
+}
 
 static void emit_program(T *t) {
     if (t->nblocks == 1) {                               /* straight-line code */
@@ -870,6 +886,18 @@ static void emit_program(T *t) {
     spv_op(&t->s, SEC_BODY, SpvOpLoopMerge, 3, merge, t->loop_continue, SpvLoopControlMaskNone);
     branch(t, dispatch);
     label(t, dispatch);
+    if ((t->options & SHADER_GUARD_REPORT) && shader_guard_address) {
+        /* report a loop early (DISPATCH_WARN jumps): a wrong loop over a whole screen of pixels gets
+         * the GPU reset long before any pixel reaches DISPATCH_LIMIT, and its reports with it */
+        uint32_t warn = spv_id(&t->s), go_on = spv_id(&t->s);
+        uint32_t cond = op2(t, SpvOpIEqual, t->t_bool, load(t, t->t_u32, jumps_var), cu(t, DISPATCH_WARN));
+        spv_op(&t->s, SEC_BODY, SpvOpSelectionMerge, 2, go_on, SpvSelectionControlMaskNone);
+        spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, cond, warn, go_on);
+        label(t, warn);
+        report_guard(t, SHADER_GUARD_LONG);
+        branch(t, go_on);
+        label(t, go_on);
+    }
     uint32_t pc = load(t, t->t_u32, t->pc_var);
     spv_op(&t->s, SEC_BODY, SpvOpSelectionMerge, 2, t->switch_merge, SpvSelectionControlMaskNone);
     {
@@ -898,6 +926,7 @@ static void emit_program(T *t) {
     }
     free(case_label);
     label(t, no_block);                              /* a pc that is no block: end here */
+    report_guard(t, SHADER_GUARD_NO_BLOCK);
     emit_outputs_at_exit(t);
     spv_op(&t->s, SEC_BODY, SpvOpReturn, 0);
     label(t, t->switch_merge);
@@ -907,6 +936,7 @@ static void emit_program(T *t) {
     store(t, jumps_var, jumps);
     spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, op2(t, SpvOpULessThan, t->t_bool, jumps, cu(t, DISPATCH_LIMIT)), header, merge);
     label(t, merge);
+    report_guard(t, SHADER_GUARD_JUMPS);
     emit_outputs_at_exit(t);
     spv_op(&t->s, SEC_BODY, SpvOpReturn, 0);
     t->terminated = 1;
@@ -940,7 +970,7 @@ void shader_constants(const uint8_t *control, uint32_t *offset, uint32_t *size) 
 
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
                      uint32_t constants_size, const uint8_t *control, int options, uint32_t extra_outputs,
-                     ShaderInfo *info) {
+                     uint64_t id, ShaderInfo *info) {
     memset(info, 0, sizeof *info);
     info->stage = stage;
     for (int i = 0; i < 3; i++) info->local_size[i] = 1;
@@ -954,6 +984,7 @@ int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t 
     t->info = info;
     t->stage = stage;
     t->options = options;
+    t->id = id;
     t->c1 = constants;
     t->c1_size = constants_size;
     uint32_t header = stage == SHADER_COMPUTE ? 0 : 0x80;

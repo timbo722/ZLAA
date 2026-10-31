@@ -17,8 +17,8 @@ done
 snap
 for z in /sys/class/thermal/thermal_zone*; do t=$(cat $z/type); case $t in cpu-1-*|gpuss-*) echo "T $t $(cat $z/temp)";; esac; done
 EOF
-cp $S/pw_probe.sh /mnt/c/Users/you/pw_probe.sh
-$W -s <serial> push 'C:\Users\you\pw_probe.sh' /data/local/tmp/pw_probe.sh > /dev/null
+cp $S/pw_probe.sh /mnt/c/Users/you/Documents/LAARecomp/transfer/pw_probe.sh
+$W -s <serial> push 'C:\Users\you\Documents\LAARecomp\transfer\pw_probe.sh' /data/local/tmp/pw_probe.sh > /dev/null
 ( sleep 15; for i in $(seq 600); do
     [ "$($W -s <serial> shell "grep -c 'frame 1800 presented' $A/log.txt 2>/dev/null" | tr -d "\r")" = "1" ] && break; sleep 0.2
   done

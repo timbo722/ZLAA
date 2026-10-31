@@ -456,6 +456,11 @@ void render_submit(void) {
         render_wait_serial(serial, UINT64_MAX);
         collect_stamps();
     }
+    /* LAA_SERIALIZE=1 (debugging): wait for every submission, so the GPU never runs behind the
+     * game: shows whether something goes wrong because the game changes memory the GPU still reads */
+    static int serialize = -1;
+    if (serialize < 0) serialize = getenv("LAA_SERIALIZE") != NULL;
+    if (serialize) render_wait_serial(serial, UINT64_MAX);
 }
 
 void render_flush(void) {

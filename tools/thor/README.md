@@ -7,7 +7,7 @@ Shell/Python helpers for test runs on the Thor over USB (Windows adb at
 
 Test runs write their own `env.txt` and use the test saves (`LAA_SAVE_DIR=files/testsave`, a copy of
 the player's saves in Mabe Village; `files/testsave2` is the beach with the sword). At the end they put back
-the player's play settings from `C:\Users\you\laa_env_play.txt`.
+the player's play settings from `C:\Users\you\Documents\LAARecomp\env\laa_env_play.txt`.
 
 | script | what it does |
 |---|---|
@@ -18,6 +18,7 @@ the player's play settings from `C:\Users\you\laa_env_play.txt`.
 | `thor_heat.sh`, `gpuload.sh tag` | GPU busy x clock (real GPU work, Mcycles/s), temps, per-thread CPU (`threads.py`) |
 | `thor_perf.sh prefix frame secs` | simpleperf (frame pointers) over a window of a run |
 | `watch_play_env.sh tag [KEY=VAL...]` | the player plays: waits for the app, screenrecords in 3-min pieces, captures log.txt + logcat (it notices the app closing only between pieces) |
+| `guard_hunt.sh n [KEY=VAL...]` | repeat the beach script with LAA_SHADER_GUARD=1 until a shader reports hitting the translator's dispatch guard (which shader used to hang the GPU) |
 | `beach_hang.sh n` | repeat the beach script (`beach_script.txt`, testsave2) until dmesg shows a new GPU hang |
 | `frames.py log` | per-frame summary of an LAA_TRACE_SYNC log (slow frames and what was in them) |
 | `passes.py log` | a frame's passes/copies/clears in order from an LAA_TRACE_PIPELINES log |

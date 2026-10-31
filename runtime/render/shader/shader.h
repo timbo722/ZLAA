@@ -58,11 +58,20 @@ enum { SHADER_GL_DEPTH = 1,         /* vertex: clip-space z is -w..w (OpenGL/NVN
        SHADER_DEBUG_CAPTURE = 4,     /* vertex (debugging): also store position and attribute 1 of
                                       * each vertex at shader_capture_address (slot instance * 4 +
                                       * vertex % 4, 8 floats each, 256 slots) */
-       SHADER_FULL_HALF = 16 };      /* packed-half arithmetic in full 32-bit precision (not RelaxedPrecision) */
+       SHADER_FULL_HALF = 16,        /* packed-half arithmetic in full 32-bit precision (not RelaxedPrecision) */
+       SHADER_GUARD_REPORT = 32 };   /* (debugging) a shader that ends at the dispatch guard (translate.c)
+                                      * writes id and why in its slot at shader_guard_address */
 extern uint64_t shader_capture_address;   /* a GPU address (buffer device address) */
+/* SHADER_GUARD_REPORT: SHADER_GUARD_SLOTS slots of 4 words (id low, id high, reason, 0); a shader's
+ * slot is shader_guard_slot(id); reason SHADER_GUARD_NO_BLOCK, _JUMPS (ended) or _LONG (4096 jumps: warned) */
+#define SHADER_GUARD_SLOTS 1024
+enum { SHADER_GUARD_NO_BLOCK = 1, SHADER_GUARD_JUMPS = 2, SHADER_GUARD_LONG = 3 };
+static inline uint32_t shader_guard_slot(uint64_t id) { return (uint32_t)((id >> 4) * 0x9E3779B1u >> 22) & (SHADER_GUARD_SLOTS - 1); }
+extern uint64_t shader_guard_address;
+/* id: the shader's address (what SHADER_GUARD_REPORT writes) */
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
                      uint32_t constants_size, const uint8_t *control, int options, uint32_t extra_outputs,
-                     ShaderInfo *info);
+                     uint64_t id, ShaderInfo *info);
 /* Where a shader's constants are, from its NVN control section: offset from the start of the
  * code and size in bytes. */
 void shader_constants(const uint8_t *control, uint32_t *offset, uint32_t *size);

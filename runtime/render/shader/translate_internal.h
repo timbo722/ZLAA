@@ -34,6 +34,7 @@ typedef struct {
     const uint8_t *c1;               /* the shader's constants (c1) */
     uint32_t c1_size;
     int stage, options;
+    uint64_t id;                     /* the shader's address (SHADER_GUARD_REPORT) */
     uint32_t sph[20];                /* shader program header (graphics stages) */
     ShaderInfo *info;
 

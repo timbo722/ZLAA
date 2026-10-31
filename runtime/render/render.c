@@ -59,6 +59,7 @@ static void *present_thread(void *arg);
 
 int render_init(void *sdl_window) {
     if (vk_init(sdl_window) != 0) return -1;
+    render_guard_init();
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                     .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = vk.queue_family };
     VK_CHECK(vkCreateCommandPool(vk.device, &pci, NULL, &out.pool));
@@ -512,6 +513,7 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     render_timestamps_update();
     render_gpu_timing_frame(nvn_frame_count());
     render_capture_print(nvn_frame_count());
+    render_guard_check(nvn_frame_count());
     if (osd.on < 0 && (osd.on = getenv("LAA_SHOW_FPS") && atoi(getenv("LAA_SHOW_FPS")))) osd_init();
     if (osd.on) osd_update();
     int from_gpu = h && h->gpu_written;

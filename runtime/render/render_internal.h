@@ -115,6 +115,8 @@ HostShader *render_shader(uint64_t code, uint64_t control, int stage, uint32_t e
 #define RENDER_LAYOUT_TEXTURES 16   /* textures per stage in the descriptor set layout (the game's shaders use up to
                                      * 14; the Adreno copies the whole set at each bind: 32 made that copy twice as big) */
 void render_capture_print(uint64_t frame);       /* LAA_DEBUG_VS (pipeline.c) */
+void render_guard_init(void);                    /* LAA_SHADER_GUARD (pipeline.c) */
+void render_guard_check(uint64_t frame);
 
 typedef struct { uint8_t src_color, dst_color, src_alpha, dst_alpha, eq_color, eq_alpha; } BlendKey;
 
