@@ -9,13 +9,23 @@
 #include <pthread.h>
 #include <time.h>
 
-/* recomp_func_table is sorted by address, so binary search it. */
+const RecompFuncEntry *game_funcs;
+uint64_t game_func_count;
+const RecompModuleInfo *game_modules;
+uint64_t game_module_count;
+
+void recomp_use_game(const RecompFuncEntry *funcs, uint64_t nfuncs, const RecompModuleInfo *mods, uint64_t nmods) {
+    game_funcs = funcs, game_func_count = nfuncs;
+    game_modules = mods, game_module_count = nmods;
+}
+
+/* game_funcs is sorted by address, so binary search it. */
 RecompFunc recomp_lookup(uint64_t addr) {
-    uint64_t lo = 0, hi = recomp_func_count;
+    uint64_t lo = 0, hi = game_func_count;
     while (lo < hi) {
         uint64_t mid = (lo + hi) / 2;
-        if (recomp_func_table[mid].addr == addr) return recomp_func_table[mid].fn;
-        if (recomp_func_table[mid].addr < addr) lo = mid + 1; else hi = mid;
+        if (game_funcs[mid].addr == addr) return game_funcs[mid].fn;
+        if (game_funcs[mid].addr < addr) lo = mid + 1; else hi = mid;
     }
     return NULL;
 }
@@ -44,7 +54,7 @@ static int dispatch_ready;
 static void dispatch_build(void) {
     dispatch = calloc(1u << DISPATCH_BITS, sizeof *dispatch);
     if (!dispatch) { fprintf(stderr, "recomp: out of memory\n"); abort(); }
-    for (uint64_t i = 0; i < recomp_func_count; i++) dispatch_put(recomp_func_table[i].addr, recomp_func_table[i].fn);
+    for (uint64_t i = 0; i < game_func_count; i++) dispatch_put(game_funcs[i].addr, game_funcs[i].fn);
     __atomic_store_n(&dispatch_ready, 1, __ATOMIC_RELEASE);
 }
 

@@ -142,6 +142,7 @@ static int check(const Test *t, uint64_t a, uint64_t b, int fails) {
 }
 
 int main(void) {
+    recomp_use_game(recomp_func_table, recomp_func_count, NULL, 0);   /* (linked in, no game library) */
     recomp_init(&cpu);
     int failed = 0;
     long calls = 0;

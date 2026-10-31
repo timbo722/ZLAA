@@ -6,7 +6,8 @@
 # An APK is a zip file holding:
 #   AndroidManifest.xml   what the app is (binary XML, made by aapt2)
 #   classes.dex           its Java code, compiled for Android's runtime (here: only SDL's activity)
-#   lib/arm64-v8a/*.so    native libraries: SDL3 and libmain.so (our runtime + the whole game)
+#   lib/arm64-v8a/*.so    native libraries: SDL3 and libmain.so (our runtime; the game itself is
+#                         a library built from your own dump, pushed by tools/thor/deploy.sh)
 #   META-INF/...          a signature: Android installs only signed apps
 #
 # Needs (see tools/android/README.md): $LAA_ANDROID with jdk-17*/, sdk/ (build-tools 35,

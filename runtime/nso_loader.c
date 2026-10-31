@@ -121,22 +121,22 @@ int nso_load_exefs(const char *exefs_dir, uint64_t base, GameImage *out) {
     if (out->count == 0) FAIL("no NSO modules (main, sdk, rtld, ...) found in %s", exefs_dir);
 
     /* ---- 2. are these the files the code was generated from? ---- */
-    int same = out->count == (int)recomp_module_count;
+    int same = out->count == (int)game_module_count;
     for (int k = 0; same && k < out->count; k++) {
         const GameModule *m = &out->mods[k];
-        const RecompModuleInfo *g = &recomp_modules[k];
+        const RecompModuleInfo *g = &game_modules[k];
         same = strcmp(m->name, g->name) == 0 && m->base == g->base && m->size == g->size &&
                memcmp(m->build_id, g->build_id, 32) == 0;
     }
     if (!same) {
-        fprintf(stderr, "loader: the ExeFS in %s is not the one this build was generated from.\n"
+        fprintf(stderr, "loader: the ExeFS in %s is not the one the game library was generated from.\n"
                         "        Expected:", exefs_dir);
-        for (uint64_t k = 0; k < recomp_module_count; k++) fprintf(stderr, " %s", recomp_modules[k].name);
+        for (uint64_t k = 0; k < game_module_count; k++) fprintf(stderr, " %s", game_modules[k].name);
         fprintf(stderr, " (main build id ");
-        for (uint64_t k = 0; k < recomp_module_count; k++)
-            if (strcmp(recomp_modules[k].name, "main") == 0)
-                for (int b = 0; b < 8; b++) fprintf(stderr, "%02X", recomp_modules[k].build_id[b]);
-        fprintf(stderr, "...). Check the game version (we target v1.0.0, no update).\n");
+        for (uint64_t k = 0; k < game_module_count; k++)
+            if (strcmp(game_modules[k].name, "main") == 0)
+                for (int b = 0; b < 8; b++) fprintf(stderr, "%02X", game_modules[k].build_id[b]);
+        fprintf(stderr, "...). Rebuild the game library from this dump.\n");
         goto fail;
     }
 

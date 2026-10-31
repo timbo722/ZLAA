@@ -11,6 +11,7 @@
 #endif
 #include "nvn.h"
 #include "kernel.h"
+#include "game_lib.h"
 #ifdef LAA_HAVE_SDL
 #include "render/render.h"
 #endif
@@ -452,6 +453,8 @@ static const char *stall_name(uintptr_t pc, char *buf, size_t size) {
 #if defined(__aarch64__)
     pc &= (1ull << 39) - 1;                          /* (return addresses carry pointer-authentication bits) */
 #endif
+    const char *game = game_lib_symbol(pc, buf, size, NULL);   /* (the game's functions: hidden symbols) */
+    if (game) return game;
     if (pc && dladdr((void *)pc, &info) && info.dli_sname) return info.dli_sname;
     snprintf(buf, size, "%#lx", (unsigned long)pc);
     return buf;

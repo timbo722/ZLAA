@@ -28,10 +28,12 @@
 #include "nvn/nvn.h"
 #include "movie/movie.h"
 #include "trace_symbols.h"
+#include "game_lib.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <unistd.h>
 #include "input.h"
 #ifdef LAA_HAVE_SDL
 #include <SDL3/SDL.h>
@@ -211,6 +213,12 @@ static void android_setup(const char **exefs, const char **romfs) {
     setenv("LAA_CACHE_DIR", path, 0);
     snprintf(path, sizeof path, "%s/cache/pipelines.bin", base);   /* (where it was before: read once) */
     setenv("LAA_CACHE_FALLBACK", path, 0);
+    /* the game library: opened from internal storage (the shared folder can't hold code that runs);
+     * one built on a PC and pushed to <app folder>/game is copied there first */
+    snprintf(path, sizeof path, "%s/game", internal ? internal : base);
+    setenv("LAA_GAME_DIR", path, 0);
+    snprintf(path, sizeof path, "%s/game", base);
+    setenv("LAA_GAME_IMPORT", path, 0);
     snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
     snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
     *exefs = exefs_path;
@@ -254,6 +262,15 @@ int main(int argc, char **argv) {
     }
     if (gmem_reserve() != 0) return 1;
 
+    /* the game's code: libgame-<build id>.so, in $LAA_GAME_DIR or next to this program */
+    char game_dir[4096];
+    const char *dir = getenv("LAA_GAME_DIR");
+    ssize_t n = dir ? 0 : readlink("/proc/self/exe", game_dir, sizeof game_dir - 1);
+    if (dir) snprintf(game_dir, sizeof game_dir, "%s", dir);
+    else if (n > 0) { game_dir[n] = 0; *strrchr(game_dir, '/') = 0; }
+    else snprintf(game_dir, sizeof game_dir, ".");
+    if (game_lib_load(exefs, game_dir, getenv("LAA_GAME_IMPORT")) != 0) return 1;
+
     GameImage img;
     if (nso_load_exefs(exefs, LOAD_BASE, &img) != 0) return 1;
     for (int k = 0; k < img.count; k++) {
@@ -262,7 +279,7 @@ int main(int argc, char **argv) {
         for (int b = 0; b < 8; b++) printf("%02X", m->build_id[b]);
         printf("...\n");
     }
-    printf("Loaded %d modules; %" PRIu64 " recompiled functions linked\n", img.count, recomp_func_count);
+    printf("Loaded %d modules; %" PRIu64 " recompiled functions linked\n", img.count, game_func_count);
 
     if (dump) return dump_image(&img, dump) != 0;
 

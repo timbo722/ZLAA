@@ -454,10 +454,12 @@ def main():
         for old in os.listdir(args.output):
             if old.startswith("funcs_") and old.endswith(".c") and old not in chunk_names:
                 os.remove(os.path.join(args.output, old))
-        # The list of generated files, for CMakeLists.txt
+        # The list of generated files, for CMakeLists.txt, and the build id of main (the first 8
+        # bytes in hex): the game library is libgame-<that>.so, how the runtime finds it (game_lib.c)
+        main_id = next((m.build_id[:8].hex().upper() for m in img.modules if m.name == "main"), "NOMAIN")
         write_if_changed(os.path.join(args.output, "sources.cmake"),
                          "set(GAME_SOURCES\n" + "".join(f"    ${{GAME_GEN_DIR}}/{n}\n" for n in chunk_names)
-                         + "    ${GAME_GEN_DIR}/functable.c\n)\n")
+                         + "    ${GAME_GEN_DIR}/functable.c\n)\n" + f"set(GAME_BUILD_ID {main_id})\n")
 
     if args.output:
         table = ['#include "funcs.h"\n'] if chunked else []

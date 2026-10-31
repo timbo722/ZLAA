@@ -59,13 +59,22 @@ typedef struct {
     uint8_t build_id[32];
 } RecompModuleInfo;
 
-/* Provided by the generated code */
-extern const RecompFuncEntry recomp_func_table[];
-extern const uint64_t recomp_func_count;
-extern const RecompModuleInfo recomp_modules[];
-extern const uint64_t recomp_module_count;
+/* Provided by the generated code. The game library (game_lib.c) exports only these (and
+ * game_abi.c's id); its functions are hidden, so calls between them stay direct. */
+#define RECOMP_EXPORT __attribute__((visibility("default")))
+RECOMP_EXPORT extern const RecompFuncEntry recomp_func_table[];
+RECOMP_EXPORT extern const uint64_t recomp_func_count;
+RECOMP_EXPORT extern const RecompModuleInfo recomp_modules[];
+RECOMP_EXPORT extern const uint64_t recomp_module_count;
 
 /* Provided by recomp_runtime.c */
+/* The game code the runtime runs: the tables above, from the game library (game_lib_load)
+ * or, for test programs, linked in (recomp_use_game before the first call) */
+extern const RecompFuncEntry *game_funcs;
+extern uint64_t game_func_count;
+extern const RecompModuleInfo *game_modules;
+extern uint64_t game_module_count;
+void recomp_use_game(const RecompFuncEntry *funcs, uint64_t nfuncs, const RecompModuleInfo *mods, uint64_t nmods);
 /* If set, asked first for every indirect call: returns a replacement for the guest function
  * at addr (high-level emulation, runtime/hle.c), or NULL to run the recompiled one. */
 extern RecompFunc (*recomp_override)(uint64_t addr);

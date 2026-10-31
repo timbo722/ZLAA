@@ -11,7 +11,7 @@ the player's play settings from `C:\Users\you\laa_env_play.txt`.
 
 | script | what it does |
 |---|---|
-| `deploy.sh` | build libmain.so + APK and install it (run from the repo root) |
+| `deploy.sh` | build libmain.so + APK and install it; build the game library (libgame-<id>.so) and push it to files/game/ when it changed (run from the repo root) |
 | `thor_run.sh out.txt [KEY=VAL...]` | start the game, script the input (`SCRIPT=...`, default: load the autosave), run to frame 3600, pull log.txt and the frame-3000 screenshot (`SHOT_EVERY=n`) |
 | `thor_power.sh tag [KEY=VAL...]` | thor_run + from frame 1800 for 30 s: average CPU cluster / GPU clocks, GPU busy, battery/usb current, temps, slow frames (`pw_report.py`) |
 | `thor_heat.sh`, `gpuload.sh tag` | GPU busy x clock (real GPU work, Mcycles/s), temps, per-thread CPU (`threads.py`) |

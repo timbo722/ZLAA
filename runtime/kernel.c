@@ -6,6 +6,7 @@
 #include "kernel.h"
 #include "guest_memory.h"
 #include "ipc.h"
+#include "game_lib.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,10 +16,10 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #if defined(__GLIBC__)
 #include <execinfo.h>
 #else
-#include <dlfcn.h>
 #include <unwind.h>
 #endif
 
@@ -231,27 +232,32 @@ static _Unwind_Reason_Code unwind_frame(struct _Unwind_Context *ctx, void *arg) 
 #endif
 
 static void print_backtrace(void) {
-#if defined(__GLIBC__)
-    /* Recompiled functions are named f_<guest address>, so the host backtrace says
-     * which guest functions were running. (Needs -rdynamic for the names.) */
+    /* Recompiled functions are named f_<guest address>, so the host backtrace says which guest
+     * functions were running. They are hidden symbols in the game library: game_lib_symbol
+     * names them from its table; dladdr names the runtime's (exported) functions. */
     void *frames[48];
+#if defined(__GLIBC__)
     int n = backtrace(frames, 48);
-    fprintf(stderr, "host backtrace (f_XXXX = guest function at 0xXXXX):\n");
-    fflush(stderr);
-    backtrace_symbols_fd(frames, n, 2);
 #else
-    /* Android (bionic): walk the stack with the unwinder, name each frame with dladdr */
+    /* Android (bionic): walk the stack with the unwinder */
     struct { void *pc[48]; int n; } bt = { { 0 }, 0 };
     _Unwind_Backtrace(unwind_frame, &bt);
-    fprintf(stderr, "host backtrace (f_XXXX = guest function at 0xXXXX):\n");
-    for (int i = 0; i < bt.n; i++) {
-        Dl_info info;
-        if (dladdr(bt.pc[i], &info) && info.dli_sname)
-            fprintf(stderr, "  %s+%#lx\n", info.dli_sname, (unsigned long)((char *)bt.pc[i] - (char *)info.dli_saddr));
-        else
-            fprintf(stderr, "  %p\n", bt.pc[i]);
-    }
+    int n = bt.n;
+    memcpy(frames, bt.pc, sizeof frames);
 #endif
+    fprintf(stderr, "host backtrace (f_XXXX = guest function at 0xXXXX):\n");
+    for (int i = 0; i < n; i++) {
+        char buf[64];
+        unsigned long off;
+        const char *game = game_lib_symbol((uintptr_t)frames[i], buf, sizeof buf, &off);
+        Dl_info info;
+        if (game)
+            fprintf(stderr, "  %s+%#lx\n", game, off);
+        else if (dladdr(frames[i], &info) && info.dli_sname)
+            fprintf(stderr, "  %s+%#lx\n", info.dli_sname, (unsigned long)((char *)frames[i] - (char *)info.dli_saddr));
+        else
+            fprintf(stderr, "  %p\n", frames[i]);
+    }
 }
 
 static void dump_cpu(const CPU *c) {
