@@ -11,6 +11,8 @@ $W -s <serial> shell am force-stop io.github.laarecomp
 $W -s <serial> shell "rm -f $A/shots/*"
 $W -s <serial> push 'C:\Users\you\laa_env.txt' $A/env.txt > /dev/null
 $W -s <serial> logcat -c
+TIS=/sys/devices/system/cpu/cpu7/cpufreq/stats/time_in_state   # (the prime core's time per clock: the governor
+tis_a=$($W -s <serial> shell cat $TIS | tr -d "\r")                #  varies it between sessions, and ms per frame with it)
 $W -s <serial> shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity > /dev/null
 # until frame 3600, the app dies, or 6 minutes pass; the app's log.txt has everything (logcat drops lines)
 for i in $(seq 72); do
@@ -19,8 +21,10 @@ for i in $(seq 72); do
   [ "$($W -s <serial> shell "grep -c 'host backtrace' $A/log.txt" | tr -d "\r")" != "0" ] && { echo CRASHED; break; }
   [ -z "$($W -s <serial> shell pidof io.github.laarecomp | tr -d "\r")" ] && { echo "APP EXITED"; break; }
 done
+tis_b=$($W -s <serial> shell cat $TIS | tr -d "\r")
 $W -s <serial> pull $A/log.txt 'C:\Users\you\laa_log.txt' > /dev/null
 cp /mnt/c/Users/you/laa_log.txt $out
+paste <(echo "$tis_a") <(echo "$tis_b") | awk '{d=$4-$2; t+=d; f+=d*$1; if (d>top) {top=d}} END {if (t) printf "thor_run: prime core (cpu7) average %.2f GHz over the run\n", f/t/1e6}' | tee -a $out
 $W -s <serial> pull $A/shots/frame_003000.png 'C:\Users\you\f3000.png' > /dev/null
 # leave the player's own settings behind (FPS counter, no test script), and stop the test run
 $W -s <serial> shell am force-stop io.github.laarecomp

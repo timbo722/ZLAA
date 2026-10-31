@@ -219,8 +219,12 @@ static void android_setup(const char **exefs, const char **romfs) {
     setenv("LAA_GAME_DIR", path, 0);
     snprintf(path, sizeof path, "%s/game", base);
     setenv("LAA_GAME_IMPORT", path, 0);
-    snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
-    snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
+    /* the dump: files/exefs + files/romfs, or LAA_EXEFS / LAA_ROMFS (another version next to it) */
+    const char *e = getenv("LAA_EXEFS"), *r = getenv("LAA_ROMFS");
+    if (e) snprintf(exefs_path, sizeof exefs_path, "%s", e);
+    else snprintf(exefs_path, sizeof exefs_path, "%s/exefs", base);
+    if (r) snprintf(romfs_path, sizeof romfs_path, "%s", r);
+    else snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
     *exefs = exefs_path;
     *romfs = romfs_path;
     printf("app folder: %s\n", base);
