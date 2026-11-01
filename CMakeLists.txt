@@ -48,13 +48,23 @@ if(ANDROID)
     add_compile_options(-march=armv8.2-a)
 endif()
 
-# Each chunk compile needs ~0.7 GB of RAM (16 jobs peaked at 11 GB). One job per core could
+# No debug info for the game by default (-g0 below): it doubled the compile time, and crash
+# reports name game functions from the library's own table (game_lib.c). ON: line numbers for a
+# debugger.
+option(LAA_GAME_DEBUG_INFO "debug info (-g) for the generated game code" OFF)
+
+# Each chunk compile needs up to ~0.7 GB of RAM (16 jobs peaked at 11 GB). One job per core could
 # run the machine out of memory, so game chunks get their own Ninja pool sized by RAM.
+# (NDK clang, the largest chunk: 0.52 GB peak without debug info, 0.73 GB with.)
 cmake_host_system_information(RESULT ram_mb QUERY TOTAL_PHYSICAL_MEMORY)
 cmake_host_system_information(RESULT cores QUERY NUMBER_OF_LOGICAL_CORES)
 math(EXPR jobs_by_ram "${ram_mb} / 1000")
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    math(EXPR jobs_by_ram "${ram_mb} / 1500")    # clang needs ~1.5x gcc's memory per chunk
+    if(LAA_GAME_DEBUG_INFO)
+        math(EXPR jobs_by_ram "${ram_mb} / 1500")
+    else()
+        math(EXPR jobs_by_ram "${ram_mb} / 750")
+    endif()
 endif()
 if(jobs_by_ram GREATER cores)
     set(jobs_by_ram ${cores})
@@ -135,6 +145,9 @@ set_target_properties(game PROPERTIES OUTPUT_NAME "game-${GAME_BUILD_ID}" JOB_PO
 target_include_directories(game PRIVATE "${GAME_GEN_DIR}" runtime)
 target_compile_definitions(game PRIVATE RECOMP_ABI="${RECOMP_ABI}")
 target_compile_options(game PRIVATE ${RECOMP_FLAGS} -w -fvisibility=hidden)
+if(NOT LAA_GAME_DEBUG_INFO)                     # (-g0 comes after the toolchain's -g)
+    target_compile_options(game PRIVATE -g0)
+endif()
 
 if(ANDROID)
     # Android: the host is libmain.so, which SDL's Java activity loads and starts (SDL_main).

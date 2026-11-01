@@ -9,5 +9,6 @@ for r in $(seq $n); do
   now=$($W -s <serial> shell "dmesg 2>/dev/null | grep -c 'GPU hang detected'" | tr -d '\r')
   hits=$(grep -c 'hit the dispatch guard' $S/guard$r.txt)
   echo "run $r: $hits guard reports; kernel GPU hangs $before -> $now"
+  [ "$now" != "$before" ] && $W -s <serial> shell "dmesg 2>/dev/null | grep -B5 -A40 'GPU hang detected'" > $S/guard${r}_dmesg.txt   # (the kernel's own report)
   if [ "$hits" != "0" ]; then grep 'hit the dispatch guard' $S/guard$r.txt | sed -E 's/frame [0-9]+: //' | sort | uniq -c; break; fi
 done

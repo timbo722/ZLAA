@@ -78,6 +78,7 @@ class Stats:
         self.unsupported_why = Counter()   # reason -> count
         self.unsupported_funcs = 0
         self.bad_jumps = 0                 # direct jumps to an address that isn't a known function start
+        self.unknown_br_funcs = 0          # functions with a BR that could land anywhere (all instructions labels)
 
 
 class FuncContext:
@@ -94,18 +95,207 @@ class FuncContext:
         return cname(addr) if addr in self.funcs else None
 
 
+# Where a BR goes. The compiler uses it for two things: switch statements (a jump table: the
+# targets are in the function, listed in the table) and tail calls through a code pointer loaded
+# from memory (PLT stubs, virtual functions). Anything else could land on any instruction: then
+# every instruction is a label and the dispatch lists them all (huge functions like that took
+# clang minutes each: its loop optimizations see the whole function as one loop).
+_WRITE_RE = re.compile(r"c->x\[(\d+)\] = (?!=)")
+
+
+_WRITES = {}
+
+
+def _writes(tr, insn, pc):
+    """The registers an instruction writes (from its C translation) and that C."""
+    if pc not in _WRITES:
+        try:
+            text = " ".join(tr.translate(insn, pc))
+            _WRITES[pc] = ({int(n) for n in _WRITE_RE.findall(text)}, text)
+        except Unsupported:
+            _WRITES[pc] = (None, "")
+    return _WRITES[pc]
+
+
+_BR_MEMO = {}
+
+
+def br_targets(img, funcs, start, size, br_pc):
+    if br_pc not in _BR_MEMO:                                # (both passes over the functions ask)
+        _BR_MEMO[br_pc] = _br_targets(img, funcs, start, size, br_pc)
+    return _BR_MEMO[br_pc]
+
+
+def _br_targets(img, funcs, start, size, br_pc):
+    """The jump table's targets (a list), [] for a tail call through a loaded code pointer, None if unknown.
+    Two table forms (registers followed back through the function; xT may be set long before):
+      older clang (the game): adrp xT; add xT, xT, #lo; ldrsw xE, [xT, xI, lsl #2]; add xD, xE, xT;
+        br xD - entries are signed offsets from the table
+      newer clang: ... ldrb/ldrh wE, [xT, xI(, lsl #1)]; adr xB, base; add xD, xB, xE, lsl #2; br xD -
+        entries are base + 4 * entry
+    How many: from the bound check (cmp wI, #N; ... b.hi/b.hs) or an index masked to 2^k values
+    when in sight; otherwise (offset tables) entries are read while they land on an instruction of
+    the function - all the real ones, maybe a few more (harmless: only more labels)."""
+    tr = Translator(FuncContext(funcs, start, size, set()))
+
+    def last_def(reg, before, near=True):
+        """(pc, insn) of the last instruction before `before` that writes x<reg>: within 24
+        instructions, or back to the function's start"""
+        for pc in range(before - 4, max(start, before - 4 * 24) - 4 if near else start - 4, -4):
+            w = img.word(pc)
+            regs, _ = _writes(tr, w, pc)
+            if regs is None:
+                return None
+            if reg in regs:
+                return pc, w
+        return None
+
+    d = (img.word(br_pc) >> 5) & 31
+    dd = last_def(d, br_pc)
+    if not dd:
+        return None
+    if re.search(rf"c->x\[{d}\] = ld64\(", _writes(tr, dd[1], dd[0])[1]):
+        return []                                            # a code pointer from memory: a tail call
+    if any("c->x[30] = ld64(" in _writes(tr, img.word(pc), pc)[1] for pc in range(max(start, br_pc - 32), br_pc, 4)):
+        return []                                            # after the epilogue (LR restored): a tail call
+
+    def value(reg, before, depth=0):
+        """x<reg>'s value at `before` if it is an address made by adrp/adr (+ add #imm, mov), and
+        whether that was found nearby (else from far back in the function, past branches: less sure)"""
+        if depth > 6:
+            return None, False
+        dv = last_def(reg, before)
+        near = dv is not None
+        dv = dv or last_def(reg, before, near=False)
+        if not dv:
+            return None, False
+        pc, w = dv
+        if (w & 0x1F000000) == 0x10000000:                   # adrp / adr
+            imm = ((w >> 5) & 0x7FFFF) << 2 | (w >> 29) & 3
+            if w >> 31:
+                imm <<= 12
+                return (pc & ~0xFFF) + (imm - (1 << 33) if imm & (1 << 32) else imm), near
+            return pc + (imm - (1 << 21) if imm & (1 << 20) else imm), near
+        if (w & 0xFF800000) == 0x91000000:                   # add xD, xN, #imm
+            v, n = value((w >> 5) & 31, pc, depth + 1)
+            return (None, False) if v is None else (v + (((w >> 10) & 0xFFF) << (12 if (w >> 22) & 1 else 0)), near and n)
+        if (w & 0xFFE0FFE0) == 0xAA0003E0:                   # mov xD, xM
+            v, n = value((w >> 16) & 31, pc, depth + 1)
+            return v, near and n
+        return None, False
+
+    def masked(r, before):
+        """(the and's source register, its last writer, the mask) if x<r> is <source> & mask"""
+        dr = last_def(r, before)
+        m = dr and re.search(rf"c->x\[{r}\] = .*c->x\[(\d+)\] & (0x[0-9a-f]+)ull", _writes(tr, dr[1], dr[0])[1])
+        return m and (int(m.group(1)), last_def(int(m.group(1)), dr[0]), m.group(2))
+
+    def bound(i, load_pc):
+        """how many entries the index x<i> (used at load_pc) can select, and whether that is sure (a
+        compare) or a cap (a mask, maybe only a type conversion); (None, False) if not in sight"""
+        idx = {i}
+        di = last_def(i, load_pc)
+        if di and (di[1] & 0x7FE0FFE0) == 0x2A0003E0:        # mov wI, wJ (orr wI, wzr, wJ)
+            idx.add((di[1] >> 16) & 31)
+        mi = masked(i, load_pc)
+        for pc in range(load_pc - 4, max(start, load_pc - 4 * 24) - 4, -4):
+            c = img.word(pc)
+            if (c & 0x7F80001F) == 0x7100001F and ((c >> 5) & 31 in idx or     # cmp wJ/xJ, #N on the index,
+                                                   mi and masked((c >> 5) & 31, pc) == mi):   # or the same and
+                n = (c >> 10) & 0xFFF if not (c >> 22) & 1 else ((c >> 10) & 0xFFF) << 12
+                for q in range(pc + 4, load_pc, 4):          # its b.cond
+                    if (img.word(q) & 0xFF000010) == 0x54000000:
+                        cond = img.word(q) & 15
+                        count = n + 1 if cond == 8 else n if cond == 2 else None   # b.hi: 0..N; b.hs: 0..N-1
+                        return count, count is not None
+                return None, False
+        mask = int(mi[2], 16) if mi else 0
+        if mask and mask < 4096 and not mask & (mask + 1):  # index & (2^k - 1)
+            return mask + 1, False
+        return None, False
+
+    def read_table(table, count, sure, entry):
+        """the targets: `count` entries if sure, else (up to `count`) while they land on the function's
+        instructions"""
+        targets = []
+        for k in range(count or 4096):
+            target = entry(table, k)
+            if not (start <= target < start + size) or target & 3:
+                if sure:
+                    return None                              # not this table
+                break
+            targets.append(target)
+        return targets or None
+
+    def offset_entry(table, k):
+        off = img.word(table + 4 * k)
+        return table + (off - (1 << 32) if off & (1 << 31) else off)
+
+    w = dd[1]
+    a, b = (w >> 5) & 31, (w >> 16) & 31
+    if (w & 0xFFE0FC00) == 0x8B000800:                       # add xD, xB, xE, lsl #2: newer clang
+        de = last_def(b, dd[0])
+        base, _ = value(a, dd[0])
+        if not de or base is None:
+            return None
+        if (de[1] & 0xFFE0FC00) == 0x38606800:               # ldrb wE, [xT, xI]
+            size_log = 0
+        elif (de[1] & 0xFFE0FC00) == 0x78607800:             # ldrh wE, [xT, xI, lsl #1]
+            size_log = 1
+        else:
+            return None
+        table, _ = value((de[1] >> 5) & 31, de[0])
+        count, sure = bound((de[1] >> 16) & 31, de[0])
+        if table is None or not count:
+            return None
+        def small_entry(t, k):
+            word = img.word((t + (k << size_log)) & ~3)
+            e = (word >> (8 * ((t + (k << size_log)) & 3))) & (0xFF if size_log == 0 else 0xFFFF)
+            return base + 4 * e
+        return read_table(table, count, sure, small_entry)
+    if (w & 0xFFE0FC00) != 0x8B000000:                       # add xD, xA, xB (no shift): older clang
+        return None
+    for e, t in ((a, b), (b, a)):
+        de = last_def(e, dd[0])
+        if not de or (de[1] & 0xFFE0FC00) != 0xB8A07800:     # ldrsw xE, [xB, xI, lsl #2]
+            continue
+        table, near = value((de[1] >> 5) & 31, de[0])
+        if table is not None and value(t, dd[0])[0] != table:   # (the add adds the same table address)
+            continue
+        count, sure = bound((de[1] >> 16) & 31, de[0])
+        if not sure and (table is None or not near):
+            return None                                      # (an unsure table address needs a bound)
+        if table is None:
+            # (the address went through the stack: every table address the function makes whose
+            # `count` entries all land on its instructions - by chance none would)
+            found = set()
+            for pc in range(start, start + size, 4):
+                if (img.word(pc) & 0x9F000000) == 0x90000000:
+                    v = value(img.word(pc) & 31, pc + 8)[0]
+                    if v is not None and v != pc & ~0xFFF:
+                        found |= set(read_table(v, count, True, offset_entry) or ())
+            return sorted(found) or None
+        return read_table(table, count, sure, offset_entry)
+    return None
+
+
 def recompile_function(img, funcs, start, name, size, stats, comments=True):
     words = [img.word(pc) for pc in range(start, start + size, 4)]
-    # Pass 1: which addresses are branch targets inside this function? Is there a BR (jump table)?
-    labels, has_br = set(), False
+    # Pass 1: which addresses are branch targets inside this function? Where do its BRs go?
+    labels, has_br, br_cases = set(), False, set()
     for k, w in enumerate(words):
         info = branch_info(w, start + 4 * k)
         if info and info[0] in ("b", "cond") and start <= info[1] < start + size:
             labels.add(info[1])
         if info and info[0] == "br":
             has_br = True
-    if has_br:  # an indirect jump could land on any instruction
-        labels.update(range(start, start + size, 4))
+            if br_cases is not None:
+                targets = br_targets(img, funcs, start, size, start + 4 * k)
+                br_cases = None if targets is None else br_cases | set(targets)
+    if has_br and br_cases is None:   # an indirect jump that could land on any instruction
+        br_cases = set(range(start, start + size, 4))
+        stats.unknown_br_funcs += 1
+    labels |= br_cases
 
     # Pass 2: translate
     ctx = FuncContext(funcs, start, size, labels)
@@ -140,13 +330,13 @@ def recompile_function(img, funcs, start, name, size, stats, comments=True):
     if has_br:
         body.append("dispatch:")
         body.append("    switch (jt) {")
-        for pc in range(start, start + size, 4):
+        for pc in sorted(br_cases):
             body.append(f"    case {hx(pc)}: goto L_{pc:x};")
         body.append("    default: recomp_call_addr(c, jt); return;  /* indirect tail call */")
         body.append("    }")
-    # (not in big functions with an indirect-jump dispatch, where every instruction is an entry
-    # point and the C compiler spills the locals everywhere, nor in huge ones)
-    cache = not os.environ.get("RECOMP_NO_REGISTER_CACHE") and size // 4 <= 3000 and not (has_br and size // 4 > 300)
+    # (not in big functions where an indirect jump could land on any instruction, where every
+    # instruction is an entry point and the C compiler spills the locals everywhere, nor in huge ones)
+    cache = not os.environ.get("RECOMP_NO_REGISTER_CACHE") and size // 4 <= 3000 and not (len(br_cases) > 300)
     if COLLECT_ABI:
         plain = [_REG_RE.sub(_local, l) for l in body]
         text = "\n".join(plain)
@@ -360,6 +550,7 @@ def write_report(path, img, fs, stats, seconds):
     lines.append(f"Instructions: {stats.instructions}  translated: {stats.instructions - total_bad} ({pct:.2f}%)")
     lines.append(f"Functions containing an unsupported instruction: {stats.unsupported_funcs} of {len(fs.funcs)}")
     lines.append(f"Jumps into the middle of another function (need handling later): {stats.bad_jumps}")
+    lines.append(f"Functions with a BR that could land anywhere (every instruction a label): {stats.unknown_br_funcs}")
     lines.append("")
     lines.append("Unsupported instructions by category:")
     for why, n in stats.unsupported_why.most_common():
