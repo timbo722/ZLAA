@@ -34,6 +34,8 @@ except ImportError:
 
 STACK_SIZE = 1 << 20          # 1 MiB guest stack for tests
 CHUNK_INSNS = 30000           # instructions per chunk file (~1.8 MB of C, ~10 s to compile)
+CACHE_MAX_INSNS = 20000       # registers in locals only in functions up to this size (all of the game: the
+                              # largest has 11430; uncached, a big one took clang minutes, see cache_registers)
 
 
 def disasm(word, pc):
@@ -336,7 +338,7 @@ def recompile_function(img, funcs, start, name, size, stats, comments=True):
         body.append("    }")
     # (not in big functions where an indirect jump could land on any instruction, where every
     # instruction is an entry point and the C compiler spills the locals everywhere, nor in huge ones)
-    cache = not os.environ.get("RECOMP_NO_REGISTER_CACHE") and size // 4 <= 3000 and not (len(br_cases) > 300)
+    cache = not os.environ.get("RECOMP_NO_REGISTER_CACHE") and size // 4 <= CACHE_MAX_INSNS and not (len(br_cases) > 300)
     if COLLECT_ABI:
         plain = [_REG_RE.sub(_local, l) for l in body]
         text = "\n".join(plain)
