@@ -52,6 +52,7 @@ static void *vsync_thread(void *arg) {
         next.tv_nsec += 16666667;
         if (next.tv_nsec >= 1000000000) { next.tv_sec++; next.tv_nsec -= 1000000000; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        if (kernel_wait_resumed()) clock_gettime(CLOCK_MONOTONIC, &next);   /* (the app was in the background) */
         kevent_signal(vsync_event);
         if (nvn_sync_tracing()) fprintf(stderr, "sync: %.2f vsync\n", next.tv_sec * 1e3 + next.tv_nsec / 1e6);
     }

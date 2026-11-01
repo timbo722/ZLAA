@@ -15,6 +15,9 @@ int render_active(void);
 void render_present(uint64_t texture, const int32_t crop[4]);
 /* The window changed size. */
 void render_resized(void);
+/* Android: the app went to the background (1: the pipeline cache is saved, in case Android ends
+ * the app there) or came back (0: with a new window). */
+void render_background(int on);
 /* Record the GPU side of one NVN command (nvn/exec.c), and finish a submission. */
 void render_command(const Cmd *r);
 void render_submitted(void);

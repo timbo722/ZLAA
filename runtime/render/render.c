@@ -22,6 +22,8 @@
 
 static int active;
 static volatile int resized;
+static volatile int window_new;      /* Android gave us a new window (back from the background) */
+static int surface_lost;             /* the window is gone: frames are dropped until a new one comes */
 
 pthread_mutex_t render_queue_lock = PTHREAD_MUTEX_INITIALIZER;   /* vk.queue is used by two threads */
 
@@ -54,6 +56,10 @@ static struct {
 
 int render_active(void) { return active; }
 void render_resized(void) { resized = 1; }
+void render_background(int on) {
+    if (on) vk_save_pipeline_cache();
+    else window_new = 1;
+}
 
 static void *present_thread(void *arg);
 
@@ -428,12 +434,28 @@ static void *present_thread(void *arg) {
         uint32_t width = out.width, height = out.height;
         pthread_mutex_unlock(&out.lock);
 
-        if (resized) {
+        if (window_new) {
+            window_new = 0;
+            pthread_mutex_lock(&render_queue_lock);
+            vkDeviceWaitIdle(vk.device);
+            surface_lost = vk_recreate_surface() != 0;
+            pthread_mutex_unlock(&render_queue_lock);
+            fprintf(stderr, "present: %s\n", surface_lost ? "no new window surface" : "new window surface");
+            resized = 0;
+        }
+        if (resized && !surface_lost) {
             resized = 0;
             pthread_mutex_lock(&render_queue_lock);
             vkDeviceWaitIdle(vk.device);
             vk_create_swapchain(vk.extent.width, vk.extent.height);
             pthread_mutex_unlock(&render_queue_lock);
+        }
+        if (surface_lost) {                          /* (this frame isn't shown) */
+            pthread_mutex_lock(&out.lock);
+            out.busy = -1;
+            pthread_cond_broadcast(&out.cond);
+            pthread_mutex_unlock(&out.lock);
+            continue;
         }
         uint32_t index;
         struct timespec ta, tb;
@@ -445,6 +467,7 @@ static void *present_thread(void *arg) {
          * the game's frames behind it. Normally a few ms.) */
         if (acquire_ms > 30) fprintf(stderr, "present: acquiring a window image took %.0f ms\n", acquire_ms);
         if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
+        else if (r == VK_ERROR_SURFACE_LOST_KHR) surface_lost = 1;   /* (Android took the window: the app is hidden) */
         else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkAcquireNextImageKHR", r);
         if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
             VkCommandBuffer cmd = out.cmd[s];
@@ -490,6 +513,7 @@ static void *present_thread(void *arg) {
             if (present_ms > 30) fprintf(stderr, "present: vkQueuePresentKHR took %.0f ms (holding the queue)\n", present_ms);
             /* (SUBOPTIMAL is fine: Android says it whenever it rotates for us; resizes come as SDL events) */
             if (r == VK_ERROR_OUT_OF_DATE_KHR) resized = 1;
+            else if (r == VK_ERROR_SURFACE_LOST_KHR) surface_lost = 1;
             else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) vk_fail("vkQueuePresentKHR", r);
         }
         pthread_mutex_lock(&out.lock);

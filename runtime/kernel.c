@@ -408,3 +408,23 @@ int kernel_start_main(void) {
 }
 
 int kernel_wait_main(int timeout_ms) { return kthread_wait_main(main_thread, timeout_ms); }
+
+static pthread_mutex_t suspend_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t suspend_cond = PTHREAD_COND_INITIALIZER;
+static int suspended;
+
+void kernel_set_suspended(int on) {
+    pthread_mutex_lock(&suspend_lock);
+    suspended = on;
+    pthread_cond_broadcast(&suspend_cond);
+    pthread_mutex_unlock(&suspend_lock);
+}
+
+int kernel_wait_resumed(void) {
+    if (!__atomic_load_n(&suspended, __ATOMIC_ACQUIRE)) return 0;   /* (the usual case, without the lock) */
+    pthread_mutex_lock(&suspend_lock);
+    int waited = suspended;
+    while (suspended) pthread_cond_wait(&suspend_cond, &suspend_lock);
+    pthread_mutex_unlock(&suspend_lock);
+    return waited;
+}

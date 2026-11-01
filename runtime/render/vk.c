@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <time.h>
+#include <unistd.h>
 
 static void load_pipeline_cache(void);
 
@@ -50,7 +51,8 @@ const char *vk_result_name(VkResult r) {
 
 void vk_fail(const char *what, VkResult r) {
     fprintf(stderr, "vulkan: %s failed: %s (%d)\n", what, vk_result_name(r), (int)r);
-    exit(1);
+    fflush(NULL);
+    _exit(1);           /* (exit() would tear down the driver's state under the game's running threads) */
 }
 
 int vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
@@ -206,8 +208,9 @@ static int create_device(void) {
             VkFormatProperties fp;
             vkGetPhysicalDeviceFormatProperties(vk.gpu, depth[i], &fp);
             VkFormatFeatureFlags f = fp.optimalTilingFeatures;
-            fprintf(stderr, "vulkan: depth format %d: attachment %d sampled %d blit src %d blit dst %d\n", depth[i],
-                    !!(f & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT), !!(f & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+            fprintf(stderr, "vulkan: depth format %d: attachment %d sampled %d filter linear %d blit src %d blit dst %d\n",
+                    depth[i], !!(f & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT), !!(f & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+                    !!(f & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT),
                     !!(f & VK_FORMAT_FEATURE_BLIT_SRC_BIT), !!(f & VK_FORMAT_FEATURE_BLIT_DST_BIT));
         }
     }
@@ -369,14 +372,32 @@ static void *save_cache_now(void *arg) {
     return NULL;
 }
 
+static SDL_Window *window;
+
 int vk_init(void *sdl_window) {
-    SDL_Window *window = sdl_window;
+    window = sdl_window;
     if (create_instance() != 0) return -1;
     if (!SDL_Vulkan_CreateSurface(window, vk.instance, NULL, &vk.surface)) {
         fprintf(stderr, "vulkan: no window surface (%s)\n", SDL_GetError());
         return -1;
     }
     if (pick_gpu() != 0 || create_device() != 0) return -1;
+    int w, h;
+    SDL_GetWindowSizeInPixels(window, &w, &h);
+    return vk_create_swapchain((uint32_t)w, (uint32_t)h);
+}
+
+/* Android takes the window away when the app goes to the background and gives a new one when it
+ * comes back: a new surface and swapchain on that. The caller holds the queue, idle. */
+int vk_recreate_surface(void) {
+    if (vk.swapchain) vkDestroySwapchainKHR(vk.device, vk.swapchain, NULL);
+    vk.swapchain = VK_NULL_HANDLE;
+    SDL_Vulkan_DestroySurface(vk.instance, vk.surface, NULL);
+    vk.surface = VK_NULL_HANDLE;
+    if (!SDL_Vulkan_CreateSurface(window, vk.instance, NULL, &vk.surface)) {
+        fprintf(stderr, "vulkan: no window surface (%s)\n", SDL_GetError());
+        return -1;
+    }
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     return vk_create_swapchain((uint32_t)w, (uint32_t)h);

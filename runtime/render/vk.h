@@ -88,6 +88,7 @@ extern Vk vk;
 /* vk.c */
 int vk_init(void *sdl_window);               /* 0 on success */
 int vk_create_swapchain(uint32_t width, uint32_t height);
+int vk_recreate_surface(void);                /* (Android: back from the background) */
 uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);   /* exits if there is none */
 int vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);   /* -1 if there is none */
 const char *vk_result_name(VkResult r);

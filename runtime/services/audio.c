@@ -243,6 +243,7 @@ static void *frame_thread(void *arg) {
         next.tv_nsec += 5000000;
         if (next.tv_nsec >= 1000000000) { next.tv_sec++; next.tv_nsec -= 1000000000; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        if (kernel_wait_resumed()) clock_gettime(CLOCK_MONOTONIC, &next);   /* (the app was in the background) */
         float mix[OUT_FRAMES][2] = { { 0 } };
         static int stats = -1;                       /* LAA_AUDIO_STATS=1: mixing time and voices, every 2 s */
         static double busy_us;

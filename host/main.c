@@ -92,6 +92,23 @@ static const struct { SDL_Scancode key; uint64_t bit; } keys[] = {
     { SDL_SCANCODE_G, BTN_DOWN }, { SDL_SCANCODE_F, BTN_LEFT }, { SDL_SCANCODE_H, BTN_RIGHT },
 };
 
+/* Android's HOME (or the other screen's app switcher): the game is suspended in the background,
+ * as on a Switch, and resumes on the new window it comes back with. An event watch: SDL calls it as
+ * the event happens (its event loop then blocks until the app is back). */
+static bool SDLCALL lifecycle(void *userdata, SDL_Event *e) {
+    (void)userdata;
+    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+        printf("app: in the background, game suspended\n");
+        kernel_set_suspended(1);
+        render_background(1);
+    } else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+        printf("app: back in the foreground\n");
+        render_background(0);
+        kernel_set_suspended(0);
+    }
+    return true;
+}
+
 /* Presses as events, so a quick tap isn't lost between two samples (input_press) */
 static void input_event(const SDL_Event *e) {
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && pad && e->gbutton.which == SDL_GetGamepadID(pad))
@@ -315,6 +332,7 @@ int main(int argc, char **argv) {
 #endif
             if (!window) fprintf(stderr, "No window: %s\n", SDL_GetError());
             else if (render_init(window) != 0) { SDL_DestroyWindow(window); window = NULL; }
+            else SDL_AddEventWatch(lifecycle, NULL);
         }
     }
 #else
@@ -327,7 +345,7 @@ int main(int argc, char **argv) {
 #ifdef LAA_HAVE_SDL
         SDL_Event e;
         while (window && SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_QUIT) exit(0);
+            if (e.type == SDL_EVENT_QUIT) { fflush(NULL); _exit(0); }   /* (exit() under running threads: see vk_fail) */
             if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) render_resized();
             input_event(&e);
         }
