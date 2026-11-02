@@ -12,7 +12,7 @@
  * In shared memory each font is an 8-byte header (magic, size XOR key) then the TrueType
  * data. A .bfttf file is an 8-byte header (magic, size) then the TrueType data, every 32-bit
  * word read big-endian and XOR'd with a key; we decode it. switchbrew.org/wiki/Shared_Database_services
- * (tools/extract_fonts.py takes the .bfttf files out of your own firmware dump)
+ * (optional: this project has no tool that extracts them, and never asks for keys)
  */
 #include "services.h"
 #include "kernel.h"
