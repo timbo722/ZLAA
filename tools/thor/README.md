@@ -21,6 +21,7 @@ the player's play settings from `C:\Users\you\Documents\LAARecomp\env\laa_env_pl
 | `guard_hunt.sh n [KEY=VAL...]` | repeat the beach script with LAA_SHADER_GUARD=1 until a shader reports hitting the translator's dispatch guard (which shader used to hang the GPU); a new kernel GPU hang's report is saved as guard<run>_dmesg.txt |
 | `ab_game.sh tag rounds libA libB` | two game libraries (files in Documents\LAARecomp\game) alternated A B A B on the village walk: CPU cycles in the game library and the runtime (simpleperf, clock-independent), the prime core's clock, frames over 20 ms; leaves B installed |
 | `flicker.sh tag [KEY=VAL...]` | the grass walk east of the house, every frame 2600-2700 captured, flicker measured (`flicker_energy.py dir first last [sigma] [--panel]`; --panel: frames scaled to the 1920x1080 panel first, to compare 720p with 1080p) |
+| `menu_test.sh outdir [s]` | the menus without hands (LAA_UI_SCRIPT): start screen, settings, Play, the pause menu at 45 s, settings, Resume; menu frames as PNGs + a screencap at the end; test save; play env put back |
 | `background_test.sh prefix` | HOME in the middle of the game and back, twice: the game must stop while hidden and go on, on a new window surface, after (screencaps of the panel) |
 | `beach_hang.sh n` | repeat the beach script (`beach_script.txt`, testsave2) until dmesg shows a new GPU hang |
 | `frames.py log` | per-frame summary of an LAA_TRACE_SYNC log (slow frames and what was in them) |

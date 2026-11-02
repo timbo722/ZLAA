@@ -14,6 +14,11 @@
  * the runtime. 0 = ok; otherwise it says why on stderr. */
 int game_lib_load(const char *exefs_dir, const char *lib_dir, const char *import_dir);
 
+/* Without loading anything: <exefs_dir>/main's build id (16 hex digits) into id, and whether the
+ * game library made from it is there (in lib_dir or import_dir). 0 = there, 1 = not built yet,
+ * -1 = no main in exefs_dir. */
+int game_lib_find(const char *exefs_dir, const char *lib_dir, const char *import_dir, char id[17]);
+
 /* "f_<guest address>" (written into buf) if pc is inside the game library's code, else NULL;
  * *offset (if not NULL) = pc's distance from that function's start. (The game's functions
  * are hidden symbols there, so dladdr can't name them.) */

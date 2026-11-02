@@ -1,0 +1,28 @@
+<rml>
+<head>
+    <title>Start</title>
+    <link type="text/rcss" href="theme.rcss" />
+    <link type="text/rcss" href="start.rcss" />
+</head>
+<body>
+    <backdrop />
+    <shade />
+    <menu>
+        <hero class="intro-item delay-0">
+            <eyebrow>LAARecomp presents</eyebrow>
+            <game-title>Link's Awakening</game-title>
+        </hero>
+        <menu-list>
+            <button id="play" class="intro-item delay-1">Play</button>
+            <button id="settings" class="intro-item delay-2">Settings</button>
+            <button id="quit" class="intro-item delay-3">Quit</button>
+        </menu-list>
+    </menu>
+    <game-info class="intro-item delay-4">
+        <game-status id="game-status"><icon /><game-status-label id="game-status-label" /></game-status>
+        <game-version id="game-version" />
+    </game-info>
+    <version-info class="intro-item delay-5">Version <version-number id="version" /></version-info>
+    <controls-hint class="intro-item delay-5"><b>A</b> Select</controls-hint>
+</body>
+</rml>

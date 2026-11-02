@@ -1,0 +1,18 @@
+<rml>
+<head>
+    <title>Settings</title>
+    <link type="text/rcss" href="theme.rcss" />
+    <link type="text/rcss" href="window.rcss" />
+</head>
+<body>
+    <window id="window">
+        <tab-bar id="tab-bar" />
+        <close id="close" />
+        <content>
+            <pane id="rows" class="rows" />
+            <pane id="help" />
+        </content>
+        <footer><b>L</b> / <b>R</b> Tabs &#160;&#160; <b>A</b> / <b>&#8592;</b> <b>&#8594;</b> Change &#160;&#160; <b>B</b> Back</footer>
+    </window>
+</body>
+</rml>

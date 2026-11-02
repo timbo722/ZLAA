@@ -413,9 +413,9 @@ static pthread_mutex_t suspend_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t suspend_cond = PTHREAD_COND_INITIALIZER;
 static int suspended;
 
-void kernel_set_suspended(int on) {
+void kernel_set_suspended(int why, int on) {
     pthread_mutex_lock(&suspend_lock);
-    suspended = on;
+    suspended = on ? suspended | why : suspended & ~why;
     pthread_cond_broadcast(&suspend_cond);
     pthread_mutex_unlock(&suspend_lock);
 }

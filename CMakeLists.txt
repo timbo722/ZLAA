@@ -133,6 +133,24 @@ if(SDL3_FOUND)
 endif()
 target_compile_options(recomp_runtime PRIVATE ${RECOMP_FLAGS} -Wall -Wextra)
 
+# The menus (runtime/ui, C++): RmlUi + FreeType, static libraries made by tools/build_ui_deps.sh.
+# Without them the program starts the game straight away, as before. Their files: res/ (LAA_RES_DIR).
+find_package(RmlUi CONFIG QUIET)
+if(SDL3_FOUND AND RmlUi_FOUND)
+    enable_language(CXX)
+    execute_process(COMMAND git describe --always --dirty WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE LAA_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    add_library(laa_ui STATIC runtime/ui/ui.cpp runtime/ui/ui_render.cpp)
+    target_include_directories(laa_ui PRIVATE runtime)
+    target_link_libraries(laa_ui PRIVATE RmlUi::Core SDL3::SDL3)
+    target_compile_definitions(laa_ui PRIVATE LAA_VERSION="${LAA_VERSION}")
+    target_compile_options(laa_ui PRIVATE -Wall -fno-exceptions -fno-rtti)
+    set(LAA_UI laa_ui)
+    message(STATUS "Menus: RmlUi ${RmlUi_VERSION} (version ${LAA_VERSION})")
+else()
+    message(STATUS "Menus: off (no RmlUi: tools/build_ui_deps.sh)")
+endif()
+
 find_package(Threads REQUIRED)
 target_link_libraries(recomp_runtime PUBLIC Threads::Threads)
 
@@ -157,8 +175,8 @@ if(ANDROID)
     endif()
     add_library(main SHARED host/main.c)
     # the whole runtime, also what only the game library calls (recomp_bad_jump, recomp_aes, ...)
-    target_link_libraries(main PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_runtime>" m log android SDL3::SDL3)
-    target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1)
+    target_link_libraries(main PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_runtime>" ${LAA_UI} m log android SDL3::SDL3)
+    target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1>)
     target_compile_options(main PRIVATE -Wall)
     # Calls between the runtime's own functions go straight to them, not through the PLT: in a
     # shared library every global function could be replaced from outside, so each call took a
@@ -176,8 +194,9 @@ else()
     target_link_libraries(laa_host PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_runtime>" m)
     add_dependencies(laa_host game)              # (built together; opened from next to laa_host)
     if(SDL3_FOUND)
-        target_link_libraries(laa_host PRIVATE SDL3::SDL3)
-        target_compile_definitions(laa_host PRIVATE LAA_HAVE_SDL=1)
+        target_link_libraries(laa_host PRIVATE SDL3::SDL3 ${LAA_UI})
+        target_compile_definitions(laa_host PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1>
+                                   LAA_RES_DIR="${CMAKE_SOURCE_DIR}/res")
     endif()
     target_compile_options(laa_host PRIVATE -Wall)
     set_property(TARGET laa_host PROPERTY ENABLE_EXPORTS ON)

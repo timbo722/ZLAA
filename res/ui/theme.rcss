@@ -1,0 +1,133 @@
+/* theme.rcss - shared by all the menus: Dusklight's palette, sizes and fonts (its menus are CC0), and the basics
+   RmlUi leaves to us (it has no default style sheet: every element is inline until told otherwise). */
+body {
+    --font-family-body: Fira Sans;
+    --font-family-heading: Fira Sans Condensed;
+    --font-family-icons: Material Symbols Rounded;
+    --font-family-display: Alegreya SC;
+
+    --font-size-sm: 14dp;
+    --font-size-base: 15dp;
+    --font-size-md: 16dp;
+    --font-size-xl: 18dp;
+    --font-size-2xl: 20dp;
+    --font-size-3xl: 22dp;
+    --font-size-4xl: 24dp;
+    --font-size-6xl: 32dp;
+
+    --space-2xs: 2dp;
+    --space-xs: 4dp;
+    --space-sm: 8dp;
+    --space-md: 12dp;
+    --space-lg: 16dp;
+    --space-xl: 24dp;
+    --space-2xl: 32dp;
+
+    --radius-control: 7dp;
+    --radius-panel: 8dp;
+    --radius-window: 14dp;
+    --toolbar-height: 56dp;
+
+    --color-text-rgb: 224, 219, 200;
+    --color-text: rgb(var(--color-text-rgb));
+    --color-accent-rgb: 194, 164, 45;
+    --color-accent: rgb(var(--color-accent-rgb));
+    --color-border-rgb: 146, 135, 91;
+    --color-border: rgb(var(--color-border-rgb));
+    --color-surface-rgb: 21, 22, 16;
+    --color-interactive-rgb: 204, 184, 119;
+    --color-control-rgb: 17, 16, 10;
+    --color-neutral-rgb: 217, 217, 217;
+
+    --color-ready: #D8F999;
+    --color-bad: #FFC9C9;
+    --color-pending: #FEE685;
+    --color-muted: #A6A09B;
+
+    --button-background: rgba(var(--color-control-rgb), 20%);
+    --button-background-hover: rgba(var(--color-interactive-rgb), 20%);
+    --button-background-active: rgba(var(--color-interactive-rgb), 40%);
+
+    font-family: var(--font-family-body);
+    font-weight: normal;
+    font-style: normal;
+    font-size: var(--font-size-base);
+    color: var(--color-text);
+}
+
+*, *:before, *:after {
+    box-sizing: border-box;
+}
+
+div, p, heading, menu, hero, eyebrow, game-title, menu-list, content, window, pane, tab-bar, about, footer,
+select-button, button {
+    display: block;
+}
+
+p {
+    line-height: 1.5;
+    margin-bottom: var(--space-md);
+}
+
+heading {
+    font-family: var(--font-family-heading);
+    font-weight: bold;
+    font-size: var(--font-size-3xl);
+    line-height: 1.3;
+    margin-bottom: var(--space-sm);
+}
+
+.hint {
+    color: rgba(var(--color-text-rgb), 55%);
+}
+
+b {
+    font-weight: bold;
+}
+
+icon {
+    width: 1em;
+    height: 1em;
+    font-family: var(--font-family-icons);
+    font-weight: normal;
+    line-height: 1;
+    display: inline-block;
+    vertical-align: middle;
+}
+
+icon.lock {
+    decorator: text("&#xe897;" center center);
+}
+
+button, select-button {
+    tab-index: auto;
+    focus: auto;
+    nav: auto;
+    cursor: pointer;
+}
+
+button[disabled] {
+    focus: none;
+    tab-index: none;
+    cursor: default;
+}
+
+scrollbarvertical {
+    width: 6dp;
+    margin-right: 2dp;
+}
+
+scrollbarvertical slidertrack {
+    background-color: rgba(var(--color-neutral-rgb), 6%);
+    border-radius: 3dp;
+}
+
+scrollbarvertical sliderbar {
+    background-color: rgba(var(--color-border-rgb), 60%);
+    border-radius: 3dp;
+}
+
+scrollbarvertical sliderarrowdec, scrollbarvertical sliderarrowinc {
+    width: 0;
+    height: 0;
+}

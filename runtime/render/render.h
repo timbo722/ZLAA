@@ -58,5 +58,7 @@ void render_timestamps_update(void);            /* store the timestamps of finis
 /* The game made a memory pool, or is about to finalize one (buffer.c: its pages may become GPU memory) */
 void render_pool_created(uint64_t storage, uint64_t size);
 void render_pool_destroyed(uint64_t storage, uint64_t size);
+/* The pause menu shows (1): the game's frames are kept as its background, not shown (render_ui.h) */
+void render_ui_set(int on);
 
 #endif

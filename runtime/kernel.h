@@ -188,10 +188,12 @@ int kernel_start_main(void);
 int kernel_wait_main(int timeout_ms);
 void kernel_dump_state(void);       /* registers + host backtrace, for crash reports */
 
-/* The app in the background (Android): the timers that drive the game (vsync, audio) wait in
- * kernel_wait_resumed(), so the game stops at its next vsync wait, as a Switch suspends a game on
- * HOME. kernel_wait_resumed() returns 1 if it waited (the caller's timer then restarts from now). */
-void kernel_set_suspended(int on);
+/* The app in the background (Android) or the pause menu open: the timers that drive the game (vsync,
+ * audio) wait in kernel_wait_resumed(), so the game stops at its next vsync wait, as a Switch suspends
+ * a game on HOME. Each reason is a bit; the game runs when none is set. kernel_wait_resumed() returns 1
+ * if it waited (the caller's timer then restarts from now). */
+enum { SUSPEND_BACKGROUND = 1, SUSPEND_MENU = 2 };
+void kernel_set_suspended(int why, int on);
 int kernel_wait_resumed(void);
 
 /* Log of SVCs as they happen, when the LAA_TRACE_SVC environment variable is set */

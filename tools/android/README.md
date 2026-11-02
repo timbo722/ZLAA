@@ -20,6 +20,8 @@ installed system-wide.
          -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DCMAKE_INSTALL_PREFIX=$LAA_ANDROID/prefix
    cmake --build build/sdl3 && cmake --install build/sdl3
    ```
+4. **The menus' libraries** (RmlUi + FreeType, static; downloaded into `~/laar-build/deps/src`), for Android and the
+   desktop: `tools/build_ui_deps.sh` (without them the app starts the game straight away, with no menus).
 
 ## Building
 

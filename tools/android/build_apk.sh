@@ -8,6 +8,7 @@
 #   classes.dex           its Java code, compiled for Android's runtime (here: only SDL's activity)
 #   lib/arm64-v8a/*.so    native libraries: SDL3 and libmain.so (our runtime; the game itself is
 #                         a library built from your own dump, pushed by tools/thor/deploy.sh)
+#   assets/res/...        the menus' documents, style sheets and fonts (res/ in the repo)
 #   META-INF/...          a signature: Android installs only signed apps
 #
 # Needs (see tools/android/README.md): $LAA_ANDROID with jdk-17*/, sdk/ (build-tools 35,
@@ -44,9 +45,11 @@ javac -nowarn -source 11 -target 11 -classpath "$PLATFORM" -d "$OUT/classes" @"$
 "$STRIP" --strip-debug -o "$OUT/zip/lib/arm64-v8a/libmain.so" "$A/build/game/libmain.so"
 "$STRIP" --strip-debug -o "$OUT/zip/lib/arm64-v8a/libSDL3.so" "$A/prefix/lib/libSDL3.so"
 
-# 4. Into the zip: dex + libraries
+# 4. Into the zip: dex + libraries + the menus' files
 cp "$OUT/base.apk" "$OUT/unsigned.apk"
 cp "$OUT/dex/classes.dex" "$OUT/zip/"
+mkdir -p "$OUT/zip/assets"
+cp -r "$HERE/../../res" "$OUT/zip/assets/res"
 python3 - "$OUT/unsigned.apk" "$OUT/zip" <<'EOF'
 import os, sys, zipfile
 apk, root = sys.argv[1], sys.argv[2]

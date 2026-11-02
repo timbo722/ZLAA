@@ -13,6 +13,10 @@
 #include <vulkan/vulkan.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {               /* (the menus, runtime/ui, are C++) */
+#endif
+
 /* X(name): loaded with vkGetInstanceProcAddr(NULL, ...), before an instance exists */
 #define VK_GLOBAL_FUNCTIONS(X) \
     X(vkCreateInstance) X(vkEnumerateInstanceExtensionProperties) X(vkEnumerateInstanceLayerProperties)
@@ -55,7 +59,8 @@
     X(vkCmdFillBuffer) X(vkCmdCopyBuffer) X(vkCmdClearAttachments) X(vkGetBufferDeviceAddress) \
     X(vkGetMemoryFdKHR) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) X(vkGetQueryPoolResults) \
     X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkCmdPushConstants) \
-    X(vkCreatePipelineCache) X(vkGetPipelineCacheData) X(vkResetCommandPool)
+    X(vkCreatePipelineCache) X(vkGetPipelineCacheData) X(vkResetCommandPool) \
+    X(vkFreeDescriptorSets) X(vkDestroyFramebuffer)
 
 #define VK_DECLARE(name) extern PFN_##name name;
 VK_GLOBAL_FUNCTIONS(VK_DECLARE)
@@ -96,4 +101,7 @@ void vk_save_pipeline_cache(void);
 #define VK_CHECK(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) vk_fail(#call, r_); } while (0)
 void vk_fail(const char *what, VkResult r);   /* prints and exits */
 
+#ifdef __cplusplus
+}
+#endif
 #endif

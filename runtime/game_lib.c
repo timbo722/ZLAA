@@ -73,6 +73,16 @@ static int copy_file(const char *src, const char *dst, const struct stat *st) {
     return -1;
 }
 
+int game_lib_find(const char *exefs_dir, const char *lib_dir, const char *import_dir, char id[17]) {
+    if (main_build_id(exefs_dir, id) != 0) return -1;
+    char path[4200];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/libgame-%s.so", lib_dir, id);
+    if (stat(path, &st) == 0) return 0;
+    snprintf(path, sizeof path, "%s/libgame-%s.so", import_dir ? import_dir : lib_dir, id);
+    return stat(path, &st) == 0 ? 0 : 1;
+}
+
 int game_lib_load(const char *exefs_dir, const char *lib_dir, const char *import_dir) {
     char id[17], name[64], path[4200];
     if (main_build_id(exefs_dir, id) != 0) return -1;

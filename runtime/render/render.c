@@ -13,6 +13,7 @@
  * memory: converted from the Tegra block-linear layout to rows (layout.c) and uploaded first.
  */
 #include "render_internal.h"
+#include "render_ui.h"
 #include "png.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -37,11 +38,12 @@ static struct {                      /* textures the GPU didn't render: uploaded
     uint32_t width, height;
 } frame;
 
-#define OUT_SLOTS 3                  /* one being written, one waiting, one being presented */
+#define OUT_SLOTS 4                  /* one being written, one waiting, one being presented; one the menu draws or keeps */
 static struct {
     VkImage image[OUT_SLOTS];        /* window-sized, in the window's format, layout GENERAL */
     VkDeviceMemory memory[OUT_SLOTS];
     VkImageView view[OUT_SLOTS];     /* (drawn into) */
+    VkImageView ui_view[OUT_SLOTS];  /* the same as UNORM (the menu's colors are sRGB values already) */
     uint32_t width, height;
     VkCommandPool pool;              /* the present thread's own (pools are single-threaded) */
     VkCommandBuffer cmd[OUT_SLOTS];  /* the present thread's copy of each slot into the window */
@@ -50,9 +52,13 @@ static struct {
     VkSemaphore rendered[8];         /* per swapchain image: our copy into it is done (an image
                                         can't be acquired again until its present used this) */
     int pending, busy;               /* slot waiting to be presented, slot being presented (-1: none) */
+    int last;                        /* the slot handed over last (-1: none yet) */
+    int ui_slot;                     /* the slot the menu is drawing (-1: none) */
+    int game_slot;                   /* the slot the game thread is writing (-1: none) */
+    int ui_on;                       /* the pause menu shows: the game's frames aren't shown */
     pthread_mutex_t lock;
     pthread_cond_t cond;
-} out = { .pending = -1, .busy = -1, .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+} out = { .pending = -1, .busy = -1, .last = -1, .ui_slot = -1, .game_slot = -1, .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
 int render_active(void) { return active; }
 void render_resized(void) { resized = 1; }
@@ -378,6 +384,11 @@ static void osd_draw(VkCommandBuffer cmd, VkImage dst) {      /* (dst: an out sl
 
 /* ---- the slots ---- */
 
+static VkFormat ui_format(void) {
+    return vk.swapchain_format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM
+         : vk.swapchain_format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : vk.swapchain_format;
+}
+
 /* (Re)create the slots at the window's size. Waits until the present thread holds none. */
 static void make_out_images(void) {
     pthread_mutex_lock(&out.lock);
@@ -388,13 +399,21 @@ static void make_out_images(void) {
     for (int i = 0; i < OUT_SLOTS; i++) {
         if (out.image[i]) {
             vkDestroyImageView(vk.device, out.view[i], NULL);
+            vkDestroyImageView(vk.device, out.ui_view[i], NULL);
             vkDestroyImage(vk.device, out.image[i], NULL);
             vkFreeMemory(vk.device, out.memory[i], NULL);
         }
-        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        /* (the sRGB format and its UNORM twin, listed: a mutable image without a list loses UBWC) */
+        VkFormat formats[2] = { vk.swapchain_format, ui_format() };
+        VkImageFormatListCreateInfo fl = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+                                           .viewFormatCount = 2, .pViewFormats = formats };
+        int twin = formats[1] != formats[0];
+        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = twin ? &fl : NULL,
+            .flags = twin ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, .imageType = VK_IMAGE_TYPE_2D,
             .format = vk.swapchain_format, .extent = { vk.extent.width, vk.extent.height, 1 }, .mipLevels = 1, .arrayLayers = 1,
             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
         VK_CHECK(vkCreateImage(vk.device, &ii, NULL, &out.image[i]));
         VkMemoryRequirements req;
@@ -406,11 +425,14 @@ static void make_out_images(void) {
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = out.image[i],
             .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = vk.swapchain_format, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
         VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &out.view[i]));
+        vi.format = formats[1];
+        VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &out.ui_view[i]));
         barrier(render_cmd(), out.image[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
                 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
     }
     out.width = vk.extent.width;
     out.height = vk.extent.height;
+    out.last = -1;
     pthread_mutex_unlock(&out.lock);
 }
 
@@ -418,7 +440,8 @@ static void make_out_images(void) {
 static int take_slot(void) {
     pthread_mutex_lock(&out.lock);
     int s = 0;
-    while (s == out.pending || s == out.busy) s++;
+    while (s == out.pending || s == out.busy || s == out.ui_slot) s++;
+    out.game_slot = s;
     pthread_mutex_unlock(&out.lock);
     VK_CHECK(vkWaitForFences(vk.device, 1, &out.copied[s], VK_TRUE, UINT64_MAX));
     return s;
@@ -589,7 +612,46 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     if (!from_gpu) render_flush();                   /* (the staging buffer is used again next frame) */
 
     pthread_mutex_lock(&out.lock);                   /* hand it over (a frame still waiting is dropped) */
-    out.pending = s;
+    if (!out.ui_on) out.pending = s;                 /* (under the pause menu: kept as its background) */
+    out.last = s;
+    out.game_slot = -1;
+    pthread_cond_broadcast(&out.cond);
+    pthread_mutex_unlock(&out.lock);
+}
+
+/* ---- the menu (runtime/ui) draws whole frames itself: before the game starts, or while it is paused ---- */
+
+VkFormat render_ui_format(void) { return ui_format(); }
+
+int render_ui_begin(RenderUiTarget *t) {
+    if (!active) return -1;
+    if (out.width != vk.extent.width || out.height != vk.extent.height) {
+        make_out_images();
+        render_flush();                              /* (their layout changes, recorded there, come first) */
+    }
+    pthread_mutex_lock(&out.lock);                   /* one frame at a time: the display sets the pace */
+    while (out.pending >= 0) pthread_cond_wait(&out.cond, &out.lock);
+    int s = 0;
+    while (s == out.busy || s == out.last || s == out.game_slot) s++;   /* (the game's last frame stays: the paused menu shows it) */
+    t->last = out.last;
+    out.ui_slot = s;
+    pthread_mutex_unlock(&out.lock);
+    VK_CHECK(vkWaitForFences(vk.device, 1, &out.copied[s], VK_TRUE, UINT64_MAX));
+    t->slot = s;
+    t->image = out.image[s];
+    t->view = out.ui_view[s];
+    t->last_view = t->last >= 0 ? out.ui_view[t->last] : VK_NULL_HANDLE;
+    t->width = out.width;
+    t->height = out.height;
+    return 0;
+}
+
+void render_ui_set(int on) { out.ui_on = on; }
+
+void render_ui_end(const RenderUiTarget *t) {
+    pthread_mutex_lock(&out.lock);
+    out.ui_slot = -1;
+    out.pending = t->slot;
     pthread_cond_broadcast(&out.cond);
     pthread_mutex_unlock(&out.lock);
 }

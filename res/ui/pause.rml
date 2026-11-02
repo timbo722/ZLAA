@@ -1,0 +1,18 @@
+<rml>
+<head>
+    <title>Paused</title>
+    <link type="text/rcss" href="theme.rcss" />
+    <link type="text/rcss" href="window.rcss" />
+</head>
+<body>
+    <window id="window" class="small">
+        <heading class="window-title">Paused</heading>
+        <menu-list>
+            <button id="resume">Resume</button>
+            <button id="settings">Settings</button>
+            <button id="quit" class="danger">Quit game</button>
+        </menu-list>
+        <p class="hint">Progress since your last save is lost when you quit.</p>
+    </window>
+</body>
+</rml>

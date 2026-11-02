@@ -34,10 +34,14 @@
 #include <string.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include "input.h"
 #ifdef LAA_HAVE_SDL
 #include <SDL3/SDL.h>
 #include "render/render.h"
+#ifdef LAA_HAVE_UI
+#include "ui/ui.h"
+#endif
 
 /* Keyboard: arrows = left stick, I/J/K/L = right stick, X = A, Z = B, S = X, A = Y, Q = L, W = R,
  * 1 = ZL, 2 = ZR, Enter = +, Backspace = -, T/F/G/H = d-pad. Gamepads map one to one. */
@@ -95,16 +99,22 @@ static const struct { SDL_Scancode key; uint64_t bit; } keys[] = {
 /* Android's HOME (or the other screen's app switcher): the game is suspended in the background,
  * as on a Switch, and resumes on the new window it comes back with. An event watch: SDL calls it as
  * the event happens (its event loop then blocks until the app is back). */
+static int menu, game_started, pause_on_return;   /* the menus run; the game has started; pause it (main loop) */
+
 static bool SDLCALL lifecycle(void *userdata, SDL_Event *e) {
     (void)userdata;
     if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
         printf("app: in the background, game suspended\n");
-        kernel_set_suspended(1);
+        if (menu && game_started) {                  /* back to the pause menu (main loop), not straight into the game */
+            kernel_set_suspended(SUSPEND_MENU, 1);
+            pause_on_return = 1;
+        }
+        kernel_set_suspended(SUSPEND_BACKGROUND, 1);
         render_background(1);
     } else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
         printf("app: back in the foreground\n");
         render_background(0);
-        kernel_set_suspended(0);
+        kernel_set_suspended(SUSPEND_BACKGROUND, 0);
     }
     return true;
 }
@@ -116,6 +126,79 @@ static void input_event(const SDL_Event *e) {
     if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat)
         for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) if (e->key.scancode == keys[i].key) input_press(keys[i].bit);
 }
+
+#ifdef LAA_HAVE_UI
+/* Buttons, keys and the stick for the menus: d-pad / arrows move, A / X / Enter accept, B / Z / Esc /
+ * Android's Back go back, L / R (Q / W) switch tabs; Home (the controller's Guide or Mode button), Esc
+ * or Back open the pause menu during the game */
+static int menu_action(const SDL_Event *e, int *down) {
+    *down = e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_KEY_DOWN;
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        SDL_GamepadButton b = (SDL_GamepadButton)e->gbutton.button;
+        if (b == SDL_GAMEPAD_BUTTON_GUIDE) return UI_MENU;
+        switch (pad_bit(b)) {
+        case BTN_UP: return UI_UP;
+        case BTN_DOWN: return UI_DOWN;
+        case BTN_LEFT: return UI_LEFT;
+        case BTN_RIGHT: return UI_RIGHT;
+        case BTN_A: return UI_ACCEPT;
+        case BTN_B: return UI_BACK;
+        case BTN_L: return UI_TAB_PREV;
+        case BTN_R: return UI_TAB_NEXT;
+        default: return -1;
+        }
+    }
+    if ((e->type == SDL_EVENT_KEY_DOWN || e->type == SDL_EVENT_KEY_UP) && !e->key.repeat) {
+        switch (e->key.scancode) {
+        case SDL_SCANCODE_UP: return UI_UP;
+        case SDL_SCANCODE_DOWN: return UI_DOWN;
+        case SDL_SCANCODE_LEFT: return UI_LEFT;
+        case SDL_SCANCODE_RIGHT: return UI_RIGHT;
+        case SDL_SCANCODE_X: case SDL_SCANCODE_RETURN: return UI_ACCEPT;
+        case SDL_SCANCODE_Z: case SDL_SCANCODE_BACKSPACE: return UI_BACK;
+        case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_AC_BACK: return ui_open() ? UI_BACK : UI_MENU;
+        case SDL_SCANCODE_Q: return UI_TAB_PREV;
+        case SDL_SCANCODE_W: return UI_TAB_NEXT;
+        default: return -1;
+        }
+    }
+    if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e->gaxis.axis <= SDL_GAMEPAD_AXIS_LEFTY) {
+        static int held[2];                          /* the left stick as a d-pad: -1, 0, 1 per axis */
+        int a = e->gaxis.axis, v = e->gaxis.value > 20000 ? 1 : e->gaxis.value < -20000 ? -1 : 0;
+        if (v == held[a] || (v && held[a])) return -1;
+        int dir = v ? v : held[a];
+        held[a] = v;
+        *down = v != 0;
+        return a == SDL_GAMEPAD_AXIS_LEFTX ? (dir < 0 ? UI_LEFT : UI_RIGHT) : (dir < 0 ? UI_UP : UI_DOWN);
+    }
+    return -1;
+}
+
+static void menu_event(const SDL_Event *e) {
+    int down, a = menu_action(e, &down);
+    if (a >= 0) ui_input(a, down);
+    if (e->type >= SDL_EVENT_MOUSE_MOTION && e->type <= SDL_EVENT_MOUSE_WHEEL) ui_pointer(e);
+}
+
+static void pause_game(void) {                       /* the pause menu: the game stops */
+    printf("menu: paused\n");
+    kernel_set_suspended(SUSPEND_MENU, 1);
+    render_ui_set(1);
+    ui_pause();
+    input_set(&(InputState){ 0 });
+}
+
+/* The menus run unless a test drives the game (LAA_INPUT_SCRIPT) or LAA_NO_MENU is set; on the desktop
+ * only with LAA_MENU=1 (there it is a tool) */
+static int menu_wanted(void) {
+    if (getenv("LAA_NO_MENU") || getenv("LAA_INPUT_SCRIPT")) return 0;
+#ifdef __ANDROID__
+    return 1;
+#else
+    return getenv("LAA_MENU") != NULL;
+#endif
+}
+#endif
 
 static void read_input(void) {
     if (!pad) {
@@ -244,6 +327,8 @@ static void android_setup(const char **exefs, const char **romfs) {
     else snprintf(romfs_path, sizeof romfs_path, "%s/romfs", base);
     *exefs = exefs_path;
     *romfs = romfs_path;
+    snprintf(path, sizeof path, "%s/config.json", base);
+    setenv("LAA_CONFIG", path, 0);
     printf("app folder: %s\n", base);
 }
 #endif
@@ -283,42 +368,11 @@ int main(int argc, char **argv) {
     }
     if (gmem_reserve() != 0) return 1;
 
-    /* the game's code: libgame-<build id>.so, in $LAA_GAME_DIR or next to this program */
-    char game_dir[4096];
-    const char *dir = getenv("LAA_GAME_DIR");
-    ssize_t n = dir ? 0 : readlink("/proc/self/exe", game_dir, sizeof game_dir - 1);
-    if (dir) snprintf(game_dir, sizeof game_dir, "%s", dir);
-    else if (n > 0) { game_dir[n] = 0; *strrchr(game_dir, '/') = 0; }
-    else snprintf(game_dir, sizeof game_dir, ".");
-    if (game_lib_load(exefs, game_dir, getenv("LAA_GAME_IMPORT")) != 0) return 1;
-
-    GameImage img;
-    if (nso_load_exefs(exefs, LOAD_BASE, &img) != 0) return 1;
-    for (int k = 0; k < img.count; k++) {
-        const GameModule *m = &img.mods[k];
-        printf("  %-8s 0x%09" PRIx64 "  size 0x%08" PRIx64 "  build id ", m->name, m->base, m->size);
-        for (int b = 0; b < 8; b++) printf("%02X", m->build_id[b]);
-        printf("...\n");
-    }
-    printf("Loaded %d modules; %" PRIu64 " recompiled functions linked\n", img.count, game_func_count);
-
-    if (dump) return dump_image(&img, dump) != 0;
-
-    char romfs_default[4096];
-    if (!romfs) {
-        snprintf(romfs_default, sizeof romfs_default, "%s/../romfs", exefs);
-        romfs = romfs_default;
-    }
-    if (romfs_open_dir(romfs) != 0) return 1;
-    if (kernel_init(exefs, &img) != 0) return 1;
-    hle_init(&kproc.image);
-    nvn_init();
-    movie_init(&kproc.image);             /* the game's graphics calls now come to runtime/nvn */
-    trace_symbols_init(&kproc.image);     /* LAA_TRACE_SYMBOLS (debugging) */
-
+    /* the window first: the start menu shows in it before anything of the game is loaded */
     void *window = NULL;
 #ifdef LAA_HAVE_SDL
     if (!headless) {
+        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");   /* (Back is ours: the menus) */
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
             fprintf(stderr, "No window: %s\n", SDL_GetError());
         } else {
@@ -339,6 +393,81 @@ int main(int argc, char **argv) {
     (void)headless;
 #endif
     if (!window) printf("Running without a window\n");
+
+    char game_dir[4096];   /* the game's code: libgame-<build id>.so, in $LAA_GAME_DIR or next to this program */
+    const char *dir = getenv("LAA_GAME_DIR");
+    ssize_t n = dir ? 0 : readlink("/proc/self/exe", game_dir, sizeof game_dir - 1);
+    if (dir) snprintf(game_dir, sizeof game_dir, "%s", dir);
+    else if (n > 0) { game_dir[n] = 0; *strrchr(game_dir, '/') = 0; }
+    else snprintf(game_dir, sizeof game_dir, ".");
+    char romfs_default[4096];
+    if (!romfs) {
+        snprintf(romfs_default, sizeof romfs_default, "%s/../romfs", exefs);
+        romfs = romfs_default;
+    }
+
+#ifdef LAA_HAVE_UI
+    menu = window && menu_wanted();
+    if (menu) {
+        char config[4096], res[4096];
+        const char *home = getenv("HOME");
+        if (getenv("LAA_CONFIG")) snprintf(config, sizeof config, "%s", getenv("LAA_CONFIG"));
+        else {
+            snprintf(config, sizeof config, "%s/.config/LAARecomp", home ? home : ".");
+            char parent[4096];
+            snprintf(parent, sizeof parent, "%s/.config", home ? home : ".");
+            mkdir(parent, 0755);
+            mkdir(config, 0755);
+            strncat(config, "/config.json", sizeof config - strlen(config) - 1);
+        }
+#ifdef __ANDROID__
+        snprintf(res, sizeof res, "%s", getenv("LAA_RES_DIR") ? getenv("LAA_RES_DIR") : "res");   /* (the APK's assets) */
+#else
+        snprintf(res, sizeof res, "%s", getenv("LAA_RES_DIR") ? getenv("LAA_RES_DIR") : LAA_RES_DIR);
+#endif
+        UiPaths p = { exefs, romfs, game_dir, getenv("LAA_GAME_IMPORT"), config, res };
+        menu = ui_init(window, &p) == 0;
+        if (!menu) fprintf(stderr, "menu: couldn't start; starting the game\n");
+    }
+    if (menu) {                                      /* the start screen, until Play or Quit */
+        ui_start_menu();
+        for (int r = UI_NONE; r != UI_PLAY;) {
+            SDL_Event e;
+            while (SDL_PollEvent(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { fflush(NULL); _exit(0); }
+                if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) render_resized();
+                menu_event(&e);
+            }
+            r = ui_frame();
+            if (r == UI_QUIT) { fflush(NULL); _exit(0); }
+        }
+    }
+#endif
+
+    if (game_lib_load(exefs, game_dir, getenv("LAA_GAME_IMPORT")) != 0) return 1;
+
+    GameImage img;
+    if (nso_load_exefs(exefs, LOAD_BASE, &img) != 0) return 1;
+    for (int k = 0; k < img.count; k++) {
+        const GameModule *m = &img.mods[k];
+        printf("  %-8s 0x%09" PRIx64 "  size 0x%08" PRIx64 "  build id ", m->name, m->base, m->size);
+        for (int b = 0; b < 8; b++) printf("%02X", m->build_id[b]);
+        printf("...\n");
+    }
+    printf("Loaded %d modules; %" PRIu64 " recompiled functions linked\n", img.count, game_func_count);
+
+    if (dump) return dump_image(&img, dump) != 0;
+
+    if (romfs_open_dir(romfs) != 0) return 1;
+    if (kernel_init(exefs, &img) != 0) return 1;
+    hle_init(&kproc.image);
+    nvn_init();
+    movie_init(&kproc.image);             /* the game's graphics calls now come to runtime/nvn */
+    trace_symbols_init(&kproc.image);     /* LAA_TRACE_SYMBOLS (debugging) */
+
+#ifdef LAA_HAVE_SDL
+    game_started = 1;
+#endif
     if (kernel_start_main() != 0) return 1;
 
     for (;;) {
@@ -347,8 +476,30 @@ int main(int argc, char **argv) {
         while (window && SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) { fflush(NULL); _exit(0); }   /* (exit() under running threads: see vk_fail) */
             if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) render_resized();
+#ifdef LAA_HAVE_UI
+            if (menu && ui_open()) { menu_event(&e); continue; }
+            int down;
+            if (menu && menu_action(&e, &down) == UI_MENU && down) { pause_game(); continue; }
+#endif
             input_event(&e);
         }
+#ifdef LAA_HAVE_UI
+        static uint64_t pause_at = 1;                /* LAA_UI_PAUSE_AT=seconds: pause once then (tests) */
+        if (pause_at == 1) pause_at = getenv("LAA_UI_PAUSE_AT") ? SDL_GetTicks() + (uint64_t)(atof(getenv("LAA_UI_PAUSE_AT")) * 1000) : 0;
+        if (menu && pause_at && SDL_GetTicks() >= pause_at && !ui_open()) { pause_at = 0; pause_game(); }
+        if (menu && pause_on_return && !ui_open()) pause_game();
+        pause_on_return = 0;
+        if (menu && ui_open()) {
+            int r = ui_frame();
+            if (r == UI_QUIT) { fflush(NULL); _exit(0); }
+            if (r == UI_RESUME) {
+                printf("menu: resumed\n");
+                render_ui_set(0);
+                kernel_set_suspended(SUSPEND_MENU, 0);
+            }
+            continue;
+        }
+#endif
         if (window) read_input();
 #endif
         if (kernel_wait_main(window ? 10 : 1000)) break;   /* the game ended */

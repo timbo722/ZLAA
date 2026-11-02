@@ -1,0 +1,233 @@
+/* window.rcss - the settings window and the pause menu: Dusklight's framed, translucent window with a tab bar,
+   a column of settings rows and a help pane beside it. */
+body {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    padding: 40dp 64dp;
+    font-size: var(--font-size-base);
+    background-color: #000000B0;
+}
+
+body.over-game {
+    background-color: transparent;
+}
+
+window {
+    display: flex;
+    flex-flow: column;
+    position: relative;
+    width: 100%;
+    height: 100%;
+    max-width: 1088dp;
+    margin: auto;
+    border-radius: var(--radius-window);
+    border-width: 2dp;
+    border-color: var(--color-border);
+    background-color: rgb(var(--color-surface-rgb));   /* (solid: Dusklight blurs what is behind; we can't yet) */
+    opacity: 0;
+    transform: scale(0.94);
+    transition: opacity transform 0.2s cubic-in-out;
+}
+
+window[open] {
+    opacity: 1;
+    transform: scale(1);
+}
+
+window.small {
+    width: 420dp;
+    height: auto;
+    padding: var(--space-xl);
+}
+
+heading.window-title {
+    font-family: var(--font-family-display);
+    font-weight: bold;
+    font-size: var(--font-size-6xl);
+    color: #FEE685;
+    margin-bottom: var(--space-lg);
+}
+
+tab-bar {
+    display: flex;
+    flex: 0 0 var(--toolbar-height);
+    height: var(--toolbar-height);
+    background-color: rgba(var(--color-neutral-rgb), 10%);
+    border-bottom-width: 2dp;
+    border-bottom-color: var(--color-border);
+    border-radius: 12dp 12dp 0 0;
+    font-family: var(--font-family-heading);
+    font-weight: bold;
+    font-size: var(--font-size-xl);
+    text-transform: uppercase;
+}
+
+tab {
+    display: block;
+    padding: 0 var(--space-xl);
+    line-height: var(--toolbar-height);
+    opacity: 0.35;
+    cursor: pointer;
+    decorator: vertical-gradient(#C2A42D00 #C2A42D00);
+    transition: opacity 0.1s linear-in-out;
+}
+
+tab:hover {
+    opacity: 1;
+    decorator: vertical-gradient(#C2A42D00 #C2A42D60);
+}
+
+tab[selected] {
+    opacity: 1;
+    border-bottom-width: 4dp;
+    border-bottom-color: var(--color-accent);
+    font-effect: glow(0dp 4dp 0dp 4dp black);
+}
+
+close {
+    display: block;
+    position: absolute;
+    top: 4dp;
+    right: 8dp;
+    width: 48dp;
+    height: 48dp;
+    font-family: var(--font-family-icons);
+    font-size: var(--font-size-4xl);
+    color: rgba(var(--color-text-rgb), 70%);
+    border-radius: 6dp;
+    decorator: text("&#xe5cd;" center center);
+    cursor: pointer;
+}
+
+close:hover {
+    color: #FFFFFF;
+    background-color: rgba(var(--color-accent-rgb), 24%);
+}
+
+content {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+pane {
+    display: flex;
+    flex-flow: column;
+    flex: 1 1 0;
+    min-width: 0;
+    padding: var(--space-xl);
+    gap: var(--space-sm);
+    overflow: hidden auto;
+    font-size: var(--font-size-2xl);
+}
+
+pane.rows {
+    border-right-width: 1dp;
+    border-right-color: var(--color-border);
+}
+
+pane#help {
+    font-size: var(--font-size-xl);
+    line-height: 1.6;
+}
+
+select-button {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-lg);
+    border-radius: var(--radius-window);
+    border-width: 1dp;
+    border-color: rgba(var(--color-border-rgb), 25%);
+    background-color: var(--button-background);
+    nav: vertical;
+}
+
+select-button:hover,
+select-button:focus-visible {
+    background-color: var(--button-background-hover);
+    border-color: var(--color-accent);
+}
+
+select-button:active {
+    background-color: var(--button-background-active);
+}
+
+select-button.fixed {
+    opacity: 0.6;
+}
+
+select-button key {
+    display: block;
+    flex: 0 1 auto;
+    font-family: var(--font-family-heading);
+    font-weight: bold;
+    font-size: var(--font-size-xl);
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+select-button value {
+    display: block;
+    flex: 1 0 20%;
+    text-align: right;
+    font-size: var(--font-size-2xl);
+    white-space: nowrap;
+}
+
+about {
+    font-size: var(--font-size-xl);
+}
+
+about heading {
+    font-family: var(--font-family-display);
+    font-size: var(--font-size-6xl);
+    color: #FEE685;
+}
+
+footer {
+    flex: 0 0 auto;
+    padding: var(--space-sm) var(--space-xl);
+    border-top-width: 1dp;
+    border-top-color: rgba(var(--color-border-rgb), 50%);
+    font-size: var(--font-size-md);
+    color: var(--color-muted);
+    text-align: right;
+}
+
+/* the pause menu's buttons */
+menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+}
+
+menu-list button {
+    padding: var(--space-sm) var(--space-lg);
+    border-radius: var(--radius-panel);
+    text-transform: uppercase;
+    font-family: var(--font-family-heading);
+    font-size: var(--font-size-4xl);
+    color: #FFFFFF;
+    nav: vertical;
+    decorator: horizontal-gradient(#FEE68500 #FEE68500);
+}
+
+menu-list button:hover,
+menu-list button:focus-visible {
+    color: #000000;
+    decorator: horizontal-gradient(#FEE685FF #FEE68500);
+}
+
+menu-list button.danger {
+    color: var(--color-bad);
+}
+
+menu-list button.danger:hover,
+menu-list button.danger:focus-visible {
+    color: #000000;
+}

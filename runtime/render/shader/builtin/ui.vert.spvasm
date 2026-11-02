@@ -1,0 +1,62 @@
+; ui.vert.spvasm - the menu's vertices (runtime/ui: RmlUi geometry). Push constants: a 4x4 transform (column-major,
+; pixels -> clip space, with RmlUi's own transform folded in) and a translation in pixels.
+; position = transform * (pos + translation, 0, 1); color (premultiplied) and texture coordinate passed on.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %in_pos %in_color %in_uv %out_pos %out_color %out_uv
+               OpDecorate %in_pos Location 0
+               OpDecorate %in_color Location 1
+               OpDecorate %in_uv Location 2
+               OpDecorate %out_pos BuiltIn Position
+               OpDecorate %out_color Location 0
+               OpDecorate %out_uv Location 1
+               OpDecorate %pc_t Block
+               OpMemberDecorate %pc_t 0 Offset 0
+               OpMemberDecorate %pc_t 0 ColMajor
+               OpMemberDecorate %pc_t 0 MatrixStride 16
+               OpMemberDecorate %pc_t 1 Offset 64
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v2f = OpTypeVector %float 2
+        %v4f = OpTypeVector %float 4
+        %m4f = OpTypeMatrix %v4f 4
+       %pc_t = OpTypeStruct %m4f %v2f
+       %p_pc = OpTypePointer PushConstant %pc_t
+         %pc = OpVariable %p_pc PushConstant
+    %p_pc_m4 = OpTypePointer PushConstant %m4f
+    %p_pc_v2 = OpTypePointer PushConstant %v2f
+    %p_in_v2 = OpTypePointer Input %v2f
+    %p_in_v4 = OpTypePointer Input %v4f
+   %p_out_v2 = OpTypePointer Output %v2f
+   %p_out_v4 = OpTypePointer Output %v4f
+     %in_pos = OpVariable %p_in_v2 Input
+   %in_color = OpVariable %p_in_v4 Input
+      %in_uv = OpVariable %p_in_v2 Input
+    %out_pos = OpVariable %p_out_v4 Output
+  %out_color = OpVariable %p_out_v4 Output
+     %out_uv = OpVariable %p_out_v2 Output
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+        %pos = OpLoad %v2f %in_pos
+       %tptr = OpAccessChain %p_pc_v2 %pc %uint_1
+          %t = OpLoad %v2f %tptr
+         %p2 = OpFAdd %v2f %pos %t
+         %px = OpCompositeExtract %float %p2 0
+         %py = OpCompositeExtract %float %p2 1
+         %p4 = OpCompositeConstruct %v4f %px %py %float_0 %float_1
+       %mptr = OpAccessChain %p_pc_m4 %pc %uint_0
+          %m = OpLoad %m4f %mptr
+         %cp = OpMatrixTimesVector %v4f %m %p4
+               OpStore %out_pos %cp
+          %c = OpLoad %v4f %in_color
+               OpStore %out_color %c
+         %uv = OpLoad %v2f %in_uv
+               OpStore %out_uv %uv
+               OpReturn
+               OpFunctionEnd
