@@ -1,21 +1,23 @@
-/* theme.rcss - shared by all the menus: the "Koholint at night" palette (deep sea, sand, foam, a coral accent), the
-   rounded Nunito font, and the basics RmlUi leaves to us (it has no default style sheet: every element is inline
-   until told otherwise). */
+/* theme.rcss - shared by all the menus: a dark warm palette (near-black, gold, parchment text; after Dusklight's,
+   which the player liked) for Link's Awakening's night over Koholint, the rounded Nunito font, and the basics RmlUi leaves
+   to us (it has no default style sheet: every element is inline until told otherwise). */
 body {
     --font-body: Nunito;
     --font-icons: Material Symbols Rounded;
 
-    --sea-deep-rgb: 8, 20, 36;
-    --sea-rgb: 14, 44, 64;
-    --sand-rgb: 244, 217, 166;
-    --foam-rgb: 232, 244, 242;
-    --coral-rgb: 240, 138, 93;
-    --sea-deep: rgb(var(--sea-deep-rgb));
-    --sand: rgb(var(--sand-rgb));
-    --foam: rgb(var(--foam-rgb));
+    --night-rgb: 11, 12, 9;
+    --surface-rgb: 21, 22, 16;
+    --gold-rgb: 233, 196, 106;
+    --text-rgb: 224, 219, 200;
+    --coral-rgb: 232, 120, 90;
+    --night: rgb(var(--night-rgb));
+    --gold: rgb(var(--gold-rgb));
+    --gold-pale: #FEE685;
+    --text: rgb(var(--text-rgb));
     --coral: rgb(var(--coral-rgb));
-    --muted: #8FA9B6;
-    --good: #9BE3B4;
+    --border: #92875B;
+    --muted: #A6A09B;
+    --good: #C8EF8E;
     --bad: #FFB4A2;
 
     --gap-xs: 4dp;
@@ -29,7 +31,7 @@ body {
     font-weight: normal;
     font-style: normal;
     font-size: 17dp;
-    color: var(--foam);
+    color: var(--text);
 }
 
 *, *:before, *:after {
@@ -37,7 +39,7 @@ body {
 }
 
 div, p, heading, header, title-block, wordmark, game-title, tagline, menu-list, content, window, pane, tab-bar,
-about, footer, row, status-chip, hints {
+about, footer, row, status-chip, hints, sky, sea, island, hill, egg, halo, star {
     display: block;
 }
 
@@ -75,7 +77,7 @@ icon.lock { decorator: text("&#xe897;" center center); }
 icon.left { decorator: text("&#xe5cb;" center center); }
 icon.right { decorator: text("&#xe5cc;" center center); }
 
-/* a controller button in hints: a sand disc with its letter */
+/* a controller button in hints: a gold disc with its letter */
 key-cap {
     display: inline-block;
     min-width: 24dp;
@@ -83,8 +85,8 @@ key-cap {
     padding: 0 6dp;
     margin-right: var(--gap-xs);
     border-radius: 12dp;
-    background-color: rgba(var(--sand-rgb), 90%);
-    color: var(--sea-deep);
+    background-color: rgba(var(--gold-rgb), 90%);
+    color: var(--night);
     font-weight: bold;
     font-size: 14dp;
     line-height: 24dp;
@@ -119,12 +121,12 @@ scrollbarvertical {
 }
 
 scrollbarvertical slidertrack {
-    background-color: rgba(var(--foam-rgb), 6%);
+    background-color: rgba(var(--text-rgb), 6%);
     border-radius: 3dp;
 }
 
 scrollbarvertical sliderbar {
-    background-color: rgba(var(--sand-rgb), 50%);
+    background-color: rgba(var(--gold-rgb), 50%);
     border-radius: 3dp;
 }
 

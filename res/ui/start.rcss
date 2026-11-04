@@ -1,10 +1,10 @@
-/* start.rcss - the start screen: a night sea (sky fading into water, three slow waves), the title in the middle,
-   rounded sand buttons under it, the game files' status as a chip at the bottom. No background art: none of the
-   game's may come with us. */
+/* start.rcss - the start screen: night over Koholint. A dark warm sky with twinkling stars, Mt. Tamaranch's dark
+   silhouette with the Wind Fish's egg glowing on top, the sea below with faint gold waves; the title and the menu on
+   the left. All plain shapes: none of the game's art may come with us. */
 body {
     width: 100%;
     height: 100%;
-    background-color: var(--sea-deep);
+    background-color: var(--night);
 }
 
 sky {
@@ -12,7 +12,106 @@ sky {
     position: absolute;
     width: 100%;
     height: 70%;
-    decorator: vertical-gradient(#081424FF #12384CFF);
+    decorator: vertical-gradient(#07080AFF #15170FFF);
+}
+
+star {
+    display: block;
+    position: absolute;
+    width: 3dp;
+    height: 3dp;
+    border-radius: 2dp;
+    background-color: #FEF3C8;
+    opacity: 0.3;
+}
+
+star.big {
+    width: 4dp;
+    height: 4dp;
+}
+
+star.t1 { animation: 3.1s sine-in-out infinite alternate twinkle; }
+star.t2 { animation: 4.3s sine-in-out infinite alternate twinkle; }
+star.t3 { animation: 5.7s sine-in-out infinite alternate twinkle; }
+
+@keyframes twinkle {
+    from { opacity: 0.15; }
+    to { opacity: 0.9; }
+}
+
+/* the mountain and the egg, measured from the right edge: the hill's middle is 240 dp from it */
+island {
+    display: block;
+    position: absolute;
+    right: 0;
+    bottom: 30%;
+    width: 640dp;
+    height: 420dp;
+}
+
+hill {
+    display: block;
+    position: absolute;
+    right: -80dp;
+    bottom: 0;
+    width: 640dp;
+    height: 290dp;
+    border-radius: 320dp 320dp 0 0;
+    background-color: #12140E;
+    border-top-width: 1dp;
+    border-color: rgba(var(--gold-rgb), 18%);
+}
+
+hill.small {
+    right: 430dp;
+    width: 360dp;
+    height: 110dp;
+    border-radius: 180dp 180dp 0 0;
+    background-color: #0E100B;
+    border-color: rgba(var(--gold-rgb), 10%);
+}
+
+/* the Wind Fish's egg on the top: seven circles along its axis, each a little wider than the one above (RmlUi
+   draws no ellipses), make the egg's outline */
+egg {
+    display: block;
+    position: absolute;
+    right: 198dp;
+    bottom: 286dp;
+    width: 84dp;
+    height: 116dp;
+}
+
+egg-part {
+    display: block;
+    position: absolute;
+    background-color: #F4EDDA;
+}
+
+halo {
+    display: block;
+    position: absolute;
+    background-color: #FEE685;
+    opacity: 0.022;
+}
+
+halo.h1 { right: 180dp; bottom: 284dp; width: 120dp; height: 120dp; border-radius: 60dp; }
+halo.h2 { right: 160dp; bottom: 264dp; width: 160dp; height: 160dp; border-radius: 80dp; }
+halo.h3 { right: 140dp; bottom: 244dp; width: 200dp; height: 200dp; border-radius: 100dp; }
+halo.h4 { right: 120dp; bottom: 224dp; width: 240dp; height: 240dp; border-radius: 120dp; }
+halo.h5 { right: 100dp; bottom: 204dp; width: 280dp; height: 280dp; border-radius: 140dp; }
+halo.h6 { right: 80dp; bottom: 184dp; width: 320dp; height: 320dp; border-radius: 160dp; }
+halo.h7 { right: 55dp; bottom: 159dp; width: 370dp; height: 370dp; border-radius: 185dp; }
+halo.h8 { right: 30dp; bottom: 134dp; width: 420dp; height: 420dp; border-radius: 210dp; }
+
+glow {
+    display: block;
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    animation: 4s sine-in-out infinite alternate breathe;
 }
 
 sea {
@@ -21,10 +120,10 @@ sea {
     top: 70%;
     width: 100%;
     height: 30%;
-    decorator: vertical-gradient(#0E2C40FF #050E1AFF);
+    decorator: vertical-gradient(#0C1A1EFF #040607FF);
 }
 
-/* a wave: a thin line of foam that fades out at both ends, drifting side to side */
+/* a wave: a thin gold line that fades out at both ends, drifting side to side */
 wave {
     display: flex;
     position: absolute;
@@ -35,16 +134,21 @@ half {
     display: block;
     flex: 1 1 0;
     height: 100%;
-    decorator: horizontal-gradient(#E8F4F200 #E8F4F240);
+    decorator: horizontal-gradient(#E9C46A00 #E9C46A38);
 }
 
 half.out {
-    decorator: horizontal-gradient(#E8F4F240 #E8F4F200);
+    decorator: horizontal-gradient(#E9C46A38 #E9C46A00);
 }
 
-wave.w1 { top: 12%; left: 8%; width: 46%; animation: 9s sine-in-out infinite alternate drift; }
-wave.w2 { top: 26%; left: 40%; width: 52%; animation: 11s sine-in-out infinite alternate drift-back; }
-wave.w3 { top: 50%; left: 14%; width: 38%; animation: 7s sine-in-out infinite alternate drift; }
+wave.w1 { top: 14%; left: 52%; width: 40%; animation: 9s sine-in-out infinite alternate drift; }
+wave.w2 { top: 34%; left: 30%; width: 50%; animation: 11s sine-in-out infinite alternate drift-back; }
+wave.w3 { top: 58%; left: 60%; width: 34%; animation: 7s sine-in-out infinite alternate drift; }
+
+@keyframes breathe {
+    from { opacity: 0.55; }
+    to { opacity: 1; }
+}
 
 @keyframes drift {
     from { transform: translateX(-30dp); }
@@ -62,7 +166,7 @@ wordmark {
     top: 32dp;
     font-weight: 800;
     font-size: 16dp;
-    color: var(--sand);
+    color: var(--gold);
     letter-spacing: 2dp;
 }
 
@@ -75,31 +179,29 @@ wordmark version-number {
 
 title-block {
     position: absolute;
-    top: 18%;
-    width: 100%;
-    text-align: center;
+    left: 96dp;
+    top: 21%;
 }
 
 game-title {
     font-weight: 800;
-    font-size: 64dp;
+    font-size: 60dp;
     line-height: 1.1;
-    color: var(--foam);
-    font-effect: shadow(0dp 4dp #04101C);
+    color: var(--gold-pale);
+    font-effect: shadow(0dp 4dp #000000);
 }
 
 tagline {
-    margin-top: var(--gap-sm);
+    margin-top: var(--gap-xs);
     font-size: 18dp;
     color: var(--muted);
 }
 
 menu-list {
     position: absolute;
-    top: 44%;
-    left: 50%;
+    top: 45%;
+    left: 80dp;
     width: 300dp;
-    margin-left: -150dp;
     display: flex;
     flex-direction: column;
     gap: var(--gap-sm);
@@ -108,18 +210,17 @@ menu-list {
 menu-list button {
     display: block;
     height: 50dp;
+    padding: 0 16dp;
     border-radius: 25dp;
-    text-align: center;
     font-weight: bold;
     font-size: 24dp;
     line-height: 50dp;
-    color: rgba(var(--foam-rgb), 85%);
-    background-color: rgba(var(--foam-rgb), 0%);
+    color: var(--text);
+    background-color: rgba(var(--gold-rgb), 0%);
 }
 
 menu-list button icon {
     width: 0;
-    margin-right: 0;
     font-size: 24dp;
     opacity: 0;
 }
@@ -130,8 +231,8 @@ menu-list button icon.exit { decorator: text("&#xe9ba;" center center); }
 
 menu-list button:hover,
 menu-list button:focus-visible {
-    color: var(--sea-deep);
-    background-color: var(--sand);
+    color: var(--night);
+    background-color: var(--gold);
 }
 
 menu-list button:focus-visible icon,
@@ -142,26 +243,23 @@ menu-list button:hover icon {
 }
 
 menu-list button:active {
-    background-color: var(--coral);
+    background-color: var(--gold-pale);
 }
 
 menu-list button[disabled] {
-    color: rgba(var(--foam-rgb), 30%);
-    background-color: rgba(var(--foam-rgb), 0%);
+    color: rgba(var(--text-rgb), 30%);
+    background-color: rgba(var(--gold-rgb), 0%);
 }
 
 status-chip {
     position: absolute;
     bottom: 36dp;
-    left: 50%;
-    width: 560dp;
-    margin-left: -280dp;
-    padding: 10dp var(--gap-xl);
+    left: 80dp;
+    padding: 10dp 20dp;
     border-radius: 22dp;
-    background-color: rgba(var(--sea-deep-rgb), 70%);
+    background-color: rgba(0, 0, 0, 55%);
     border-width: 1dp;
-    border-color: rgba(var(--foam-rgb), 12%);
-    text-align: center;
+    border-color: rgba(var(--gold-rgb), 22%);
     font-size: 17dp;
 }
 
@@ -205,7 +303,7 @@ body.animate-in .rise {
 }
 
 .d0 { transition: opacity transform 0.4s 0.05s cubic-out; }
-.d1 { transition: opacity transform 0.5s 0.15s cubic-out; }
+.d1 { transition: opacity transform 0.6s 0.15s cubic-out; }
 .d2 { transition: opacity transform 0.4s 0.35s cubic-out; }
 .d3 { transition: opacity transform 0.4s 0.42s cubic-out; }
 .d4 { transition: opacity transform 0.4s 0.49s cubic-out; }

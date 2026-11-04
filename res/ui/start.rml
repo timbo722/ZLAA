@@ -5,7 +5,36 @@
     <link type="text/rcss" href="start.rcss" />
 </head>
 <body>
-    <sky />
+    <sky>
+        <star class="t1" style="left: 58%; top: 9%;" />
+        <star class="t2" style="left: 66%; top: 21%;" />
+        <star class="t3 big" style="left: 73%; top: 7%;" />
+        <star class="t1" style="left: 81%; top: 16%;" />
+        <star class="t2" style="left: 88%; top: 6%;" />
+        <star class="t3" style="left: 94%; top: 24%;" />
+        <star class="t2 big" style="left: 62%; top: 33%;" />
+        <star class="t1" style="left: 91%; top: 38%;" />
+        <star class="t3" style="left: 52%; top: 18%;" />
+        <star class="t2" style="left: 77%; top: 30%;" />
+        <star class="t1" style="left: 46%; top: 6%;" />
+        <star class="t3" style="left: 98%; top: 12%;" />
+        <star class="t2" style="left: 38%; top: 13%;" />
+        <star class="t1" style="left: 69%; top: 42%;" />
+    </sky>
+    <island class="rise d1">
+        <glow><halo class="h8" /><halo class="h7" /><halo class="h6" /><halo class="h5" /><halo class="h4" /><halo class="h3" /><halo class="h2" /><halo class="h1" /></glow>
+        <hill class="small" />
+        <hill />
+        <egg>
+            <egg-part style="left: 12dp; top: 0.0dp; width: 60dp; height: 60dp; border-radius: 30dp;" />
+            <egg-part style="left: 10dp; top: 5.3dp; width: 64dp; height: 64dp; border-radius: 32dp;" />
+            <egg-part style="left: 8dp; top: 10.7dp; width: 68dp; height: 68dp; border-radius: 34dp;" />
+            <egg-part style="left: 6dp; top: 16.0dp; width: 72dp; height: 72dp; border-radius: 36dp;" />
+            <egg-part style="left: 4dp; top: 21.3dp; width: 76dp; height: 76dp; border-radius: 38dp;" />
+            <egg-part style="left: 2dp; top: 26.7dp; width: 80dp; height: 80dp; border-radius: 40dp;" />
+            <egg-part style="left: 0dp; top: 32.0dp; width: 84dp; height: 84dp; border-radius: 42dp;" />
+        </egg>
+    </island>
     <sea>
         <wave class="w1"><half /><half class="out" /></wave>
         <wave class="w2"><half /><half class="out" /></wave>

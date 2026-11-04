@@ -1,11 +1,11 @@
-/* window.rcss - the settings window and the pause menu: a rounded deep-sea card. Settings: a header with the title
+/* window.rcss - the settings window and the pause menu: a dark rounded card with a thin gold edge. Settings: a header with the title
    and a pill-shaped page switcher, rows of settings (value between ‹ › arrows) beside a help pane. */
 body {
     display: flex;
     width: 100%;
     height: 100%;
     padding: 36dp 56dp;
-    background-color: #050E1AC0;
+    background-color: #050604C0;
 }
 
 body.over-game {
@@ -22,8 +22,8 @@ window {
     margin: auto;
     border-radius: 28dp;
     border-width: 1dp;
-    border-color: rgba(var(--foam-rgb), 14%);
-    background-color: rgb(12, 30, 46);  /* (solid: no blur behind it yet) */
+    border-color: rgba(146, 135, 91, 70%);
+    background-color: rgb(var(--surface-rgb));  /* (solid: no blur behind it yet) */
     opacity: 0;
     transform: translateY(16dp);
     transition: opacity transform 0.22s cubic-out;
@@ -43,12 +43,12 @@ window.small {
 heading.window-title {
     font-weight: 800;
     font-size: 30dp;
-    color: var(--foam);
+    color: var(--gold-pale);
     margin: 0;
 }
 
 heading.window-title icon {
-    color: var(--sand);
+    color: var(--gold);
     margin-right: var(--gap-sm);
 }
 
@@ -62,13 +62,13 @@ header {
     padding: 20dp 28dp 12dp 28dp;
 }
 
-/* the pages: one pill track, the chosen page a sand pill in it */
+/* the pages: one pill track, the chosen page a gold pill in it */
 tab-bar {
     display: flex;
     gap: var(--gap-xs);
     padding: 4dp;
     border-radius: 22dp;
-    background-color: rgba(var(--foam-rgb), 7%);
+    background-color: rgba(var(--text-rgb), 7%);
 }
 
 tab {
@@ -84,13 +84,13 @@ tab {
 }
 
 tab:hover {
-    color: var(--foam);
-    background-color: rgba(var(--foam-rgb), 8%);
+    color: var(--text);
+    background-color: rgba(var(--text-rgb), 8%);
 }
 
 tab[selected] {
-    color: var(--sea-deep);
-    background-color: var(--sand);
+    color: var(--night);
+    background-color: var(--gold);
 }
 
 close {
@@ -107,8 +107,8 @@ close {
 }
 
 close:hover {
-    color: var(--foam);
-    background-color: rgba(var(--foam-rgb), 10%);
+    color: var(--text);
+    background-color: rgba(var(--text-rgb), 10%);
 }
 
 content {
@@ -134,13 +134,13 @@ pane#help {
     margin: 12dp 16dp 12dp 4dp;
     padding: 20dp;
     border-radius: 20dp;
-    background-color: rgba(var(--foam-rgb), 5%);
+    background-color: rgba(var(--text-rgb), 5%);
     font-size: 16dp;
     line-height: 1.6;
 }
 
 pane#help heading {
-    color: var(--sand);
+    color: var(--gold);
 }
 
 /* a setting: its name on the left, its value between arrows on the right */
@@ -151,15 +151,15 @@ row {
     height: 52dp;
     padding: 0 8dp 0 20dp;
     border-radius: 26dp;
-    background-color: rgba(var(--foam-rgb), 4%);
+    background-color: rgba(var(--text-rgb), 4%);
     nav: vertical;
 }
 
 row:hover,
 row:focus-visible {
-    background-color: rgba(var(--sand-rgb), 16%);
+    background-color: rgba(var(--gold-rgb), 16%);
     border-width: 2dp;
-    border-color: var(--sand);
+    border-color: var(--gold);
 }
 
 row.fixed {
@@ -180,7 +180,7 @@ row value {
     flex: 0 0 auto;
     gap: var(--gap-xs);
     font-size: 18dp;
-    color: var(--sand);
+    color: var(--gold);
     white-space: nowrap;
 }
 
@@ -190,7 +190,7 @@ row value icon {
 }
 
 row:focus-visible value icon {
-    color: var(--sand);
+    color: var(--gold);
 }
 
 about {
@@ -201,7 +201,7 @@ about {
 about heading {
     font-weight: 800;
     font-size: 26dp;
-    color: var(--sand);
+    color: var(--gold);
 }
 
 footer {
@@ -226,15 +226,15 @@ menu-list button {
     line-height: 46dp;
     font-weight: bold;
     font-size: 20dp;
-    color: var(--foam);
-    background-color: rgba(var(--foam-rgb), 6%);
+    color: var(--text);
+    background-color: rgba(var(--text-rgb), 6%);
     nav: vertical;
 }
 
 menu-list button:hover,
 menu-list button:focus-visible {
-    color: var(--sea-deep);
-    background-color: var(--sand);
+    color: var(--night);
+    background-color: var(--gold);
 }
 
 menu-list button.danger {
@@ -243,6 +243,6 @@ menu-list button.danger {
 
 menu-list button.danger:hover,
 menu-list button.danger:focus-visible {
-    color: var(--sea-deep);
+    color: var(--night);
     background-color: var(--coral);
 }
