@@ -32,7 +32,7 @@ enum { MSG_FOCUS_STATE_CHANGED = 15, MSG_OPERATION_MODE_CHANGED = 30, MSG_PERFOR
 #define OPERATION_MODE_HANDHELD 0
 #define OPERATION_MODE_DOCKED   1
 /* Handheld: the game renders up to 1280x720, as a Switch does on its own screen. Docked: up to
- * 1920x1080, as on a TV. On Android handheld by default (the player, 2026-10-29: the Thor is a
+ * 1920x1080, as on a TV. On Android handheld by default (2026-10-29: the Thor is a
  * handheld; docked kept the GPU at its top clock, ~1.4 W more): LAA_DOCKED=1 for 1080p. On the
  * desktop docked by default. LAA_HANDHELD=1: handheld anywhere. */
 static int operation_mode = -1;

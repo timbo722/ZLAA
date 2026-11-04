@@ -2,7 +2,7 @@
 # menu_test.sh <out dir> [seconds]: the menus on the Thor without hands. Start screen -> Settings (two rows) -> back ->
 # Play; the pause menu opens 45 s after start-up -> Settings -> back -> Resume. LAA_UI_SCRIPT presses the buttons and
 # saves the menu's frames (shots/ui_*.png); an adb screencap at the end shows the game running again. Uses the test
-# save (testsave); puts the player's play env.txt back afterwards.
+# save (testsave); puts the player's env.txt back afterwards.
 W=~/laar-build/android/win/platform-tools/adb.exe; A=/storage/emulated/0/Android/data/io.github.laarecomp/files
 out=$1; secs=${2:-75}; mkdir -p "$out"
 { cat /mnt/c/Users/you/Documents/LAARecomp/env/laa_env_play.txt

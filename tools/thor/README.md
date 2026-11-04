@@ -7,7 +7,7 @@ Shell/Python helpers for test runs on the Thor over USB (Windows adb at
 
 Test runs write their own `env.txt` and use the test saves (`LAA_SAVE_DIR=files/testsave`, a copy of
 the player's saves in Mabe Village; `files/testsave2` is the beach with the sword). At the end they put back
-the player's play settings from `C:\Users\you\Documents\LAARecomp\env\laa_env_play.txt`.
+the player's own settings from `C:\Users\you\Documents\LAARecomp\env\laa_env_play.txt`.
 
 | script | what it does |
 |---|---|

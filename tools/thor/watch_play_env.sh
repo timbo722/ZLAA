@@ -1,5 +1,5 @@
 #!/bin/bash
-# watch_play.sh <tag>: the player plays (his own saves); sync trace + frame stats on; the panel recorded in 3-minute pieces
+# watch_play.sh <tag>: the player plays (their own saves); sync trace + frame stats on; the panel recorded in 3-minute pieces
 # from when he opens the app until he closes it; then the pieces and log.txt are pulled
 W=~/laar-build/android/win/platform-tools/adb.exe; A=/storage/emulated/0/Android/data/io.github.laarecomp/files
 T=$(cd "$(dirname "$0")" && pwd); S=${LAA_OUT:-$HOME/laar-build/thor-out}; mkdir -p $S; tag=$1

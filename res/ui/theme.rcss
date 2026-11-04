@@ -1,5 +1,5 @@
 /* theme.rcss - shared by all the menus: a dark warm palette (near-black, gold, parchment text; after Dusklight's,
-   which the player liked) for Link's Awakening's night over Koholint, the rounded Nunito font, and the basics RmlUi leaves
+   which we liked) for Link's Awakening's night over Koholint, the rounded Nunito font, and the basics RmlUi leaves
    to us (it has no default style sheet: every element is inline until told otherwise). */
 body {
     --font-body: Nunito;
