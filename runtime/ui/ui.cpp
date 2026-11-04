@@ -219,6 +219,13 @@ void update_start_status() {
     e->SetAttribute("status", status);
     start_doc->GetElementById("game-status-label")->SetInnerRML(esc(label));
     start_doc->GetElementById("game-version")->SetInnerRML(esc(version));
+    if (const char *crash = getenv("LAA_LAST_CRASH")) {   /* (main.c: the last session crashed) */
+        const char *name = strrchr(crash, '/');
+        Rml::Element *note = start_doc->GetElementById("crash-note");
+        note->SetInnerRML(esc(std::string("The game closed unexpectedly last time. Its report is in crashes/") +
+                              (name ? name + 1 : crash) + "."));
+        note->SetClass("shown", true);
+    }
     Rml::Element *play = start_doc->GetElementById("play");
     if (game_ready) play->RemoveAttribute("disabled");
     else play->SetAttribute("disabled", "");

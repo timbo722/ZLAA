@@ -187,6 +187,7 @@ int kernel_init(const char *exefs_dir, const GameImage *img);
 int kernel_start_main(void);
 int kernel_wait_main(int timeout_ms);
 void kernel_dump_state(void);       /* registers + host backtrace, for crash reports */
+extern void (*kernel_crash_hook)(void);   /* after a crash report, before the process dies (main.c: the log written out) */
 
 /* The app in the background (Android) or the pause menu open: the timers that drive the game (vsync,
  * audio) wait in kernel_wait_resumed(), so the game stops at its next vsync wait, as a Switch suspends

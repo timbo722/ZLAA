@@ -299,6 +299,8 @@ void kernel_dump_state(void) {
     print_backtrace();
 }
 
+void (*kernel_crash_hook)(void);
+
 static void on_fatal_signal(int sig, siginfo_t *si, void *uctx) {
     (void)uctx;
     uint64_t a = (uint64_t)(uintptr_t)si->si_addr, g = (uint64_t)(uintptr_t)guest_mem;
@@ -316,6 +318,7 @@ static void on_fatal_signal(int sig, siginfo_t *si, void *uctx) {
         fprintf(stderr, "\nsignal %d\n", sig);
     }
     kernel_dump_state();
+    if (kernel_crash_hook) kernel_crash_hook();
     signal(sig, SIG_DFL);
     raise(sig);
 }

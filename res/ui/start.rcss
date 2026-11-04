@@ -217,6 +217,19 @@ game-version {
     color: var(--muted);
 }
 
+/* the last session ended in a crash: where its report is (above the status chip) */
+crash-note {
+    display: none;
+    position: absolute;
+    left: 84dp;
+    bottom: 92dp;
+    max-width: 560dp;
+    font-size: 15dp;
+    color: var(--bad);
+}
+
+crash-note.shown { display: block; }
+
 version-label {
     position: absolute;
     right: 40dp;

@@ -82,6 +82,7 @@ typedef struct {
     uint32_t image_count;
     VkImage images[8];
     VkCommandPool pool;
+    int cpu_renderer;                /* the device is a CPU renderer (llvmpipe: WSL has no GPU driver) */
     int host_import;                 /* VK_EXT_external_memory_host: GPU access to guest memory */
     VkDeviceSize import_alignment;
     int fd_export;                   /* otherwise VK_KHR_external_memory_fd: pools become exported memory (buffer.c) */

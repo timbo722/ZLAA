@@ -8,6 +8,12 @@
  * Save data goes to $LAA_SAVE_DIR, or ~/.local/share/LAARecomp/save, then
  * <program id>/<user id>/. Paths from the game are absolute inside the mounted filesystem
  * ("/save.bin"); ".." is refused so the game can't reach outside its folder.
+ *
+ * Save data is journaled, as on the Switch, where writes count only once the game commits them:
+ * the first change after a commit leaves a mark (<folder>.dirty), and a commit copies the folder to
+ * <folder>.committed and removes the mark. Mounted with the mark still there (the app died between
+ * a change and its commit), the folder is put back as last committed; what was there is kept in
+ * <folder>.uncommitted-<time>. So a crash while saving never leaves a half-written save.
  * switchbrew.org/wiki/Filesystem_services
  */
 #define _DEFAULT_SOURCE
@@ -86,7 +92,121 @@ static void romfs_storage_dispatch(ServiceObject *self, IpcCall *call) {
 static const ServiceType romfs_storage_type = { "fs:IStorage(RomFS)", romfs_storage_dispatch, NULL };
 
 /* ================================================================ host folder as IFileSystem */
-typedef struct { char root[2048]; } HostFs;
+/* A journaled folder (save data): the mount and its files share it; never freed (a few per run) */
+typedef struct { char root[2048]; int dirty; } Journal;
+
+typedef struct { char root[2048]; Journal *journal; } HostFs;
+
+static void sync_dir(const char *dir) {
+    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (fd >= 0) { fsync(fd); close(fd); }
+}
+
+/* rm -rf */
+static void remove_tree(const char *path) {
+    DIR *d = opendir(path);
+    if (!d) { unlink(path); return; }
+    struct dirent *e;
+    char sub[4096];
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+        remove_tree(sub);
+    }
+    closedir(d);
+    rmdir(path);
+}
+
+/* cp -r, each file synced; 0 or -1 */
+static int copy_tree(const char *from, const char *to) {
+    struct stat st;
+    if (stat(from, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) {
+        int in = open(from, O_RDONLY), out = open(to, O_CREAT | O_TRUNC | O_WRONLY, 0644), r = in >= 0 && out >= 0 ? 0 : -1;
+        char buf[65536];
+        ssize_t n;
+        while (r == 0 && (n = read(in, buf, sizeof buf)) > 0) if (write(out, buf, (size_t)n) != n) r = -1;
+        if (out >= 0 && fsync(out) != 0) r = -1;
+        if (in >= 0) close(in);
+        if (out >= 0) close(out);
+        return r;
+    }
+    if (mkdir(to, 0755) != 0 && errno != EEXIST) return -1;
+    DIR *d = opendir(from);
+    if (!d) return -1;
+    struct dirent *e;
+    int r = 0;
+    char a[4096], b[4096];
+    while (r == 0 && (e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        snprintf(a, sizeof a, "%s/%s", from, e->d_name);
+        snprintf(b, sizeof b, "%s/%s", to, e->d_name);
+        r = copy_tree(a, b);
+    }
+    closedir(d);
+    sync_dir(to);
+    return r;
+}
+
+/* Mounting a journaled folder: put it back as last committed if a change never got its commit */
+static Journal *journal_open(const char *root) {
+    static Journal journals[16];
+    static int n;
+    for (int i = 0; i < n; i++) if (strcmp(journals[i].root, root) == 0) return &journals[i];
+    if (n == 16) return NULL;
+    Journal *j = &journals[n++];
+    snprintf(j->root, sizeof j->root, "%s", root);
+    char mark[2100], committed[2100], kept[2200];
+    snprintf(mark, sizeof mark, "%s.dirty", root);
+    snprintf(committed, sizeof committed, "%s.committed", root);
+    struct stat st;
+    if (stat(mark, &st) == 0 && stat(committed, &st) == 0) {
+        snprintf(kept, sizeof kept, "%s.uncommitted-%ld", root, (long)time(NULL));
+        if (rename(root, kept) == 0 && copy_tree(committed, root) == 0) {
+            fprintf(stderr, "fs: %s had changes the game never committed (the app closed while saving): "
+                    "put back as last committed; the changes are kept in %s\n", root, kept);
+            unlink(mark);
+            sync_dir(root);
+        } else {
+            fprintf(stderr, "fs: couldn't put %s back as last committed\n", root);
+        }
+    } else if (stat(committed, &st) != 0) {
+        copy_tree(root, committed);                 /* (the first mount: what is there counts as committed) */
+        unlink(mark);
+    }
+    return j;
+}
+
+/* Before a change: the mark, once per commit */
+static void journal_change(Journal *j) {
+    if (!j || j->dirty) return;
+    char mark[2100];
+    snprintf(mark, sizeof mark, "%s.dirty", j->root);
+    int fd = open(mark, O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0) { fsync(fd); close(fd); }
+    char *slash = strrchr(mark, '/');
+    if (slash) { *slash = 0; sync_dir(mark); }
+    j->dirty = 1;
+}
+
+/* Commit: the folder as it is now becomes the committed copy, then the mark goes */
+static void journal_commit(Journal *j) {
+    if (!j || !j->dirty) return;
+    char committed[2100], tmp[2100], old[2100], mark[2100];
+    snprintf(committed, sizeof committed, "%s.committed", j->root);
+    snprintf(tmp, sizeof tmp, "%s.committing", j->root);
+    snprintf(old, sizeof old, "%s.committed-old", j->root);
+    snprintf(mark, sizeof mark, "%s.dirty", j->root);
+    sync_dir(j->root);
+    remove_tree(tmp);
+    if (copy_tree(j->root, tmp) != 0) { fprintf(stderr, "fs: commit of %s: couldn't copy it\n", j->root); return; }
+    remove_tree(old);
+    rename(committed, old);
+    if (rename(tmp, committed) != 0) { rename(old, committed); return; }
+    remove_tree(old);
+    unlink(mark);
+    j->dirty = 0;
+}
 
 /* Does the path contain a ".." component? */
 static int has_dotdot(const char *path) {
@@ -114,7 +234,7 @@ static uint32_t host_path(const HostFs *fs, const IpcCall *call, int index, char
 }
 
 /* ---- IFile ---- */
-typedef struct { int fd; } HostFile;
+typedef struct { int fd; Journal *journal; } HostFile;
 
 static void file_destroy(ServiceObject *self) {
     HostFile *f = self->state;
@@ -141,12 +261,14 @@ static void file_dispatch(ServiceObject *self, IpcCall *call) {
         IpcBuffer b = ipc_in_buffer(call, 0);
         if (size > b.size) size = b.size;
         const uint8_t *src = ipc_guest_ptr(b.addr, size);
+        journal_change(f->journal);
         if (!src || pwrite(f->fd, src, size, (off_t)off) != (ssize_t)size) call->result = errno_result();
         break;
     }
     case 2:                                 /* Flush */
         break;
     case 3:                                 /* SetSize(size) */
+        journal_change(f->journal);
         if (ftruncate(f->fd, (off_t)ipc_in64(call, 0)) != 0) call->result = errno_result();
         break;
     case 4: {                               /* GetSize -> u64 */
@@ -237,6 +359,7 @@ static void hostfs_dispatch(ServiceObject *self, IpcCall *call) {
     switch (call->cmd) {
     case 0: {                               /* CreateFile(mode, size, path) */
         if ((r = host_path(fs, call, 0, path, sizeof path))) break;
+        journal_change(fs->journal);
         int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0644);
         if (fd < 0) { r = errno_result(); break; }
         if (ftruncate(fd, (off_t)ipc_in64(call, 8)) != 0) r = errno_result();
@@ -245,18 +368,22 @@ static void hostfs_dispatch(ServiceObject *self, IpcCall *call) {
     }
     case 1:                                 /* DeleteFile(path) */
         if ((r = host_path(fs, call, 0, path, sizeof path))) break;
+        journal_change(fs->journal);
         if (unlink(path) != 0) r = errno_result();
         break;
     case 2:                                 /* CreateDirectory(path) */
         if ((r = host_path(fs, call, 0, path, sizeof path))) break;
+        journal_change(fs->journal);
         if (mkdir(path, 0755) != 0) r = errno_result();
         break;
     case 3:                                 /* DeleteDirectory(path) */
         if ((r = host_path(fs, call, 0, path, sizeof path))) break;
+        journal_change(fs->journal);
         if (rmdir(path) != 0) r = errno_result();
         break;
     case 5: case 6:                         /* RenameFile, RenameDirectory(old path, new path) */
         if ((r = host_path(fs, call, 0, path, sizeof path)) || (r = host_path(fs, call, 1, path2, sizeof path2))) break;
+        journal_change(fs->journal);
         if (rename(path, path2) != 0) r = errno_result();
         break;
     case 7: {                               /* GetEntryType(path) -> 0 directory, 1 file */
@@ -274,6 +401,7 @@ static void hostfs_dispatch(ServiceObject *self, IpcCall *call) {
         HostFile *f = malloc(sizeof *f);
         if (!f) exit(1);
         f->fd = fd;
+        f->journal = fs->journal;
         ipc_out_object(call, ipc_new_object(&file_type, f));
         break;
     }
@@ -288,7 +416,8 @@ static void hostfs_dispatch(ServiceObject *self, IpcCall *call) {
         ipc_out_object(call, ipc_new_object(&directory_type, d));
         break;
     }
-    case 10:                                /* Commit: writes already went to the host */
+    case 10:                                /* Commit */
+        journal_commit(fs->journal);
         break;
     case 11: case 12: {                     /* GetFreeSpaceSize, GetTotalSpaceSize -> u64 */
         struct statvfs sv;
@@ -303,10 +432,11 @@ static void hostfs_dispatch(ServiceObject *self, IpcCall *call) {
 }
 static const ServiceType hostfs_type = { "fs:IFileSystem", hostfs_dispatch, hostfs_destroy };
 
-static ServiceObject *open_host_fs(const char *dir) {
+static ServiceObject *open_host_fs(const char *dir, int journaled) {
     HostFs *fs = calloc(1, sizeof *fs);
     if (!fs || make_dirs(dir) != 0) { perror(dir); exit(1); }
     snprintf(fs->root, sizeof fs->root, "%s", dir);
+    if (journaled) fs->journal = journal_open(dir);
     return ipc_new_object(&hostfs_type, fs);
 }
 
@@ -346,7 +476,7 @@ static void fsp_dispatch(ServiceObject *self, IpcCall *call) {
         snprintf(dir, sizeof dir, "%s/%016" PRIx64 "/%016" PRIx64 "%016" PRIx64 "_type%u", root, program,
                  user_hi, user_lo, type);
         if (ipc_trace) fprintf(stderr, "fs: save data -> %s\n", dir);
-        ipc_out_object(call, open_host_fs(dir));
+        ipc_out_object(call, open_host_fs(dir, 1));
         break;
     }
     case 61:                                /* OpenSaveDataInfoReaderBySaveDataSpaceId */

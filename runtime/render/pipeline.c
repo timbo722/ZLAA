@@ -600,7 +600,9 @@ static int sync_pipelines = -1;
 
 static void start_compile_threads(void) {        /* (main thread) */
     if (sync_pipelines >= 0) return;
-    sync_pipelines = getenv("LAA_SYNC_PIPELINES") != NULL;
+    /* (on a CPU renderer too: it keeps no compiled code between runs, so every run would start cold and skip
+     * draws while compiles run: things popping in; it is slow anyway) */
+    sync_pipelines = getenv("LAA_SYNC_PIPELINES") != NULL || vk.cpu_renderer;
     render_pipeline_layout();                    /* (made before any thread can use it) */
     int threads = getenv("LAA_COMPILE_THREADS") ? atoi(getenv("LAA_COMPILE_THREADS")) : COMPILE_THREADS;
     for (int i = 0; !sync_pipelines && i < threads; i++) {
@@ -618,6 +620,16 @@ VkPipeline render_pipeline(const PipelineKey *k) {
     for (Pipeline *p = pipeline_buckets[b]; p; p = p->next)
         if (memcmp(&p->key, k, sizeof *k) == 0) {
             if (__atomic_load_n(&p->ready, __ATOMIC_ACQUIRE)) return p->pipeline;
+            if (sync && !__atomic_exchange_n(&p->started, 1, __ATOMIC_ACQ_REL)) {   /* (one made ahead: no threads) */
+                double t0 = compile_clock();
+                p->pipeline = create(k);
+                compiled(t0);
+                render_compile_ms += compile_clock() - t0;
+                render_compiles++;
+                if (p->pipeline && !p->remembered) remember(k);
+                __atomic_store_n(&p->ready, 1, __ATOMIC_RELEASE);
+                return p->pipeline;
+            }
             if (!__atomic_load_n(&p->started, __ATOMIC_ACQUIRE) && p->remembered && !p->next_urgent) {
                 p->next_urgent = 1;                  /* (still waiting among those made ahead: needed now) */
                 pthread_mutex_lock(&compile_lock);

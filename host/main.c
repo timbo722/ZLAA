@@ -261,10 +261,14 @@ static void read_input(void) {
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>
 #include <android/log.h>
+#include <dirent.h>
 #include <pthread.h>
+#include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 static FILE *log_file;
+static int log_pipe = -1;                            /* (the pump's end) */
 
 /* Native stdout/stderr go nowhere on Android: they are pointed at a pipe, and this thread
  * copies each line to logcat and to the app folder's log.txt. */
@@ -294,16 +298,77 @@ static void *log_pump(void *arg) {
     return NULL;
 }
 
+/* A crash: the report is in the pipe; let the pump write it to log.txt before the process dies */
+static void crash_flush(void) {
+    for (int i = 0; i < 50; i++) {                   /* (at most half a second) */
+        int left = 0;
+        if (log_pipe < 0 || ioctl(log_pipe, FIONREAD, &left) != 0 || left == 0) break;
+        struct timespec ts = { 0, 10000000 };
+        nanosleep(&ts, NULL);
+    }
+    struct timespec ts = { 0, 20000000 };            /* (the pump's last line) */
+    nanosleep(&ts, NULL);
+    if (log_file) { fflush(log_file); fsync(fileno(log_file)); }
+}
+
+/* The last session's log becomes log.prev.txt; if it ended in a crash report, a copy is kept in crashes/ (the
+ * newest 5) and LAA_LAST_CRASH names it (the start screen says so) */
+static void keep_last_log(const char *base) {
+    char path[1024], prev[1024], line[512];
+    snprintf(path, sizeof path, "%s/log.txt", base);
+    snprintf(prev, sizeof prev, "%s/log.prev.txt", base);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    int crashed = 0;
+    while (!crashed && fgets(line, sizeof line, f))
+        crashed = strstr(line, "host backtrace") || strstr(line, "memory fault at") || strncmp(line, "signal ", 7) == 0;
+    fclose(f);
+    rename(path, prev);
+    if (!crashed) return;
+    char dir[1024], copy[1100];
+    snprintf(dir, sizeof dir, "%s/crashes", base);
+    mkdir(dir, 0755);
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    snprintf(copy, sizeof copy, "%s/crash-%04d%02d%02d-%02d%02d%02d.txt", dir, tm.tm_year + 1900, tm.tm_mon + 1,
+             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    FILE *in = fopen(prev, "rb"), *out = fopen(copy, "wb");
+    char buf[65536];
+    size_t n;
+    while (in && out && (n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, out);
+    if (in) fclose(in);
+    if (out) fclose(out);
+    setenv("LAA_LAST_CRASH", copy, 1);
+    DIR *d = opendir(dir);                           /* the newest 5 (names sort by time) */
+    char *names[64];
+    int count = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) && count < 64)
+        if (strncmp(e->d_name, "crash-", 6) == 0) names[count++] = strdup(e->d_name);
+    if (d) closedir(d);
+    for (int i = 0; i < count; i++)
+        for (int j = i + 1; j < count; j++)
+            if (strcmp(names[i], names[j]) > 0) { char *t = names[i]; names[i] = names[j]; names[j] = t; }
+    for (int i = 0; i < count; i++) {
+        if (i < count - 5) { snprintf(copy, sizeof copy, "%s/%s", dir, names[i]); unlink(copy); }
+        free(names[i]);
+    }
+}
+
 /* The app folder's paths; logging; env.txt */
 static void android_setup(const char **exefs, const char **romfs) {
     static char exefs_path[1024], romfs_path[1024];
     const char *base = SDL_GetAndroidExternalStoragePath();
     if (!base) base = SDL_GetAndroidInternalStoragePath();
     char path[1024];
+    keep_last_log(base);
     snprintf(path, sizeof path, "%s/log.txt", base);
     log_file = fopen(path, "w");
+    kernel_crash_hook = crash_flush;
     int p[2];
     if (pipe(p) == 0) {
+        log_pipe = p[0];
         dup2(p[1], 1);
         dup2(p[1], 2);
         setvbuf(stdout, NULL, _IOLBF, 0);

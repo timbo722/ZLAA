@@ -1,5 +1,5 @@
 #!/bin/bash
-# thor_run.sh <out.txt> [extra KEY=VALUE...]: load File 2 (Mabe Village) by script, stats on, until frame 3600
+# thor_run.sh <out.txt> [extra KEY=VALUE...]: load File 2 (Mabe Village) by script, stats on, until frame 3600 (UNTIL=n)
 . "$(dirname "$0")/env.sh"
 out=$1; shift
 { printf 'LAA_PLAYER_NAME=Link\nLAA_FONT_DIR=%s/fonts\nLAA_SHOW_FPS=1\nLAA_FRAME_STATS=1\nLAA_GPU_TIMING_AT=3000\n' $A
@@ -14,10 +14,10 @@ $W logcat -c
 TIS=/sys/devices/system/cpu/cpu7/cpufreq/stats/time_in_state   # (the prime core's time per clock: the governor
 tis_a=$($W shell cat $TIS | tr -d "\r")                #  varies it between sessions, and ms per frame with it)
 $W shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity > /dev/null
-# until frame 3600, the app dies, or 6 minutes pass; the app's log.txt has everything (logcat drops lines)
+# until frame UNTIL, the app dies, or 6 minutes pass; the app's log.txt has everything (logcat drops lines)
 for i in $(seq 72); do
   sleep 5
-  [ "$($W shell "grep -c 'frame 3600 presented' $A/log.txt" | tr -d "\r")" = "1" ] && break
+  [ "$($W shell "grep -c 'frame ${UNTIL:-3600} presented' $A/log.txt" | tr -d "\r")" = "1" ] && break
   [ "$($W shell "grep -c 'host backtrace' $A/log.txt" | tr -d "\r")" != "0" ] && { echo CRASHED; break; }
   [ -z "$($W shell pidof io.github.laarecomp | tr -d "\r")" ] && { echo "APP EXITED"; break; }
 done

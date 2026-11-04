@@ -119,6 +119,7 @@ static int pick_gpu(void) {
     VkPhysicalDeviceProperties p;
     vkGetPhysicalDeviceProperties(vk.gpu, &p);
     vkGetPhysicalDeviceMemoryProperties(vk.gpu, &vk.memory_props);
+    vk.cpu_renderer = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     fprintf(stderr, "vulkan: using %s (Vulkan %u.%u)\n", p.deviceName,
             VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion));
     return 0;
