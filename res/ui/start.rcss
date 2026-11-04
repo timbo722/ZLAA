@@ -1,170 +1,212 @@
-/* start.rcss - the start screen, laid out as Dusklight's prelaunch screen: a column of big buttons on the left,
-   the game files' status bottom left, the version bottom right. No background art: none of the game's comes with us. */
+/* start.rcss - the start screen: a night sea (sky fading into water, three slow waves), the title in the middle,
+   rounded sand buttons under it, the game files' status as a chip at the bottom. No background art: none of the
+   game's may come with us. */
 body {
     width: 100%;
     height: 100%;
-    font-size: var(--font-size-2xl);
-    color: #FFFFFF;
-    background-color: #070C0B;
+    background-color: var(--sea-deep);
 }
 
-backdrop {
+sky {
     display: block;
     position: absolute;
     width: 100%;
-    height: 100%;
-    decorator: vertical-gradient(#16322DFF #050807FF);
+    height: 70%;
+    decorator: vertical-gradient(#081424FF #12384CFF);
 }
 
-shade {
+sea {
     display: block;
     position: absolute;
+    top: 70%;
     width: 100%;
-    height: 100%;
-    decorator: horizontal-gradient(#000000D0 #00000000);
+    height: 30%;
+    decorator: vertical-gradient(#0E2C40FF #050E1AFF);
 }
 
-menu {
+/* a wave: a thin line of foam that fades out at both ends, drifting side to side */
+wave {
+    display: flex;
     position: absolute;
-    left: 96dp;
-    top: 50%;
-    transform: translateY(-55%);
-    width: 520dp;
-    display: flex;
-    flex-direction: column;
-    gap: 40dp;
+    height: 2dp;
 }
 
-hero {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-xs);
+half {
+    display: block;
+    flex: 1 1 0;
+    height: 100%;
+    decorator: horizontal-gradient(#E8F4F200 #E8F4F240);
 }
 
-eyebrow {
-    font-family: var(--font-family-display);
-    font-size: var(--font-size-6xl);
-    color: rgba(255, 255, 255, 85%);
+half.out {
+    decorator: horizontal-gradient(#E8F4F240 #E8F4F200);
+}
+
+wave.w1 { top: 12%; left: 8%; width: 46%; animation: 9s sine-in-out infinite alternate drift; }
+wave.w2 { top: 26%; left: 40%; width: 52%; animation: 11s sine-in-out infinite alternate drift-back; }
+wave.w3 { top: 50%; left: 14%; width: 38%; animation: 7s sine-in-out infinite alternate drift; }
+
+@keyframes drift {
+    from { transform: translateX(-30dp); }
+    to { transform: translateX(30dp); }
+}
+
+@keyframes drift-back {
+    from { transform: translateX(30dp); }
+    to { transform: translateX(-30dp); }
+}
+
+wordmark {
+    position: absolute;
+    left: 40dp;
+    top: 32dp;
+    font-weight: 800;
+    font-size: 16dp;
+    color: var(--sand);
+    letter-spacing: 2dp;
+}
+
+wordmark version-number {
+    font-weight: normal;
+    color: var(--muted);
+    letter-spacing: 0;
+    margin-left: var(--gap-sm);
+}
+
+title-block {
+    position: absolute;
+    top: 18%;
+    width: 100%;
+    text-align: center;
 }
 
 game-title {
-    font-family: var(--font-family-display);
-    font-weight: bold;
+    font-weight: 800;
     font-size: 64dp;
-    line-height: 1.05;
-    color: #FEE685;
-    font-effect: glow(0dp 6dp 0dp 3dp #000000A0);
+    line-height: 1.1;
+    color: var(--foam);
+    font-effect: shadow(0dp 4dp #04101C);
+}
+
+tagline {
+    margin-top: var(--gap-sm);
+    font-size: 18dp;
+    color: var(--muted);
 }
 
 menu-list {
+    position: absolute;
+    top: 44%;
+    left: 50%;
+    width: 300dp;
+    margin-left: -150dp;
     display: flex;
     flex-direction: column;
-    gap: var(--space-md);
-    align-items: flex-start;
+    gap: var(--gap-sm);
 }
 
 menu-list button {
-    width: 428dp;
-    height: 54dp;
-    padding: var(--space-sm) var(--space-lg);
-    border-radius: var(--radius-panel);
-    text-align: left;
-    text-transform: uppercase;
-    font-family: var(--font-family-heading);
-    font-size: var(--font-size-6xl);
-    line-height: 38dp;
-    color: #FFFFFF;
-    decorator: horizontal-gradient(#FEE68500 #FEE68500);
+    display: block;
+    height: 50dp;
+    border-radius: 25dp;
+    text-align: center;
+    font-weight: bold;
+    font-size: 24dp;
+    line-height: 50dp;
+    color: rgba(var(--foam-rgb), 85%);
+    background-color: rgba(var(--foam-rgb), 0%);
 }
 
-menu-list button.anim-done {
-    transition: color 0.1s linear-in-out;
+menu-list button icon {
+    width: 0;
+    margin-right: 0;
+    font-size: 24dp;
+    opacity: 0;
 }
+
+menu-list button icon.play { decorator: text("&#xe037;" center center); }
+menu-list button icon.gear { decorator: text("&#xe8b8;" center center); }
+menu-list button icon.exit { decorator: text("&#xe9ba;" center center); }
 
 menu-list button:hover,
 menu-list button:focus-visible {
-    color: #000000;
-    decorator: horizontal-gradient(#FEE685FF #FEE68500);
+    color: var(--sea-deep);
+    background-color: var(--sand);
+}
+
+menu-list button:focus-visible icon,
+menu-list button:hover icon {
+    width: 28dp;
+    margin-right: var(--gap-xs);
+    opacity: 1;
+}
+
+menu-list button:active {
+    background-color: var(--coral);
 }
 
 menu-list button[disabled] {
-    opacity: 0.4;
-    color: #FFFFFF;
-    decorator: horizontal-gradient(#FEE68500 #FEE68500);
+    color: rgba(var(--foam-rgb), 30%);
+    background-color: rgba(var(--foam-rgb), 0%);
 }
 
-game-info {
+status-chip {
     position: absolute;
-    left: 96dp;
-    bottom: 56dp;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-sm);
-    font-size: var(--font-size-4xl);
-    font-effect: glow(0dp 4dp 0dp 4dp black);
+    bottom: 36dp;
+    left: 50%;
+    width: 560dp;
+    margin-left: -280dp;
+    padding: 10dp var(--gap-xl);
+    border-radius: 22dp;
+    background-color: rgba(var(--sea-deep-rgb), 70%);
+    border-width: 1dp;
+    border-color: rgba(var(--foam-rgb), 12%);
+    text-align: center;
+    font-size: 17dp;
 }
 
-game-status {
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm);
+status-chip dot {
+    display: inline-block;
+    width: 10dp;
+    height: 10dp;
+    margin-right: var(--gap-sm);
+    border-radius: 5dp;
+    background-color: var(--muted);
 }
 
-game-status icon {
-    display: none;
-    width: 24dp;
-    height: 24dp;
-    font-size: var(--font-size-4xl);
-}
+status-chip[status=good] dot { background-color: var(--good); }
+status-chip[status=bad] dot { background-color: var(--bad); }
+status-chip[status=pending] dot { background-color: var(--coral); }
 
-game-status[status] icon { display: block; }
-game-status[status=good] { color: var(--color-ready); }
-game-status[status=bad] { color: var(--color-bad); }
-game-status[status=pending] { color: var(--color-pending); }
-game-status[status=good] icon { decorator: text("&#xe5ca;" center center); }
-game-status[status=bad] icon { decorator: text("&#xe5cd;" center center); }
-game-status[status=pending] icon { decorator: text("&#xe002;" center center); }
+game-status-label {
+    font-weight: bold;
+}
 
 game-version {
-    display: block;
-    font-size: var(--font-size-2xl);
-    color: var(--color-muted);
+    margin-left: var(--gap-sm);
+    color: var(--muted);
 }
 
-version-info {
-    display: block;
+hints {
     position: absolute;
-    right: 96dp;
-    bottom: 56dp;
-    font-size: var(--font-size-2xl);
-    color: var(--color-muted);
-    font-effect: glow(0dp 4dp 0dp 4dp black);
+    right: 40dp;
+    top: 30dp;
 }
 
-controls-hint {
-    display: block;
-    position: absolute;
-    right: 96dp;
-    top: 48dp;
-    font-size: var(--font-size-xl);
-    color: var(--color-muted);
-}
-
-/* the start animation: each item rises into place, one after another */
-.intro-item {
+/* the start: everything rises into place, one after another */
+.rise {
     opacity: 0;
-    transform: translateY(10dp);
-    transition: opacity transform 0.3s 0.1s cubic-in-out;
+    transform: translateY(12dp);
 }
 
-body.animate-in .intro-item {
+body.animate-in .rise {
     opacity: 1;
     transform: translateY(0dp);
 }
 
-.delay-0 { transition: opacity transform 0.3s 0.1s cubic-in-out; }
-.delay-1 { transition: opacity transform 0.3s 0.2s cubic-in-out; }
-.delay-2 { transition: opacity transform 0.3s 0.3s cubic-in-out; }
-.delay-3 { transition: opacity transform 0.3s 0.4s cubic-in-out; }
-.delay-4 { transition: opacity transform 0.3s 0.6s cubic-in-out; }
-.delay-5 { transition: opacity transform 0.3s 0.7s cubic-in-out; }
+.d0 { transition: opacity transform 0.4s 0.05s cubic-out; }
+.d1 { transition: opacity transform 0.5s 0.15s cubic-out; }
+.d2 { transition: opacity transform 0.4s 0.35s cubic-out; }
+.d3 { transition: opacity transform 0.4s 0.42s cubic-out; }
+.d4 { transition: opacity transform 0.4s 0.49s cubic-out; }
+.d5 { transition: opacity transform 0.4s 0.65s cubic-out; }

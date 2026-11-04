@@ -5,24 +5,23 @@
     <link type="text/rcss" href="start.rcss" />
 </head>
 <body>
-    <backdrop />
-    <shade />
-    <menu>
-        <hero class="intro-item delay-0">
-            <eyebrow>LAARecomp presents</eyebrow>
-            <game-title>Link's Awakening</game-title>
-        </hero>
-        <menu-list>
-            <button id="play" class="intro-item delay-1">Play</button>
-            <button id="settings" class="intro-item delay-2">Settings</button>
-            <button id="quit" class="intro-item delay-3">Quit</button>
-        </menu-list>
-    </menu>
-    <game-info class="intro-item delay-4">
-        <game-status id="game-status"><icon /><game-status-label id="game-status-label" /></game-status>
-        <game-version id="game-version" />
-    </game-info>
-    <version-info class="intro-item delay-5">Version <version-number id="version" /></version-info>
-    <controls-hint class="intro-item delay-5"><b>A</b> Select</controls-hint>
+    <sky />
+    <sea>
+        <wave class="w1"><half /><half class="out" /></wave>
+        <wave class="w2"><half /><half class="out" /></wave>
+        <wave class="w3"><half /><half class="out" /></wave>
+    </sea>
+    <wordmark class="rise d0">LAARecomp <version-number id="version" /></wordmark>
+    <title-block class="rise d1">
+        <game-title>Link's Awakening</game-title>
+        <tagline>Your own copy, recompiled for Android</tagline>
+    </title-block>
+    <menu-list>
+        <button id="play" class="rise d2"><icon class="play" />Play</button>
+        <button id="settings" class="rise d3"><icon class="gear" />Settings</button>
+        <button id="quit" class="rise d4"><icon class="exit" />Quit</button>
+    </menu-list>
+    <status-chip id="game-status" class="rise d5"><dot /><game-status-label id="game-status-label" /><game-version id="game-version" /></status-chip>
+    <hints class="rise d5"><span><key-cap>A</key-cap>Choose</span></hints>
 </body>
 </rml>

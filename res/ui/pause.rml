@@ -6,7 +6,7 @@
 </head>
 <body>
     <window id="window" class="small">
-        <heading class="window-title">Paused</heading>
+        <heading class="window-title"><icon class="pause" />Paused</heading>
         <menu-list>
             <button id="resume">Resume</button>
             <button id="settings">Settings</button>

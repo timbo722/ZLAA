@@ -119,6 +119,17 @@ static bool SDLCALL lifecycle(void *userdata, SDL_Event *e) {
     return true;
 }
 
+/* The first gamepad, once there is one: its events only come after it is opened (so the menus,
+ * which run before the game reads input, open it too) */
+static void open_pad(void) {
+    if (pad) return;
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    if (ids && n > 0) pad = SDL_OpenGamepad(ids[0]);
+    SDL_free(ids);
+    if (pad) map_face_buttons(pad);
+}
+
 /* Presses as events, so a quick tap isn't lost between two samples (input_press) */
 static void input_event(const SDL_Event *e) {
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && pad && e->gbutton.which == SDL_GetGamepadID(pad))
@@ -175,6 +186,9 @@ static int menu_action(const SDL_Event *e, int *down) {
 }
 
 static void menu_event(const SDL_Event *e) {
+    open_pad();
+    if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)    /* (which button is which on this controller) */
+        printf("menu: button %s\n", SDL_GetGamepadStringForButton((SDL_GamepadButton)e->gbutton.button));
     int down, a = menu_action(e, &down);
     if (a >= 0) ui_input(a, down);
     if (e->type >= SDL_EVENT_MOUSE_MOTION && e->type <= SDL_EVENT_MOUSE_WHEEL) ui_pointer(e);
@@ -201,13 +215,7 @@ static int menu_wanted(void) {
 #endif
 
 static void read_input(void) {
-    if (!pad) {
-        int n = 0;
-        SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        if (ids && n > 0) pad = SDL_OpenGamepad(ids[0]);
-        SDL_free(ids);
-        if (pad) map_face_buttons(pad);
-    }
+    open_pad();
     const bool *k = SDL_GetKeyboardState(NULL);
     InputState s = { 0 };
     for (size_t i = 0; i < sizeof keys / sizeof *keys; i++) if (k[keys[i].key]) s.buttons |= keys[i].bit;
@@ -432,6 +440,7 @@ int main(int argc, char **argv) {
     if (menu) {                                      /* the start screen, until Play or Quit */
         ui_start_menu();
         for (int r = UI_NONE; r != UI_PLAY;) {
+            open_pad();
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_EVENT_QUIT) { fflush(NULL); _exit(0); }

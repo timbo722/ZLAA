@@ -6,13 +6,16 @@
 </head>
 <body>
     <window id="window">
-        <tab-bar id="tab-bar" />
-        <close id="close" />
+        <header>
+            <heading class="window-title">Settings</heading>
+            <tab-bar id="tab-bar" />
+            <close id="close" />
+        </header>
         <content>
             <pane id="rows" class="rows" />
             <pane id="help" />
         </content>
-        <footer><b>L</b> / <b>R</b> Tabs &#160;&#160; <b>A</b> / <b>&#8592;</b> <b>&#8594;</b> Change &#160;&#160; <b>B</b> Back</footer>
+        <footer><hints><span><key-cap>L</key-cap><key-cap>R</key-cap>Page</span><span><key-cap>A</key-cap>Change</span><span><key-cap>B</key-cap>Back</span></hints></footer>
     </window>
 </body>
 </rml>

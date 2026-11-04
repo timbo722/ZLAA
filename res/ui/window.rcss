@@ -1,16 +1,15 @@
-/* window.rcss - the settings window and the pause menu: Dusklight's framed, translucent window with a tab bar,
-   a column of settings rows and a help pane beside it. */
+/* window.rcss - the settings window and the pause menu: a rounded deep-sea card. Settings: a header with the title
+   and a pill-shaped page switcher, rows of settings (value between ‹ › arrows) beside a help pane. */
 body {
     display: flex;
     width: 100%;
     height: 100%;
-    padding: 40dp 64dp;
-    font-size: var(--font-size-base);
-    background-color: #000000B0;
+    padding: 36dp 56dp;
+    background-color: #050E1AC0;
 }
 
 body.over-game {
-    background-color: transparent;
+    background-color: transparent;     /* (the paused game is dimmed already) */
 }
 
 window {
@@ -19,90 +18,97 @@ window {
     position: relative;
     width: 100%;
     height: 100%;
-    max-width: 1088dp;
+    max-width: 1040dp;
     margin: auto;
-    border-radius: var(--radius-window);
-    border-width: 2dp;
-    border-color: var(--color-border);
-    background-color: rgb(var(--color-surface-rgb));   /* (solid: Dusklight blurs what is behind; we can't yet) */
+    border-radius: 28dp;
+    border-width: 1dp;
+    border-color: rgba(var(--foam-rgb), 14%);
+    background-color: rgb(12, 30, 46);  /* (solid: no blur behind it yet) */
     opacity: 0;
-    transform: scale(0.94);
-    transition: opacity transform 0.2s cubic-in-out;
+    transform: translateY(16dp);
+    transition: opacity transform 0.22s cubic-out;
 }
 
 window[open] {
     opacity: 1;
-    transform: scale(1);
+    transform: translateY(0dp);
 }
 
 window.small {
-    width: 420dp;
+    width: 400dp;
     height: auto;
-    padding: var(--space-xl);
+    padding: 28dp;
 }
 
 heading.window-title {
-    font-family: var(--font-family-display);
-    font-weight: bold;
-    font-size: var(--font-size-6xl);
-    color: #FEE685;
-    margin-bottom: var(--space-lg);
+    font-weight: 800;
+    font-size: 30dp;
+    color: var(--foam);
+    margin: 0;
 }
 
+heading.window-title icon {
+    color: var(--sand);
+    margin-right: var(--gap-sm);
+}
+
+icon.pause { decorator: text("&#xe034;" center center); }
+
+header {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--gap-xl);
+    padding: 20dp 28dp 12dp 28dp;
+}
+
+/* the pages: one pill track, the chosen page a sand pill in it */
 tab-bar {
     display: flex;
-    flex: 0 0 var(--toolbar-height);
-    height: var(--toolbar-height);
-    background-color: rgba(var(--color-neutral-rgb), 10%);
-    border-bottom-width: 2dp;
-    border-bottom-color: var(--color-border);
-    border-radius: 12dp 12dp 0 0;
-    font-family: var(--font-family-heading);
-    font-weight: bold;
-    font-size: var(--font-size-xl);
-    text-transform: uppercase;
+    gap: var(--gap-xs);
+    padding: 4dp;
+    border-radius: 22dp;
+    background-color: rgba(var(--foam-rgb), 7%);
 }
 
 tab {
     display: block;
-    padding: 0 var(--space-xl);
-    line-height: var(--toolbar-height);
-    opacity: 0.35;
+    padding: 0 18dp;
+    height: 36dp;
+    line-height: 36dp;
+    border-radius: 18dp;
+    font-weight: bold;
+    font-size: 16dp;
+    color: var(--muted);
     cursor: pointer;
-    decorator: vertical-gradient(#C2A42D00 #C2A42D00);
-    transition: opacity 0.1s linear-in-out;
 }
 
 tab:hover {
-    opacity: 1;
-    decorator: vertical-gradient(#C2A42D00 #C2A42D60);
+    color: var(--foam);
+    background-color: rgba(var(--foam-rgb), 8%);
 }
 
 tab[selected] {
-    opacity: 1;
-    border-bottom-width: 4dp;
-    border-bottom-color: var(--color-accent);
-    font-effect: glow(0dp 4dp 0dp 4dp black);
+    color: var(--sea-deep);
+    background-color: var(--sand);
 }
 
 close {
     display: block;
-    position: absolute;
-    top: 4dp;
-    right: 8dp;
-    width: 48dp;
-    height: 48dp;
-    font-family: var(--font-family-icons);
-    font-size: var(--font-size-4xl);
-    color: rgba(var(--color-text-rgb), 70%);
-    border-radius: 6dp;
+    margin-left: auto;
+    width: 40dp;
+    height: 40dp;
+    border-radius: 20dp;
+    font-family: var(--font-icons);
+    font-size: 24dp;
+    color: var(--muted);
     decorator: text("&#xe5cd;" center center);
     cursor: pointer;
 }
 
 close:hover {
-    color: #FFFFFF;
-    background-color: rgba(var(--color-accent-rgb), 24%);
+    color: var(--foam);
+    background-color: rgba(var(--foam-rgb), 10%);
 }
 
 content {
@@ -110,6 +116,7 @@ content {
     flex: 1 1 auto;
     min-height: 0;
     overflow: hidden;
+    padding: 0 12dp;
 }
 
 pane {
@@ -117,84 +124,89 @@ pane {
     flex-flow: column;
     flex: 1 1 0;
     min-width: 0;
-    padding: var(--space-xl);
-    gap: var(--space-sm);
+    padding: 12dp 16dp;
+    gap: var(--gap-sm);
     overflow: hidden auto;
-    font-size: var(--font-size-2xl);
-}
-
-pane.rows {
-    border-right-width: 1dp;
-    border-right-color: var(--color-border);
 }
 
 pane#help {
-    font-size: var(--font-size-xl);
+    flex: 0 0 38%;
+    margin: 12dp 16dp 12dp 4dp;
+    padding: 20dp;
+    border-radius: 20dp;
+    background-color: rgba(var(--foam-rgb), 5%);
+    font-size: 16dp;
     line-height: 1.6;
 }
 
-select-button {
+pane#help heading {
+    color: var(--sand);
+}
+
+/* a setting: its name on the left, its value between arrows on the right */
+row {
     display: flex;
     flex: 0 0 auto;
     align-items: center;
-    gap: var(--space-sm);
-    padding: var(--space-sm) var(--space-lg);
-    border-radius: var(--radius-window);
-    border-width: 1dp;
-    border-color: rgba(var(--color-border-rgb), 25%);
-    background-color: var(--button-background);
+    height: 52dp;
+    padding: 0 8dp 0 20dp;
+    border-radius: 26dp;
+    background-color: rgba(var(--foam-rgb), 4%);
     nav: vertical;
 }
 
-select-button:hover,
-select-button:focus-visible {
-    background-color: var(--button-background-hover);
-    border-color: var(--color-accent);
+row:hover,
+row:focus-visible {
+    background-color: rgba(var(--sand-rgb), 16%);
+    border-width: 2dp;
+    border-color: var(--sand);
 }
 
-select-button:active {
-    background-color: var(--button-background-active);
+row.fixed {
+    opacity: 0.55;
 }
 
-select-button.fixed {
-    opacity: 0.6;
-}
-
-select-button key {
+row key {
     display: block;
-    flex: 0 1 auto;
-    font-family: var(--font-family-heading);
+    flex: 1 1 auto;
     font-weight: bold;
-    font-size: var(--font-size-xl);
-    text-transform: uppercase;
+    font-size: 18dp;
     white-space: nowrap;
 }
 
-select-button value {
-    display: block;
-    flex: 1 0 20%;
-    text-align: right;
-    font-size: var(--font-size-2xl);
+row value {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: var(--gap-xs);
+    font-size: 18dp;
+    color: var(--sand);
     white-space: nowrap;
+}
+
+row value icon {
+    font-size: 22dp;
+    color: var(--muted);
+}
+
+row:focus-visible value icon {
+    color: var(--sand);
 }
 
 about {
-    font-size: var(--font-size-xl);
+    font-size: 16dp;
+    padding: 4dp 8dp;
 }
 
 about heading {
-    font-family: var(--font-family-display);
-    font-size: var(--font-size-6xl);
-    color: #FEE685;
+    font-weight: 800;
+    font-size: 26dp;
+    color: var(--sand);
 }
 
 footer {
     flex: 0 0 auto;
-    padding: var(--space-sm) var(--space-xl);
-    border-top-width: 1dp;
-    border-top-color: rgba(var(--color-border-rgb), 50%);
-    font-size: var(--font-size-md);
-    color: var(--color-muted);
+    padding: 12dp 28dp 18dp 28dp;
     text-align: right;
 }
 
@@ -202,32 +214,35 @@ footer {
 menu-list {
     display: flex;
     flex-direction: column;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-lg);
+    gap: var(--gap-sm);
+    margin: 20dp 0 16dp 0;
 }
 
 menu-list button {
-    padding: var(--space-sm) var(--space-lg);
-    border-radius: var(--radius-panel);
-    text-transform: uppercase;
-    font-family: var(--font-family-heading);
-    font-size: var(--font-size-4xl);
-    color: #FFFFFF;
+    display: block;
+    height: 46dp;
+    border-radius: 23dp;
+    text-align: center;
+    line-height: 46dp;
+    font-weight: bold;
+    font-size: 20dp;
+    color: var(--foam);
+    background-color: rgba(var(--foam-rgb), 6%);
     nav: vertical;
-    decorator: horizontal-gradient(#FEE68500 #FEE68500);
 }
 
 menu-list button:hover,
 menu-list button:focus-visible {
-    color: #000000;
-    decorator: horizontal-gradient(#FEE685FF #FEE68500);
+    color: var(--sea-deep);
+    background-color: var(--sand);
 }
 
 menu-list button.danger {
-    color: var(--color-bad);
+    color: var(--bad);
 }
 
 menu-list button.danger:hover,
 menu-list button.danger:focus-visible {
-    color: #000000;
+    color: var(--sea-deep);
+    background-color: var(--coral);
 }

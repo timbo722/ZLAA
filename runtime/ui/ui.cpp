@@ -1,8 +1,8 @@
 /*
  * ui.cpp - the menus: the start screen, the settings window and the pause menu.
  *
- * They are RmlUi documents (res/ui: .rml files are HTML-like markup, .rcss files CSS-like style sheets), styled
- * after Dusklight's menus. RmlUi lays them out, animates them and tells ui_render.cpp what to draw;
+ * They are RmlUi documents (res/ui: .rml files are HTML-like markup, .rcss files CSS-like style sheets) in our
+ * own "Koholint at night" look. RmlUi lays them out, animates them and tells ui_render.cpp what to draw;
  * this file loads them, feeds them input and reacts to clicks. The controller moves the focus
  * between buttons (RmlUi's spatial navigation: the arrow keys) and A "clicks" the focused one
  * (RmlUi clicks the focused element on Enter); touch works as a mouse.
@@ -220,17 +220,18 @@ void build_settings() {
         if (tab != s.tab) continue;
         int c = choice_of(s);
         std::string value = c >= 0 ? s.choices[(size_t)c].label : getenv(s.var) ? getenv(s.var) : "";
-        rows += "<select-button id=\"row-" + std::to_string(i) + "\"" + (fixed[s.var] ? " class=\"fixed\"" : "") + ">"
-                "<key>" + esc(s.name) + "</key><value>" + (fixed[s.var] ? "<icon class=\"lock\"/> " : "") +
-                esc(value) + "</value></select-button>";
+        rows += "<row id=\"row-" + std::to_string(i) + "\"" + (fixed[s.var] ? " class=\"fixed\"" : "") + ">"
+                "<key>" + esc(s.name) + "</key><value>" +
+                (fixed[s.var] ? "<icon class=\"lock\"/><span>" + esc(value) + "</span>"
+                               : "<icon class=\"left\"/><span>" + esc(value) + "</span><icon class=\"right\"/>") +
+                "</value></row>";
     }
     if (tab == "About")
         rows = "<about><heading>LAARecomp " LAA_VERSION "</heading>"
                "<p>Link's Awakening (2019), statically recompiled from your own copy of the game: its code translated "
                "ahead of time into native code, and the Switch's system and graphics reimplemented. Not an emulator.</p>"
                "<p>No part of the game comes with this app: it runs only from a dump of your own cartridge or download.</p>"
-               "<p>Fonts: Fira Sans and Alegreya SC (SIL Open Font License), Material Symbols (Apache 2.0). "
-               "Menus made with RmlUi (MIT), in the style of Dusklight.</p></about>";
+               "<p>Fonts: Nunito (SIL Open Font License), Material Symbols (Apache 2.0). Menus made with RmlUi (MIT).</p></about>";
     settings_doc->GetElementById("tab-bar")->SetInnerRML(tabs);
     settings_doc->GetElementById("rows")->SetInnerRML(rows);
     settings_doc->GetElementById("help")->SetInnerRML(tab == "About" ? "" : "<p class=\"hint\">Choose a setting to see what it does.</p>");
@@ -241,8 +242,8 @@ void open_settings() {
     settings_doc->SetClass("over-game", showing == 2);   /* (the paused game is dimmed already) */
     settings_doc->Show(Rml::ModalFlag::Modal, Rml::FocusFlag::None);
     settings_doc->GetElementById("window")->SetAttribute("open", "");
-    if (!settings_doc->QuerySelector("select-button")) settings_doc->Focus();
-    else focus_first(settings_doc, "select-button");
+    if (!settings_doc->QuerySelector("row")) settings_doc->Focus();
+    else focus_first(settings_doc, "row");
 }
 
 void close_settings() {
@@ -257,7 +258,7 @@ void switch_tab(int step) {
     while (k < n && tab != kTabs[k]) k++;
     tab = kTabs[(k + n + (size_t)step) % n];
     build_settings();
-    if (Rml::Element *e = settings_doc->QuerySelector("select-button")) e->Focus(true);
+    if (Rml::Element *e = settings_doc->QuerySelector("row")) e->Focus(true);
 }
 
 int row_of(Rml::Element *e) {
@@ -324,6 +325,7 @@ void key(Rml::Input::KeyIdentifier k) {
 /* One press of an action (or a repeat of a held direction) */
 void act(int action) {
     bool in_settings = settings_doc && settings_doc->IsVisible();
+    context->ProcessMouseLeave();                        /* (buttons: only the focus is highlighted, not where a touch was) */
     switch (action) {
     case UI_UP: key(Rml::Input::KI_UP); break;
     case UI_DOWN: key(Rml::Input::KI_DOWN); break;
@@ -354,8 +356,8 @@ extern "C" int ui_init(void *sdl_window, const UiPaths *p) {
     Rml::SetSystemInterface(&sys);
     Rml::SetFileInterface(&files);
     if (!Rml::Initialise()) return -1;
-    static const char *const fonts[] = { "FiraSans-Regular.ttf", "FiraSans-Bold.ttf", "FiraSansCondensed-Regular.ttf",
-        "FiraSansCondensed-Bold.ttf", "AlegreyaSC-Regular.ttf", "AlegreyaSC-Bold.ttf", "MaterialSymbolsRounded.ttf" };
+    static const char *const fonts[] = { "Nunito-Regular.ttf", "Nunito-Bold.ttf", "Nunito-ExtraBold.ttf",
+                                         "MaterialSymbolsRounded.ttf" };
     for (const char *f : fonts)
         if (!Rml::LoadFontFace(std::string("ui/fonts/") + f)) fprintf(stderr, "ui: can't load the font %s\n", f);
     int w = 1280, h = 720;
