@@ -13,6 +13,7 @@
             <button id="quit" class="danger">Quit game</button>
         </menu-list>
         <p class="hint">Progress since your last save is lost when you quit.</p>
+        <hints><span><key-cap>A</key-cap>Select</span><span><key-cap>B</key-cap>Resume</span></hints>
     </window>
 </body>
 </rml>

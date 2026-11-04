@@ -5,52 +5,41 @@
     <link type="text/rcss" href="start.rcss" />
 </head>
 <body>
+    <backdrop />
+    <egg-glow />
     <sky>
         <star class="t1" style="left: 58%; top: 9%;" />
         <star class="t2" style="left: 66%; top: 21%;" />
         <star class="t3 big" style="left: 73%; top: 7%;" />
-        <star class="t1" style="left: 81%; top: 16%;" />
+        <star class="t1" style="left: 41%; top: 26%;" />
         <star class="t2" style="left: 88%; top: 6%;" />
-        <star class="t3" style="left: 94%; top: 24%;" />
-        <star class="t2 big" style="left: 62%; top: 33%;" />
-        <star class="t1" style="left: 91%; top: 38%;" />
-        <star class="t3" style="left: 52%; top: 18%;" />
-        <star class="t2" style="left: 77%; top: 30%;" />
-        <star class="t1" style="left: 46%; top: 6%;" />
-        <star class="t3" style="left: 98%; top: 12%;" />
-        <star class="t2" style="left: 38%; top: 13%;" />
-        <star class="t1" style="left: 69%; top: 42%;" />
+        <star class="t3" style="left: 34%; top: 11%;" />
+        <star class="t2 big" style="left: 61%; top: 33%;" />
+        <star class="t1" style="left: 52%; top: 18%;" />
+        <star class="t3" style="left: 96%; top: 14%;" />
+        <star class="t1" style="left: 27%; top: 5%;" />
+        <shooting-star />
     </sky>
-    <island class="rise d1">
-        <glow><halo class="h8" /><halo class="h7" /><halo class="h6" /><halo class="h5" /><halo class="h4" /><halo class="h3" /><halo class="h2" /><halo class="h1" /></glow>
-        <hill class="small" />
-        <hill />
-        <egg>
-            <egg-part style="left: 12dp; top: 0.0dp; width: 60dp; height: 60dp; border-radius: 30dp;" />
-            <egg-part style="left: 10dp; top: 5.3dp; width: 64dp; height: 64dp; border-radius: 32dp;" />
-            <egg-part style="left: 8dp; top: 10.7dp; width: 68dp; height: 68dp; border-radius: 34dp;" />
-            <egg-part style="left: 6dp; top: 16.0dp; width: 72dp; height: 72dp; border-radius: 36dp;" />
-            <egg-part style="left: 4dp; top: 21.3dp; width: 76dp; height: 76dp; border-radius: 38dp;" />
-            <egg-part style="left: 2dp; top: 26.7dp; width: 80dp; height: 80dp; border-radius: 40dp;" />
-            <egg-part style="left: 0dp; top: 32.0dp; width: 84dp; height: 84dp; border-radius: 42dp;" />
-        </egg>
-    </island>
     <sea>
-        <wave class="w1"><half /><half class="out" /></wave>
-        <wave class="w2"><half /><half class="out" /></wave>
-        <wave class="w3"><half /><half class="out" /></wave>
+        <sparkle class="t1" style="left: 80.4%; top: 5%; width: 18dp;" />
+        <sparkle class="t2" style="left: 81.6%; top: 14%; width: 24dp;" />
+        <sparkle class="t3" style="left: 79.6%; top: 26%; width: 28dp;" />
+        <sparkle class="t1" style="left: 82.2%; top: 37%; width: 26dp;" />
+        <sparkle class="t2" style="left: 78.9%; top: 50%; width: 34dp;" />
+        <sparkle class="t3" style="left: 81.0%; top: 63%; width: 32dp;" />
+        <sparkle class="t1" style="left: 77.8%; top: 76%; width: 40dp;" />
+        <sparkle class="t2" style="left: 82.4%; top: 87%; width: 36dp;" />
     </sea>
-    <wordmark class="rise d0">LAARecomp <version-number id="version" /></wordmark>
-    <title-block class="rise d1">
+    <hero class="rise d0">
+        <eyebrow><studio-name>LAARecomp</studio-name> presents</eyebrow>
         <game-title>Link's Awakening</game-title>
-        <tagline>Your own copy, recompiled for Android</tagline>
-    </title-block>
+    </hero>
     <menu-list>
-        <button id="play" class="rise d2"><icon class="play" />Play</button>
-        <button id="settings" class="rise d3"><icon class="gear" />Settings</button>
-        <button id="quit" class="rise d4"><icon class="exit" />Quit</button>
+        <button id="play" class="rise d1"><icon class="play" />Play</button>
+        <button id="settings" class="rise d2"><icon class="gear" />Settings</button>
+        <button id="quit" class="rise d3"><icon class="exit" />Quit</button>
     </menu-list>
-    <status-chip id="game-status" class="rise d5"><dot /><game-status-label id="game-status-label" /><game-version id="game-version" /></status-chip>
-    <hints class="rise d5"><span><key-cap>A</key-cap>Choose</span></hints>
+    <status-chip id="game-status" class="rise d4"><dot /><game-status-label id="game-status-label" /><game-version id="game-version" /></status-chip>
+    <version-label class="rise d5">Version <version-number id="version" /></version-label>
 </body>
 </rml>

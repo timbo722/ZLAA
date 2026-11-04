@@ -45,38 +45,32 @@ struct Setting {
     const char *help;
 };
 
-const char *const kTabs[] = { "Display", "Audio", "Controls", "Advanced", "About" };
+const char *const kTabs[] = { "Video", "Input", "Audio", "Interface", "About" };
 
-#define NEXT_START " Takes effect the next time the game starts."
+#define NEXT_START " Applies the next time the game starts."
 
+/* (named and worded as Dusklight's settings: a title, one short sentence) */
 const std::vector<Setting> kSettings = {
-    { "Display", "Mode", "LAA_DOCKED", { { "Handheld (720p)", NULL }, { "Docked (1080p)", "1" } }, 0,
-      "How the game sees the console. Handheld renders at up to 720p, docked at up to 1080p: sharper, "
-      "but the GPU works about twice as hard (more heat and battery)." NEXT_START },
-    { "Display", "Frame rate counter", "LAA_SHOW_FPS", { { "Off", NULL }, { "On", "1" } }, 0,
-      "Frames per second and the slowest frame of the last half second. Yellow when a frame missed "
-      "the 60 Hz display." },
-    { "Display", "Counter position", "LAA_FPS_CORNER",
-      { { "Bottom left", NULL }, { "Bottom right", "1" }, { "Top left", "2" }, { "Top right", "3" } }, 0,
-      "Which corner of the screen the frame rate counter sits in." },
-    { "Audio", "Volume", "LAA_VOLUME",
+    { "Video", "Console Mode", "LAA_DOCKED", { { "Handheld (720p)", NULL }, { "Docked (1080p)", "1" } }, 0,
+      "Docked renders at up to 1080p: sharper, but uses more power." NEXT_START },
+    { "Video", "Show FPS Counter", "LAA_SHOW_FPS", { { "Off", NULL }, { "On", "1" } }, 0,
+      "Show the frame rate in a corner of the screen." },
+    { "Video", "FPS Counter Position", "LAA_FPS_CORNER",
+      { { "Bottom Left", NULL }, { "Bottom Right", "1" }, { "Top Left", "2" }, { "Top Right", "3" } }, 0,
+      "The corner the FPS counter sits in." },
+    { "Input", "Button Layout", "LAA_SWAP_FACE", { { "Nintendo Style", NULL }, { "Xbox Style", "1" } }, 0,
+      "Xbox Style swaps A with B and X with Y, for controllers labelled that way." },
+    { "Input", "Stick Dead Zone", "LAA_DEADZONE",
+      { { "Small", "2000" }, { "Normal", NULL }, { "Large", "8000" } }, 1,
+      "How far a stick must move before it counts. Larger stops drift." },
+    { "Audio", "Master Volume", "LAA_VOLUME",
       { { "Off", "0" }, { "25%", "0.75" }, { "50%", "1.5" }, { "75%", "2.25" }, { "100%", "3" }, { "125%", "3.75" },
         { "150%", "4.5" }, { "200%", "6" } }, 4,
-      "The game's mix is quiet, so at 100% it is already amplified (about +10 dB); loud peaks are rounded off "
-      "instead of clipping." },
-    { "Controls", "Button layout", "LAA_SWAP_FACE", { { "As printed", NULL }, { "Swapped", "1" } }, 0,
-      "As printed: each button does what its letter says, as on a Switch. Swapped: A and B trade places, and "
-      "X and Y, for controllers labelled the Xbox way. The menus follow it too." },
-    { "Controls", "Stick dead zone", "LAA_DEADZONE",
-      { { "Small", "2000" }, { "Normal", NULL }, { "Large", "8000" } }, 1,
-      "How far a stick must move before it counts. Larger if Link drifts while you don't touch the stick, "
-      "smaller for finer control." },
-    { "Advanced", "Fast core for the game", "LAA_NO_PIN", { { "On", NULL }, { "Off", "1" } }, 0,
-      "Keeps the game's main thread on the phone's fastest CPU core and the other work off it. Smoother; turn it "
-      "off only to compare." NEXT_START },
-    { "Advanced", "Performance hints", "LAA_NO_ADPF", { { "On", NULL }, { "Off", "1" } }, 0,
-      "Tells Android how long each frame may take (its performance hint API), so it can raise the CPU clock in "
-      "time." NEXT_START },
+      "The volume of the whole game." },
+    { "Interface", "Skip Main Menu", "LAA_SKIP_MENU", { { "Off", NULL }, { "On", "1" } }, 0,
+      "Start the game right away when opening LAARecomp. Settings stay in the pause menu." },
+    { "Interface", "Show Shader Compilation", "LAA_SHADER_OSD", { { "Off", NULL }, { "On", "1" } }, 0,
+      "Show an overlay while shaders are being compiled for your device." },
 };
 
 std::map<std::string, std::string> config;              /* NAME -> value, as saved */
@@ -173,7 +167,7 @@ int showing;                                             /* 0: no menu, 1: start
 int result;                                              /* what ui_frame returns next */
 int game_ready;                                          /* the start screen's Play works */
 int settings_changed;                                    /* (ui_settings_changed) */
-std::string tab = "Display";
+std::string tab = "Video";
 uint64_t held_since[UI_ACTIONS], repeat_at[UI_ACTIONS];  /* (ns) direction presses repeat while held */
 
 /* LAA_UI_SCRIPT="frame:WHAT,...": presses at menu frames (UP DOWN LEFT RIGHT A B L R MENU), or SHOT (the frame
@@ -425,6 +419,14 @@ extern "C" void ui_start_menu(void) {
     start_doc->Show();
     start_doc->SetClass("animate-in", true);
     focus_first(start_doc, game_ready ? "#play" : "#settings");
+}
+
+extern "C" int ui_skip_start(void) {
+    ui_apply_settings();
+    const char *v = getenv("LAA_SKIP_MENU");
+    if (!v || !atoi(v)) return 0;
+    update_start_status();
+    return game_ready;
 }
 
 extern "C" void ui_pause(void) {

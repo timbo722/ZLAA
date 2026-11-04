@@ -450,7 +450,8 @@ int main(int argc, char **argv) {
         menu = ui_init(window, &p) == 0;
         if (!menu) fprintf(stderr, "menu: couldn't start; starting the game\n");
     }
-    if (menu) {                                      /* the start screen, until Play or Quit */
+    if (menu && ui_skip_start()) printf("menu: start screen skipped (Skip Main Menu)\n");
+    else if (menu) {                                 /* the start screen, until Play or Quit */
         ui_start_menu();
         for (int r = UI_NONE; r != UI_PLAY;) {
             open_pad();
@@ -464,6 +465,8 @@ int main(int argc, char **argv) {
             if (r == UI_QUIT) { fflush(NULL); _exit(0); }
             if (ui_settings_changed()) settings_changed();
         }
+    }
+    if (menu) {
         if (pad) map_face_buttons(pad);              /* (the settings as Play applied them) */
         kernel_settings_gen++;
     }

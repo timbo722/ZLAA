@@ -70,6 +70,7 @@ extern pthread_mutex_t render_queue_lock;          /* held around everything tha
 void render_count_work(void);                    /* a draw or dispatch was recorded (submit.c) */
 uint32_t render_recorded_work(void);             /* how many since the last submission */
 void render_collect_compile_stats(void);          /* background pipeline compiles into render_compile_ms (pipeline.c) */
+int64_t render_last_slow_compile(void);           /* when a pipeline compile last missed the driver's cache (ms, CLOCK_MONOTONIC) */
 #define RENDER_CONTEXTS 8                        /* submissions the CPU may be ahead of the GPU (submit.c) */
 int render_context(void);                        /* the context being recorded (0 .. NCTX-1) */
 int render_serial_done(uint64_t serial);
@@ -142,7 +143,8 @@ int render_pass_objects(void);                   /* passes with VkRenderPass obj
 VkRenderPass render_compatible_pass(uint32_t ncolor, const VkFormat *color, VkFormat depth);   /* (thread-safe) */
 void render_draw_copy(VkCommandBuffer cmd, VkImageView src_view, uint32_t src_w, uint32_t src_h, const VkOffset3D sb[2],
                       VkImageView dst_view, VkFormat dst_format, uint32_t dst_w, uint32_t dst_h, const VkOffset3D db[2],
-                      int linear, int flip);       /* (draw.c: a copy by drawing, outside a pass) */
+                      int linear, int flip, int blend);   /* (draw.c: a copy by drawing, outside a pass;
+                                                    blend: premultiplied src over dst) */
 void render_load_pipeline_keys(const char *path);   /* remembered pipelines (pipeline.c), from vk.c */
 void render_save_pipeline_keys(const char *path);
 VkPipelineLayout render_pipeline_layout(void);

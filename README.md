@@ -66,9 +66,10 @@ and the game's own dynamic resolution. Further into the game is still largely un
 - Handheld (720p) or docked (1080p) mode.
 - A start screen and a pause menu (the controller's Home/Mode button, Android's Back button):
 
-  ![Settings: display, audio, controls, advanced](docs/settings.jpg)
-- Settings: mode, frame rate counter (and its corner), volume, button layout (as printed or swapped), stick dead
-  zone and performance options. Most apply instantly, even from the pause menu.
+  ![Settings: video, input, audio, interface](docs/settings.jpg)
+- Settings: console mode, an FPS counter (and its corner), button layout (Nintendo or Xbox style), stick dead zone,
+  volume, skipping the start screen, and an overlay while shaders compile. Most apply instantly, even from the
+  pause menu.
 - Pressing Home suspends the game like a Switch does; coming back opens the pause menu.
 - The game's movies play through Android's own video decoder.
 - Shaders are compiled once and kept, so later sessions start without stutter.
@@ -183,7 +184,7 @@ each; the fuzzer checks single instructions bit for bit against [Unicorn](https:
 - [SDL 3](https://libsdl.org) - window, input and audio (zlib license)
 - [RmlUi](https://github.com/mikke89/RmlUi) - the menus (MIT)
 - [FreeType](https://freetype.org) - the menus' text (FreeType License)
-- [Nunito](https://github.com/googlefonts/nunito) - the menus' font (SIL Open Font License 1.1, `res/ui/fonts/OFL-Nunito.txt`)
+- [Nunito](https://github.com/googlefonts/nunito) - the menus' and overlays' font (SIL Open Font License 1.1, `res/ui/fonts/OFL-Nunito.txt`)
 - [Material Symbols](https://github.com/google/material-design-icons) - the menus' icons (Apache 2.0, `res/ui/fonts/LICENSE-MaterialSymbols.txt`)
 - [SPIR-V headers](https://github.com/KhronosGroup/SPIRV-Headers) by the Khronos Group - `third_party/spirv` (MIT-style license, in the files)
 - [Capstone](https://www.capstone-engine.org), [Unicorn](https://www.unicorn-engine.org), [pyelftools](https://github.com/eliben/pyelftools),

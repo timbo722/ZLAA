@@ -38,8 +38,8 @@ body {
     box-sizing: border-box;
 }
 
-div, p, heading, header, title-block, wordmark, game-title, tagline, menu-list, content, window, pane, tab-bar,
-about, footer, row, status-chip, hints, sky, sea, island, hill, egg, halo, star {
+div, p, heading, header, hero, eyebrow, game-title, menu-list, content, window, pane, tab-bar, about, footer, row,
+status-chip, hints {
     display: block;
 }
 
@@ -77,21 +77,31 @@ icon.lock { decorator: text("&#xe897;" center center); }
 icon.left { decorator: text("&#xe5cb;" center center); }
 icon.right { decorator: text("&#xe5cc;" center center); }
 
-/* a controller button in hints: a gold disc with its letter */
+/* a controller button in hints, shaped like the button: face buttons round, L and R the shoulder buttons' rounded
+   outer corner (<key-cap class="l">L</key-cap>) */
 key-cap {
     display: inline-block;
-    min-width: 24dp;
-    height: 24dp;
-    padding: 0 6dp;
+    width: 26dp;
+    height: 26dp;
     margin-right: var(--gap-xs);
-    border-radius: 12dp;
+    border-radius: 13dp;
     background-color: rgba(var(--gold-rgb), 90%);
     color: var(--night);
-    font-weight: bold;
+    font-weight: 800;
     font-size: 14dp;
-    line-height: 24dp;
+    line-height: 26dp;
     text-align: center;
 }
+
+key-cap.l, key-cap.r {
+    width: 38dp;
+    height: 22dp;
+    margin-top: 2dp;
+    line-height: 22dp;
+}
+
+key-cap.l { border-radius: 14dp 6dp 3dp 3dp; }
+key-cap.r { border-radius: 6dp 14dp 3dp 3dp; }
 
 hints {
     font-size: 15dp;

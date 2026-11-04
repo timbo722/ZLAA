@@ -1,5 +1,5 @@
 /*
- * ui.h - the menus (runtime/ui: RmlUi documents in Dusklight's style), as host/main.c sees them:
+ * ui.h - the menus (runtime/ui: RmlUi documents), as host/main.c sees them:
  * the start screen shown before the game loads (Play, Settings, Quit; whether the game files and
  * the game code are there) and the pause menu over the running game. Settings are saved in a
  * config file and become LAA_* environment variables when the game starts (env.txt lines win).
@@ -24,6 +24,7 @@ enum { UI_NONE, UI_PLAY, UI_QUIT, UI_RESUME };
 
 int ui_init(void *sdl_window, const UiPaths *paths);   /* after render_init; 0 = ok */
 void ui_start_menu(void);                /* show the start screen */
+int ui_skip_start(void);                 /* 1: Skip Main Menu is on and the game is ready (settings applied) */
 void ui_pause(void);                     /* show the pause menu (the game is suspended by the caller) */
 int ui_open(void);                       /* a menu is showing */
 void ui_input(int action, int down);     /* a press (down = 1) or release */

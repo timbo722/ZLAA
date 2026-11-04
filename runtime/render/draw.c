@@ -267,7 +267,7 @@ static VkFramebuffer find_framebuffer(VkRenderPass compat, const VkImageView *vi
 static VkDescriptorSetLayout dc_set_layout;
 static VkPipelineLayout dc_layout;
 static VkSampler dc_sampler, dc_linear;
-static struct { VkFormat format; VkPipeline pipeline; } dc_pipelines[16];
+static struct { VkFormat format; int blend; VkPipeline pipeline; } dc_pipelines[16];
 
 static VkShaderModule builtin_module(const uint32_t *code, size_t bytes) {
     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code };
@@ -277,8 +277,9 @@ static VkShaderModule builtin_module(const uint32_t *code, size_t bytes) {
 }
 
 /* The pipeline that copies into `format` (depth or color) */
-static VkPipeline copy_pipeline(VkFormat format) {
-    for (int i = 0; i < 16; i++) if (dc_pipelines[i].pipeline && dc_pipelines[i].format == format) return dc_pipelines[i].pipeline;
+static VkPipeline copy_pipeline(VkFormat format, int blend) {
+    for (int i = 0; i < 16; i++)
+        if (dc_pipelines[i].pipeline && dc_pipelines[i].format == format && dc_pipelines[i].blend == blend) return dc_pipelines[i].pipeline;
     if (!dc_layout) {
         VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b };
@@ -314,6 +315,11 @@ static VkPipeline copy_pipeline(VkFormat format) {
     VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = !color, .depthWriteEnable = !color, .depthCompareOp = VK_COMPARE_OP_ALWAYS };
     VkPipelineColorBlendAttachmentState att = { .colorWriteMask = 0xF };
+    if (blend)                                   /* (premultiplied alpha: dst = src + dst * (1 - src.a)) */
+        att = (VkPipelineColorBlendAttachmentState){ .blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 0xF };
     VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
                                                .attachmentCount = color, .pAttachments = &att };
     VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
@@ -334,7 +340,8 @@ static VkPipeline copy_pipeline(VkFormat format) {
     VK_CHECK(vkCreateGraphicsPipelines(vk.device, vk.pipeline_cache, 1, &ci, NULL, &p));
     vkDestroyShaderModule(vk.device, vs, NULL);
     vkDestroyShaderModule(vk.device, fs, NULL);
-    for (int i = 0; i < 16; i++) if (!dc_pipelines[i].pipeline) { dc_pipelines[i].format = format; dc_pipelines[i].pipeline = p; break; }
+    for (int i = 0; i < 16; i++)
+        if (!dc_pipelines[i].pipeline) { dc_pipelines[i].format = format; dc_pipelines[i].blend = blend; dc_pipelines[i].pipeline = p; break; }
     return p;
 }
 
@@ -343,8 +350,8 @@ static VkPipeline copy_pipeline(VkFormat format) {
  * down (db's top row gets sb's bottom one). Recorded into cmd, outside a render pass. */
 void render_draw_copy(VkCommandBuffer cmd, VkImageView src_view, uint32_t src_w, uint32_t src_h, const VkOffset3D sb[2],
                       VkImageView dst_view, VkFormat dst_format, uint32_t dst_w, uint32_t dst_h, const VkOffset3D db[2],
-                      int linear, int flip) {
-    VkPipeline pipeline = copy_pipeline(dst_format);
+                      int linear, int flip, int blend) {
+    VkPipeline pipeline = copy_pipeline(dst_format, blend);
     VkDescriptorSet set = new_set(dc_set_layout);
     VkDescriptorImageInfo ii = { linear ? dc_linear : dc_sampler, src_view, VK_IMAGE_LAYOUT_GENERAL };
     VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
@@ -354,7 +361,7 @@ void render_draw_copy(VkCommandBuffer cmd, VkImageView src_view, uint32_t src_w,
     VkImageAspectFlags aspects = render_aspects(dst_format);
     int color = (aspects & VK_IMAGE_ASPECT_COLOR_BIT) != 0;
     /* a copy over all of dst needn't load it first (on the tiler: no read of the old image) */
-    int whole = db[0].x == 0 && db[0].y == 0 && db[1].x == (int32_t)dst_w && db[1].y == (int32_t)dst_h;
+    int whole = !blend && db[0].x == 0 && db[0].y == 0 && db[1].x == (int32_t)dst_w && db[1].y == (int32_t)dst_h;
     if (color && render_pass_objects()) {
         PassKey k;
         memset(&k, 0, sizeof k);
@@ -399,7 +406,7 @@ static void draw_copy(HostImage *src, HostImage *dst, const VkOffset3D sb[2], co
     render_image_init_layout(cmd, dst);
     render_barrier(cmd);
     render_draw_copy(cmd, render_image_view(src, &(TextureView){ 0 }, TEXDIM_2D, 0), src->width, src->height, sb,
-                     dst->target_view, dst->format, dst->width, dst->height, db, linear, 0);
+                     dst->target_view, dst->format, dst->width, dst->height, db, linear, 0, 0);
 }
 
 /* Color copies that can be drawn (draw_copy): level 0 of 2D images, one layer, between formats a

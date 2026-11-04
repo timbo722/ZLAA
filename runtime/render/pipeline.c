@@ -551,6 +551,18 @@ static unsigned async_compiles;
 
 static void remember(const PipelineKey *k);
 
+/* When a compile last missed the driver's cache (took long): the shader compilation overlay shows for a second
+ * after it (render.c; Show Shader Compilation) */
+#define SLOW_COMPILE_MS 4.0
+static int64_t slow_compile_at;                  /* (CLOCK_MONOTONIC ms) */
+
+int64_t render_last_slow_compile(void) { return __atomic_load_n(&slow_compile_at, __ATOMIC_RELAXED); }
+
+static void compiled(double t0) {
+    double t = compile_clock();
+    if (t - t0 > SLOW_COMPILE_MS) __atomic_store_n(&slow_compile_at, (int64_t)t, __ATOMIC_RELAXED);
+}
+
 static void *compile_thread(void *arg) {
     host_thread_init();                          /* (off the game's main core) */
     (void)arg;
@@ -563,6 +575,7 @@ static void *compile_thread(void *arg) {
         if (__atomic_exchange_n(&p->started, 1, __ATOMIC_ACQ_REL)) continue;   /* (in both queues: done once) */
         double t0 = compile_clock();
         VkPipeline v = create(&p->key);
+        compiled(t0);
         pthread_mutex_lock(&compile_lock);
         async_compile_ms += compile_clock() - t0;
         async_compiles++;
@@ -635,6 +648,7 @@ VkPipeline render_pipeline(const PipelineKey *k) {
     double t0 = compile_clock();                     /* (synchronous: as asked, or the queue is full) */
     p->started = 1;
     p->pipeline = create(k);
+    compiled(t0);
     render_compile_ms += compile_clock() - t0;
     render_compiles++;
     if (p->pipeline) remember(k);

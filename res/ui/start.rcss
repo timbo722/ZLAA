@@ -1,19 +1,44 @@
-/* start.rcss - the start screen: night over Koholint. A dark warm sky with twinkling stars, Mt. Tamaranch's dark
-   silhouette with the Wind Fish's egg glowing on top, the sea below with faint gold waves; the title and the menu on
-   the left. All plain shapes: none of the game's art may come with us. */
+/* start.rcss - the start screen: night over Koholint. A painted picture (images/night.png, made by
+   tools/make_menu_art.py: a starry sky, Mt. Tamaranch with the Wind Fish's egg glowing on top, the island, the sea)
+   with a little life on top: the egg's glow breathing, stars twinkling, now and then a shooting star, the light
+   glinting on the water. The title and the menu on the left, where the picture is darkest. */
 body {
     width: 100%;
     height: 100%;
     background-color: var(--night);
 }
 
-sky {
+/* the picture and the egg's glow: both fill the screen the same way (cover, centred), so they stay lined up */
+backdrop, egg-glow {
     display: block;
     position: absolute;
+    left: 0;
+    top: 0;
     width: 100%;
-    height: 70%;
-    decorator: vertical-gradient(#07080AFF #15170FFF);
+    height: 100%;
 }
+
+backdrop { decorator: image(images/night.png cover center center); }
+
+egg-glow {
+    decorator: image(images/glow.png cover center center);
+    animation: 4.5s sine-in-out infinite alternate breathe;
+}
+
+@keyframes breathe {
+    from { opacity: 0.25; }
+    to { opacity: 1; }
+}
+
+sky, sea {
+    display: block;
+    position: absolute;
+    left: 0;
+    width: 100%;
+}
+
+sky { top: 0; height: 70%; }
+sea { top: 70%; height: 30%; }
 
 star {
     display: block;
@@ -22,7 +47,6 @@ star {
     height: 3dp;
     border-radius: 2dp;
     background-color: #FEF3C8;
-    opacity: 0.3;
 }
 
 star.big {
@@ -35,166 +59,74 @@ star.t2 { animation: 4.3s sine-in-out infinite alternate twinkle; }
 star.t3 { animation: 5.7s sine-in-out infinite alternate twinkle; }
 
 @keyframes twinkle {
-    from { opacity: 0.15; }
+    from { opacity: 0.1; }
     to { opacity: 0.9; }
 }
 
-/* the mountain and the egg, measured from the right edge: the hill's middle is 240 dp from it */
-island {
+/* a shooting star: a short streak that crosses the upper sky once every 14 s */
+shooting-star {
     display: block;
     position: absolute;
-    right: 0;
-    bottom: 30%;
-    width: 640dp;
-    height: 420dp;
+    left: 30%;
+    top: 8%;
+    width: 120dp;
+    height: 2dp;
+    decorator: horizontal-gradient(#FEF3C800 #FEF3C8E0);
+    opacity: 0;
+    transform: rotate(16deg);
+    animation: 14s linear 3s infinite meteor;
 }
 
-hill {
+@keyframes meteor {
+    0% { opacity: 0; transform: translate(0dp, 0dp) rotate(16deg); }
+    1% { opacity: 1; }
+    6% { opacity: 0; transform: translate(260dp, 75dp) rotate(16deg); }
+    100% { opacity: 0; transform: translate(260dp, 75dp) rotate(16deg); }
+}
+
+/* the light on the water: short gold lines in the egg's reflection that come and go */
+sparkle {
     display: block;
-    position: absolute;
-    right: -80dp;
-    bottom: 0;
-    width: 640dp;
-    height: 290dp;
-    border-radius: 320dp 320dp 0 0;
-    background-color: #12140E;
-    border-top-width: 1dp;
-    border-color: rgba(var(--gold-rgb), 18%);
-}
-
-hill.small {
-    right: 430dp;
-    width: 360dp;
-    height: 110dp;
-    border-radius: 180dp 180dp 0 0;
-    background-color: #0E100B;
-    border-color: rgba(var(--gold-rgb), 10%);
-}
-
-/* the Wind Fish's egg on the top: seven circles along its axis, each a little wider than the one above (RmlUi
-   draws no ellipses), make the egg's outline */
-egg {
-    display: block;
-    position: absolute;
-    right: 198dp;
-    bottom: 286dp;
-    width: 84dp;
-    height: 116dp;
-}
-
-egg-part {
-    display: block;
-    position: absolute;
-    background-color: #F4EDDA;
-}
-
-halo {
-    display: block;
-    position: absolute;
-    background-color: #FEE685;
-    opacity: 0.022;
-}
-
-halo.h1 { right: 180dp; bottom: 284dp; width: 120dp; height: 120dp; border-radius: 60dp; }
-halo.h2 { right: 160dp; bottom: 264dp; width: 160dp; height: 160dp; border-radius: 80dp; }
-halo.h3 { right: 140dp; bottom: 244dp; width: 200dp; height: 200dp; border-radius: 100dp; }
-halo.h4 { right: 120dp; bottom: 224dp; width: 240dp; height: 240dp; border-radius: 120dp; }
-halo.h5 { right: 100dp; bottom: 204dp; width: 280dp; height: 280dp; border-radius: 140dp; }
-halo.h6 { right: 80dp; bottom: 184dp; width: 320dp; height: 320dp; border-radius: 160dp; }
-halo.h7 { right: 55dp; bottom: 159dp; width: 370dp; height: 370dp; border-radius: 185dp; }
-halo.h8 { right: 30dp; bottom: 134dp; width: 420dp; height: 420dp; border-radius: 210dp; }
-
-glow {
-    display: block;
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 100%;
-    height: 100%;
-    animation: 4s sine-in-out infinite alternate breathe;
-}
-
-sea {
-    display: block;
-    position: absolute;
-    top: 70%;
-    width: 100%;
-    height: 30%;
-    decorator: vertical-gradient(#0C1A1EFF #040607FF);
-}
-
-/* a wave: a thin gold line that fades out at both ends, drifting side to side */
-wave {
-    display: flex;
     position: absolute;
     height: 2dp;
+    decorator: horizontal-gradient(#FCD98C00 #FCD98C);
+}
+sparkle.t1 { animation: 2.3s sine-in-out infinite alternate glint; }
+sparkle.t2 { animation: 3.1s sine-in-out infinite alternate glint; }
+sparkle.t3 { animation: 1.7s sine-in-out infinite alternate glint; }
+
+@keyframes glint {
+    from { opacity: 0; }
+    to { opacity: 0.55; }
 }
 
-half {
-    display: block;
-    flex: 1 1 0;
-    height: 100%;
-    decorator: horizontal-gradient(#E9C46A00 #E9C46A38);
-}
-
-half.out {
-    decorator: horizontal-gradient(#E9C46A38 #E9C46A00);
-}
-
-wave.w1 { top: 14%; left: 52%; width: 40%; animation: 9s sine-in-out infinite alternate drift; }
-wave.w2 { top: 34%; left: 30%; width: 50%; animation: 11s sine-in-out infinite alternate drift-back; }
-wave.w3 { top: 58%; left: 60%; width: 34%; animation: 7s sine-in-out infinite alternate drift; }
-
-@keyframes breathe {
-    from { opacity: 0.55; }
-    to { opacity: 1; }
-}
-
-@keyframes drift {
-    from { transform: translateX(-30dp); }
-    to { transform: translateX(30dp); }
-}
-
-@keyframes drift-back {
-    from { transform: translateX(30dp); }
-    to { transform: translateX(-30dp); }
-}
-
-wordmark {
+/* the title: a small line above it, as a film's opening says who presents it */
+hero {
     position: absolute;
-    left: 40dp;
-    top: 32dp;
+    left: 96dp;
+    top: 19%;
+}
+
+eyebrow {
+    display: block;
+    font-size: 17dp;
+    color: var(--muted);
+    letter-spacing: 1dp;
+    margin-bottom: var(--gap-xs);
+}
+
+studio-name {
     font-weight: 800;
-    font-size: 16dp;
     color: var(--gold);
     letter-spacing: 2dp;
 }
 
-wordmark version-number {
-    font-weight: normal;
-    color: var(--muted);
-    letter-spacing: 0;
-    margin-left: var(--gap-sm);
-}
-
-title-block {
-    position: absolute;
-    left: 96dp;
-    top: 21%;
-}
-
 game-title {
     font-weight: 800;
-    font-size: 60dp;
+    font-size: 64dp;
     line-height: 1.1;
     color: var(--gold-pale);
     font-effect: shadow(0dp 4dp #000000);
-}
-
-tagline {
-    margin-top: var(--gap-xs);
-    font-size: 18dp;
-    color: var(--muted);
 }
 
 menu-list {
@@ -285,10 +217,12 @@ game-version {
     color: var(--muted);
 }
 
-hints {
+version-label {
     position: absolute;
     right: 40dp;
-    top: 30dp;
+    bottom: 44dp;
+    font-size: 15dp;
+    color: var(--muted);
 }
 
 /* the start: everything rises into place, one after another */
@@ -302,9 +236,9 @@ body.animate-in .rise {
     transform: translateY(0dp);
 }
 
-.d0 { transition: opacity transform 0.4s 0.05s cubic-out; }
-.d1 { transition: opacity transform 0.6s 0.15s cubic-out; }
-.d2 { transition: opacity transform 0.4s 0.35s cubic-out; }
-.d3 { transition: opacity transform 0.4s 0.42s cubic-out; }
-.d4 { transition: opacity transform 0.4s 0.49s cubic-out; }
-.d5 { transition: opacity transform 0.4s 0.65s cubic-out; }
+.d0 { transition: opacity transform 0.6s 0.10s cubic-out; }
+.d1 { transition: opacity transform 0.4s 0.35s cubic-out; }
+.d2 { transition: opacity transform 0.4s 0.42s cubic-out; }
+.d3 { transition: opacity transform 0.4s 0.49s cubic-out; }
+.d4 { transition: opacity transform 0.4s 0.65s cubic-out; }
+.d5 { transition: opacity transform 0.4s 0.75s cubic-out; }

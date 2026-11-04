@@ -17,6 +17,7 @@
 extern "C" {
 #include "render/png.h"
 }
+#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <string.h>
 #include <vector>
@@ -452,11 +453,30 @@ void UiRenderer::draw_image(VkImageView view, float dim) {
     RenderGeometry(quad[frame], Rml::Vector2f(0, 0), (Rml::TextureHandle)&t);
 }
 
-/* Images named in documents (<img src>, image decorators): none yet */
+/* Images named in documents (<img src>, image decorators): PNG files among the menu's own (SDL's loader), as RGBA,
+ * premultiplied */
 Rml::TextureHandle UiRenderer::LoadTexture(Rml::Vector2i &dimensions, const Rml::String &source) {
-    fprintf(stderr, "ui: no image support yet (%s)\n", source.c_str());
     dimensions = Rml::Vector2i(0, 0);
-    return 0;
+    Rml::FileInterface *files = Rml::GetFileInterface();
+    Rml::FileHandle f = files->Open(source);
+    if (!f) return 0;
+    std::vector<Rml::byte> data(files->Length(f));
+    size_t got = files->Read(data.data(), data.size(), f);
+    files->Close(f);
+    SDL_Surface *png = got == data.size() ? SDL_LoadPNG_IO(SDL_IOFromConstMem(data.data(), data.size()), true) : NULL;
+    SDL_Surface *rgba = png ? SDL_ConvertSurface(png, SDL_PIXELFORMAT_ABGR8888) : NULL;   /* (R, G, B, A bytes) */
+    SDL_DestroySurface(png);
+    if (!rgba || !SDL_PremultiplySurfaceAlpha(rgba, false)) {
+        fprintf(stderr, "ui: can't load %s: %s\n", source.c_str(), SDL_GetError());
+        SDL_DestroySurface(rgba);
+        return 0;
+    }
+    std::vector<Rml::byte> px((size_t)rgba->w * rgba->h * 4);
+    for (int y = 0; y < rgba->h; y++)
+        memcpy(&px[(size_t)y * rgba->w * 4], (const Rml::byte *)rgba->pixels + (size_t)y * rgba->pitch, (size_t)rgba->w * 4);
+    dimensions = Rml::Vector2i(rgba->w, rgba->h);
+    SDL_DestroySurface(rgba);
+    return GenerateTexture(Rml::Span<const Rml::byte>(px.data(), px.size()), dimensions);
 }
 
 /* RGBA8, premultiplied (font atlases, generated decorations): staging buffer -> image, waited for

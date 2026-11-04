@@ -275,6 +275,15 @@ menu-list button:focus-visible {
     background-color: var(--gold);
 }
 
+window.small hints {
+    margin-top: var(--gap-sm);
+    text-align: center;
+}
+
+window.small hints span {
+    margin: 0 var(--gap-sm);
+}
+
 menu-list button.danger {
     color: var(--bad);
 }

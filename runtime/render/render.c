@@ -15,6 +15,7 @@
 #include "render_internal.h"
 #include "render_ui.h"
 #include "png.h"
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -278,41 +279,38 @@ int render_capture(uint64_t texture, const char *path, const int32_t crop[4], ui
     return 0;
 }
 
-/* ---- LAA_SHOW_FPS=1: frames per second and the slowest frame (ms) of the last half second,
- * drawn in the bottom-left corner: text in a 5x7 pixel font, rasterized here, blitted 2x larger ---- */
-#define OSD_CHARS 13
-#define OSD_W (OSD_CHARS * 6 + 2)
-#define OSD_H 9
+/* ---- the overlays, each a rounded dark pill in a corner of the game's picture: LAA_SHOW_FPS=1, the frame rate
+ * (frames counted over half a second; coral when under 55 or a frame took over 20 ms, i.e. missed a 60 Hz refresh)
+ * in corner LAA_FPS_CORNER; LAA_SHADER_OSD=1, "Compiling shaders" in the corner beside it for a second after a
+ * pipeline compile missed the driver's cache. The CPU draws them into a small texture (one row each; Nunito's
+ * letters from osd_font.h, premultiplied colours), uploads a row when it changes, and they are drawn over the
+ * frame with blending ---- */
+#include "osd_font.h"
+#define OSD_TW 256
+#define OSD_ROW 64                       /* (a row: OSD_TW x OSD_ROW x 4 = 64 KB, one vkCmdUpdateBuffer) */
+enum { OSD_FPS, OSD_SHADERS, OSD_ROWS };
 static struct {
-    int on;
-    VkBuffer buffer;                 /* the pixels, put there by the command buffer (vkCmdUpdateBuffer):
-                                        so the CPU never waits for the GPU to finish with them */
+    int on, shaders;                     /* LAA_SHOW_FPS, LAA_SHADER_OSD */
+    int corner;                          /* LAA_FPS_CORNER: 0 bottom left, 1 bottom right, 2 top left, 3 top right */
+    VkBuffer buffer;                     /* the pixels, put there by the command buffer (vkCmdUpdateBuffer):
+                                            so the CPU never waits for the GPU to finish with them */
     VkDeviceMemory memory;
-    uint32_t pixels[OSD_W * OSD_H];  /* RGBA8 */
+    uint32_t pixels[OSD_ROWS][OSD_ROW][OSD_TW];   /* RGBA8 (sRGB), premultiplied */
     VkImage image;
     VkDeviceMemory image_memory;
-    double window_start, last, worst;
-    int frames;
-    int corner;                      /* LAA_FPS_CORNER: 0 bottom left, 1 bottom right, 2 top left, 3 top right */
-    char text[OSD_CHARS + 1];
+    VkImageView view;
+    int image_ready;                     /* (its layout is GENERAL, with both rows) */
+    int dirty[OSD_ROWS], w[OSD_ROWS], h; /* rows to upload; each pill's width, their height */
+    int big;                             /* 1080p sizes, else 720p's */
+    int shown;                           /* the shader pill is showing */
+    double window_start, last, worst, drawn_at;
+    int frames, fps, slow;
 } osd = { .on = -1 };
 
 static double osd_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
-/* 5x7 glyphs, one byte per row, bit 4 = leftmost column */
-static const uint8_t *osd_glyph(char c) {
-    static const uint8_t digits[10][7] = {
-        { 14, 17, 19, 21, 25, 17, 14 }, { 4, 12, 4, 4, 4, 4, 14 }, { 14, 17, 1, 2, 4, 8, 31 }, { 31, 2, 4, 2, 1, 17, 14 },
-        { 2, 6, 10, 18, 31, 2, 2 }, { 31, 16, 30, 1, 1, 17, 14 }, { 6, 8, 16, 30, 17, 17, 14 }, { 31, 1, 2, 4, 8, 8, 8 },
-        { 14, 17, 17, 14, 17, 17, 14 }, { 14, 17, 17, 15, 1, 2, 12 } };
-    static const uint8_t F[7] = { 31, 16, 16, 30, 16, 16, 16 }, P[7] = { 30, 17, 17, 30, 16, 16, 16 },
-                         S[7] = { 15, 16, 16, 14, 1, 1, 30 }, M[7] = { 17, 27, 21, 21, 17, 17, 17 };
-    if (c >= '0' && c <= '9') return digits[c - '0'];
-    return c == 'F' ? F : c == 'P' ? P : c == 'S' ? S : c == 'M' ? M : NULL;
-}
-
 static void osd_init(void) {
-    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = OSD_W * OSD_H * 4,
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = sizeof osd.pixels,
                               .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
     VK_CHECK(vkCreateBuffer(vk.device, &bi, NULL, &osd.buffer));
     VkMemoryRequirements req;
@@ -322,67 +320,159 @@ static void osd_init(void) {
     VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &osd.memory));
     VK_CHECK(vkBindBufferMemory(vk.device, osd.buffer, osd.memory, 0));
     VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { OSD_W, OSD_H, 1 }, .mipLevels = 1, .arrayLayers = 1,
+        .format = VK_FORMAT_R8G8B8A8_SRGB, .extent = { OSD_TW, OSD_ROW * OSD_ROWS, 1 }, .mipLevels = 1, .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     VK_CHECK(vkCreateImage(vk.device, &ii, NULL, &osd.image));
     vkGetImageMemoryRequirements(vk.device, osd.image, &req);
     mi.allocationSize = req.size;
     mi.memoryTypeIndex = vk_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     VK_CHECK(vkAllocateMemory(vk.device, &mi, NULL, &osd.image_memory));
     VK_CHECK(vkBindImageMemory(vk.device, osd.image, osd.image_memory, 0));
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = osd.image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    VK_CHECK(vkCreateImageView(vk.device, &vi, NULL, &osd.view));
     osd.window_start = osd.last = osd_now_ms();
-    snprintf(osd.text, sizeof osd.text, "   FPS");
+    osd.big = -1;
 }
 
-/* Count this frame; every half second, redraw the text (yellow when below 55 fps or a frame
- * took over 20 ms, i.e. missed a 60 Hz refresh). */
+/* Painting into a row: premultiplied src over dst */
+static void osd_blend(uint32_t *d, const uint8_t c[3], float a) {
+    if (a <= 0) return;
+    if (a > 1) a = 1;
+    uint32_t v = *d, out = 0;
+    for (int k = 0; k < 4; k++) {
+        float dst = (float)(v >> (8 * k) & 255), src = k < 3 ? c[k] * a : 255 * a;
+        out |= (uint32_t)(src + dst * (1 - a) + 0.5f) << (8 * k);
+    }
+    *d = out;
+}
+
+static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+/* A pill w x h at the row's top left: dark, a faint gold edge (anti-aliased by the distance from its middle line) */
+static void osd_pill(int row, int w, int h) {
+    static const uint8_t bg[3] = { 11, 12, 9 }, edge[3] = { 233, 196, 106 };
+    float r = h * 0.5f;
+    memset(osd.pixels[row], 0, sizeof osd.pixels[row]);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float cx = x + 0.5f, cy = y + 0.5f, dx = cx < r ? r - cx : cx > w - r ? cx - (w - r) : 0, dy = cy - r;
+            float d = sqrtf(dx * dx + dy * dy), inside = clamp01(r - d);
+            osd_blend(&osd.pixels[row][y][x], bg, inside * 0.78f);
+            osd_blend(&osd.pixels[row][y][x], edge, (inside - clamp01(r - 1.3f - d)) * 0.35f);
+        }
+}
+
+/* Text along a baseline from x; returns its width (draw = 0: measure only) */
+static int osd_text(int row, int x, int baseline, const OsdFont *f, const char *t, const uint8_t c[3], int draw) {
+    int pen = x;
+    for (; *t; t++) {
+        if (*t < 32 || *t > 126) continue;
+        const OsdGlyph *g = &f->glyphs[*t - 32];
+        for (int gy = 0; draw && gy < g->h; gy++)
+            for (int gx = 0; gx < g->w; gx++) {
+                int px = pen + g->x0 + gx, py = baseline + g->y0 + gy;
+                if (px >= 0 && px < OSD_TW && py >= 0 && py < OSD_ROW)
+                    osd_blend(&osd.pixels[row][py][px], c, f->bits[g->offset + gy * g->w + gx] / 255.0f);
+            }
+        pen += g->advance;
+    }
+    return pen - x;
+}
+
+static void osd_draw_fps(void) {
+    static const uint8_t text[3] = { 236, 231, 214 }, coral[3] = { 238, 132, 104 }, gold[3] = { 233, 196, 106 };
+    const OsdFont *num = &osd_fonts[osd.big ? 2 : 1], *label = &osd_fonts[osd.big ? 1 : 0];
+    int pad = osd.big ? 18 : 12, gap = osd.big ? 6 : 4;
+    char n[8];
+    snprintf(n, sizeof n, "%d", osd.fps);
+    int wn = osd_text(OSD_FPS, 0, 0, num, n, text, 0), wl = osd_text(OSD_FPS, 0, 0, label, "FPS", gold, 0);
+    osd.w[OSD_FPS] = pad + wn + gap + wl + pad;
+    osd_pill(OSD_FPS, osd.w[OSD_FPS], osd.h);
+    int base = (osd.h + num->glyphs['0' - 32].h) / 2;
+    osd_text(OSD_FPS, pad, base, num, n, osd.slow ? coral : text, 1);
+    osd_text(OSD_FPS, pad + wn + gap, base, label, "FPS", gold, 1);
+    osd.dirty[OSD_FPS] = 1;
+}
+
+static void osd_draw_shaders(double t) {
+    static const uint8_t text[3] = { 236, 231, 214 }, gold[3] = { 233, 196, 106 };
+    const OsdFont *f = &osd_fonts[osd.big ? 1 : 0];
+    int pad = osd.big ? 18 : 12, dot = osd.big ? 5 : 4, gap = osd.big ? 10 : 7;
+    int wt = osd_text(OSD_SHADERS, 0, 0, f, "Compiling shaders", text, 0);
+    osd.w[OSD_SHADERS] = pad + 2 * dot + gap + wt + pad;
+    osd_pill(OSD_SHADERS, osd.w[OSD_SHADERS], osd.h);
+    float pulse = 0.45f + 0.55f * (0.5f + 0.5f * sinf((float)(t / 1000.0 * 2 * 3.14159265)));   /* (once a second) */
+    float cx = pad + dot, cy = osd.h * 0.5f;
+    for (int y = 0; y < osd.h; y++)
+        for (int x = pad - 1; x < pad + 2 * dot + 1; x++)
+            osd_blend(&osd.pixels[OSD_SHADERS][y][x], gold,
+                      clamp01(dot - sqrtf((x + 0.5f - cx) * (x + 0.5f - cx) + (y + 0.5f - cy) * (y + 0.5f - cy))) * pulse);
+    osd_text(OSD_SHADERS, pad + 2 * dot + gap, (osd.h + f->glyphs['C' - 32].h) / 2, f, "Compiling shaders", text, 1);
+    osd.dirty[OSD_SHADERS] = 1;
+}
+
+/* Every frame: count it; every half second, the frame rate again; the shader pill while compiles are slow */
 static void osd_update(void) {
     double t = osd_now_ms();
-    if (t - osd.last > osd.worst) osd.worst = t - osd.last;
-    osd.last = t;
-    osd.frames++;
-    if (t - osd.window_start < 500 && osd.frames > 1) return;
-    double fps = osd.frames * 1000.0 / (t - osd.window_start);
-    int slow = fps < 55 || osd.worst > 20;
-    snprintf(osd.text, sizeof osd.text, "%2.0f FPS %3.0f MS", fps > 99 ? 99 : fps, osd.worst > 999 ? 999 : osd.worst);
-    osd.window_start = t;
-    osd.frames = 0;
-    osd.worst = 0;
-    uint32_t fg = slow ? 0xFF00FFFFu : 0xFFFFFFFFu, bg = 0xC0000000u;    /* ABGR in memory: R, G, B, A bytes */
-    for (int i = 0; i < OSD_W * OSD_H; i++) osd.pixels[i] = bg;
-    for (int k = 0; osd.text[k]; k++) {
-        const uint8_t *g = osd_glyph(osd.text[k]);
-        for (int y = 0; g && y < 7; y++)
-            for (int x = 0; x < 5; x++)
-                if (g[y] >> (4 - x) & 1) osd.pixels[(y + 1) * OSD_W + 1 + k * 6 + x] = fg;
+    int big = out.height >= 900;
+    if (big != osd.big) {
+        osd.big = big;
+        osd.h = big ? 44 : 30;
+        if (osd.on && osd.w[OSD_FPS]) osd_draw_fps();
     }
+    if (osd.on) {
+        if (t - osd.last > osd.worst) osd.worst = t - osd.last;
+        osd.last = t;
+        osd.frames++;
+        if (t - osd.window_start >= 500) {
+            double fps = osd.frames * 1000.0 / (t - osd.window_start);
+            int f = fps > 999 ? 999 : (int)(fps + 0.5), slow = fps < 55 || osd.worst > 20;
+            if (f != osd.fps || slow != osd.slow || !osd.w[OSD_FPS]) { osd.fps = f; osd.slow = slow; osd_draw_fps(); }
+            osd.window_start = t;
+            osd.frames = 0;
+            osd.worst = 0;
+        }
+    }
+    osd.shown = osd.shaders && t - (double)render_last_slow_compile() < 1000;
+    if (osd.shown && t - osd.drawn_at >= 100) { osd.drawn_at = t; osd_draw_shaders(t); }   /* (the dot pulses) */
 }
 
-static void osd_draw(VkCommandBuffer cmd, VkImage dst) {      /* (dst: an out slot, GENERAL) */
-    VkMemoryBarrier before = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-                               .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };   /* (last frame's copy read it) */
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, NULL, 0, NULL);
-    vkCmdUpdateBuffer(cmd, osd.buffer, 0, sizeof osd.pixels, osd.pixels);
-    VkMemoryBarrier after = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                              .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &after, 0, NULL, 0, NULL);
-    barrier(cmd, osd.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkBufferImageCopy copy = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { OSD_W, OSD_H, 1 } };
-    vkCmdCopyBufferToImage(cmd, osd.buffer, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-    barrier(cmd, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-    int32_t scale = out.height >= 1000 ? 2 : 1, x = 4, y = (int32_t)out.height - OSD_H * scale - 4;   /* bottom left */
-    if (osd.corner & 1) x = (int32_t)out.width - OSD_W * scale - 4;
-    if (osd.corner & 2) y = 4;
-    VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                         .srcOffsets = { { 0, 0, 0 }, { OSD_W, OSD_H, 1 } },
-                         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                         .dstOffsets = { { x, y, 0 }, { x + OSD_W * scale, y + OSD_H * scale, 1 } } };
-    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-                           .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT };   /* (after the game's frame blit) */
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    vkCmdBlitImage(cmd, osd.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+static void osd_draw(VkCommandBuffer cmd, int s) {      /* (over out slot s, after the frame's copy) */
+    int any = osd.dirty[OSD_FPS] || osd.dirty[OSD_SHADERS];
+    if (any) {
+        barrier(cmd, osd.image, osd.image_ready ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT);   /* (last frame's draw and copy read them) */
+        for (int r = 0; r < OSD_ROWS; r++) {
+            if (!osd.dirty[r] && osd.image_ready) continue;
+            vkCmdUpdateBuffer(cmd, osd.buffer, sizeof osd.pixels[0] * r, sizeof osd.pixels[0], osd.pixels[r]);
+        }
+        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                               .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        VkBufferImageCopy copy = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                                   .imageExtent = { OSD_TW, OSD_ROW * OSD_ROWS, 1 } };
+        vkCmdCopyBufferToImage(cmd, osd.buffer, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        barrier(cmd, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+        osd.image_ready = 1;
+        osd.dirty[OSD_FPS] = osd.dirty[OSD_SHADERS] = 0;
+    }
+    render_barrier(cmd);                                  /* (after the frame's copy into the slot) */
+    int margin = osd.big ? 18 : 12;
+    for (int r = 0; r < OSD_ROWS; r++) {
+        if ((r == OSD_FPS ? !osd.on : !osd.shown) || !osd.w[r]) continue;   /* (the counter: after its first count) */
+        int corner = r == OSD_FPS ? osd.corner : osd.corner ^ 1;   /* (shaders: the other side, same edge) */
+        int32_t x = corner & 1 ? (int32_t)out.width - osd.w[r] - margin : margin;
+        int32_t y = corner & 2 ? margin : (int32_t)out.height - osd.h - margin;
+        VkOffset3D sb[2] = { { 0, r * OSD_ROW, 0 }, { osd.w[r], r * OSD_ROW + osd.h, 1 } };
+        VkOffset3D db[2] = { { x, y, 0 }, { x + osd.w[r], y + osd.h, 1 } };
+        render_draw_copy(cmd, osd.view, OSD_TW, OSD_ROW * OSD_ROWS, sb, out.view[s], vk.swapchain_format, out.width,
+                         out.height, db, 0, 0, 1);
+    }
 }
 
 /* ---- the slots ---- */
@@ -564,14 +654,19 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     render_gpu_timing_frame(nvn_frame_count());
     render_capture_print(nvn_frame_count());
     render_guard_check(nvn_frame_count());
-    static int settings_gen = -1;                    /* LAA_SHOW_FPS / LAA_FPS_CORNER: the menu can change them */
+    static int settings_gen = -1;                    /* the overlays' settings: the menu can change them */
     if (settings_gen != kernel_settings_gen) {
         settings_gen = kernel_settings_gen;
         osd.on = getenv("LAA_SHOW_FPS") && atoi(getenv("LAA_SHOW_FPS"));
+        osd.shaders = getenv("LAA_SHADER_OSD") && atoi(getenv("LAA_SHADER_OSD"));
         osd.corner = getenv("LAA_FPS_CORNER") ? atoi(getenv("LAA_FPS_CORNER")) & 3 : 0;
-        if (osd.on && !osd.buffer) osd_init();
+        if ((osd.on || osd.shaders) && !osd.buffer) osd_init();
+        osd.w[OSD_FPS] = 0;                          /* (drawn again at the next count, from now) */
+        osd.window_start = osd.last = osd_now_ms();
+        osd.frames = 0;
+        osd.worst = 0;
     }
-    if (osd.on) osd_update();
+    if (osd.on || osd.shaders) osd_update();
     int from_gpu = h && h->gpu_written;
     if (!from_gpu && read_guest_texture(gptr(texture)) != 0) return;
     VkImage src = from_gpu ? h->image : frame.image;
@@ -611,11 +706,11 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
         render_image_init_layout(cmd, h);
         render_barrier(cmd);
         render_draw_copy(cmd, render_image_view(h, &(TextureView){ 0 }, TEXDIM_2D, 0), h->width, h->height, sb, out.view[s],
-                         vk.swapchain_format, out.width, out.height, db, 1, 1);
+                         vk.swapchain_format, out.width, out.height, db, 1, 1, 0);
     } else {
         vkCmdBlitImage(cmd, src, src_layout, out.image[s], VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
     }
-    if (osd.on) osd_draw(cmd, out.image[s]);
+    if ((osd.on && osd.w[OSD_FPS]) || osd.shown) osd_draw(cmd, s);
     render_barrier(cmd);
     render_submit();
     if (!from_gpu) render_flush();                   /* (the staging buffer is used again next frame) */
