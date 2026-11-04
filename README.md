@@ -1,87 +1,157 @@
 # LAARecomp
 
-A from-scratch **static recompilation** of *The Legend of Zelda: Link's Awakening* (Nintendo Switch, 2019)
-for **Android**, tested on an AYN Thor.
+> [!IMPORTANT]
+> **This project was made almost exclusively with AI.** Nearly all of the code, tooling, reverse engineering and
+> documentation in this repository was written by an AI (Anthropic's Claude, through Claude Code), directed, tested
+> and reviewed by a human. It is a personal learning project: I wanted to understand how a game like this can be
+> brought to a new device, and to play it on my handheld. Sharing it is a courtesy. If you don't agree with the use
+> of AI or don't trust code written by AI, that is your right; you may simply ignore this project and its code.
+> As with anything on the internet, you run the code at your own discretion.
 
-Static recompilation means translating the game's ARM64 machine code into C *ahead of time*,
-compiling that C for the target device, and providing a runtime that stands in for the
-Switch's operating system (Horizon) and GPU. It is not an emulator: no instruction is
-interpreted while the game runs.
+**LAARecomp** is a from-scratch static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch,
+2019) for **Android**. The game's ARM64 code is translated into C ahead of time and compiled into a native library
+for the device; a runtime written for this project stands in for the Switch's operating system (Horizon), and its
+graphics API (NVN) is reimplemented on Vulkan, with the game's GPU shaders translated to SPIR-V. **This is not
+emulation**: no instruction is interpreted while the game runs.
 
-> **No game files, keys, or Nintendo assets ever go in this repository.**
-> You supply your own dump of a game you own and your own Switch's `prod.keys`.
-> `.gitignore` blocks the common file types, but check before every commit.
+> [!NOTE]
+> Currently supported:
+> - **Android** 11 or newer, arm64, with a Vulkan 1.3 GPU. Developed and tested on an **AYN Thor** (Snapdragon 8
+>   Gen 2, Adreno 740); other devices are untested.
+> - Linux x86-64 (desktop build): a development tool, not a way to play.
+
+> [!WARNING]
+> **Early and experimental. There is no release yet.** Setting the game up currently needs a PC: the game's code is
+> recompiled and built there from your own game files, then copied to the device with adb (see
+> [Setup](#setup-for-now)). Building it on the device itself, from the start screen, is the next big step.
+
+> [!NOTE]
+> **No game files are included.** LAARecomp needs your own legally obtained copy of the extracted game files of
+> *Link's Awakening* **v1.0.0, v1.0.1 or v1.1.0**: the `exefs` and `romfs` folders. Instructions on how to obtain
+> these files will **NOT** be provided. No game code, assets or fonts are included in this repository or in any
+> build, and you are never asked for keys or firmware.
+
+![The start screen: night over Koholint, the Wind Fish's egg on Mt. Tamaranch. No Nintendo artwork is included](docs/start_screen.jpg)
+
+## System requirements
+
+| | Minimum |
+|---|---|
+| OS | Android 11 (API 30) or newer, 64-bit (arm64-v8a) |
+| GPU | Vulkan 1.3 (tested: Adreno 740) |
+| RAM | 8 GB (the game reserves a large address space; tested with 16 GB) |
+| Storage | About 6 GB for your game files (romfs), plus about 130 MB for the game's built code |
+| Controller | A built-in or connected gamepad. There are no touch controls |
 
 ## Status
 
-| Phase | What | State |
-|---|---|---|
-| 1 | Load the game's executable (NSO), find all functions | **done** (148k functions, 8.77M instructions) |
-| 2 | **Recompiler: ARM64 → C** | **done: 99.99% of the game's instructions, fuzz-verified** |
-| 3 | Boot: implement Horizon OS services until the main loop runs | started: whole game compiles and links (CMake/Ninja) |
-| 4 | Graphics: Switch GPU commands + shaders → Vulkan | not started |
-| 5 | Input, audio, Android packaging, polish | not started |
+The game boots, plays and saves. What has been played so far (the opening: the beach, Mabe Village, the fields
+around it, the first areas) runs at a steady 60 fps at 720p (handheld mode) on the AYN Thor, with sound, movies
+and the game's own dynamic resolution. Further into the game is still largely untested.
 
-The recompiler handles the whole ARM64 instruction set the game uses: integer, atomics, scalar
-floating point, all NEON/SIMD (including structure loads, estimates and the AES/SHA/CRC32 extensions)
-and the user-mode system registers. Every instruction form the game uses has been checked bit for bit
-against an independent ARM64 emulator (see "Fuzzing" below).
+### Known issues
 
-## Game version
+- Rarely (about 1 run in 30 in testing) the GPU hangs for a moment on the beach, with glitched frames.
+- Some stutter in a few places (the beach), and short hitches the first time new effects appear while their
+  shaders are prepared.
+- A slight, fast flicker on edges while walking: the game's own aliasing (it shows on a Switch too).
+- Only version 1.0.0 has had real play time; 1.0.1 and 1.1.0 load and run in tests.
 
-We target **Link's Awakening v1.0.0** (the base game, no update), the same version as LASRecomp,
-so addresses and findings line up with that project. Code addresses differ between versions.
+## Features
 
-## Running on the game
+**Runs natively**
+- **This is not emulation.** The game's code runs as native ARM64 code; its graphics are drawn with Vulkan.
+- Works with game versions 1.0.0, 1.0.1 and 1.1.0 (one built game library covers 1.0.1 and 1.1.0: their code is
+  identical).
+- Handheld (720p) or docked (1080p) mode.
+- A start screen and a pause menu (the controller's Home/Mode button, Android's Back button):
 
-1. Dump the **ExeFS** of the base game (v1.0.0, *no update*) from your own Switch with nxdumptool.
-   Keep it **outside** this folder, e.g. `Documents\LADump\exefs\` (`main`, `sdk`, `rtld`, `subsdk*`, `main.npdm`).
-2. Run the recompiler in report mode:
+  ![Settings: display, audio, controls, game, advanced](docs/settings.jpg)
+- Settings: mode, frame rate counter (and its corner), volume, button layout (as printed or swapped), stick dead
+  zone, the game's language (English, French, German, Italian, Spanish, Dutch, Russian, Japanese, Korean, Chinese),
+  and performance options. Most apply instantly, even from the pause menu.
+- Pressing Home suspends the game like a Switch does; coming back opens the pause menu.
+- The game's movies play through Android's own video decoder.
+- Shaders are compiled once and kept, so later sessions start without stutter.
+
+## Setup (for now)
+
+Until the app can build the game's code itself, everything runs from a PC with Linux or WSL2 (Windows), and the
+device connected with USB debugging:
+
+1. Extract your own game's `exefs` and `romfs` folders (not provided here) and keep them **outside** this folder.
+2. Set up the Android toolchain and build the menus' libraries: [tools/android/README.md](tools/android/README.md)
+   and `tools/build_ui_deps.sh`.
+3. Recompile the game's code from **your** `exefs` and build it for Android together with the app:
+
+   ```
+   python recompiler/recomp.py <your game>/exefs -o ~/laar-build/gen --no-comments
+   cmake -S . -B ~/laar-build/android/build/game -G Ninja -DGAME_GEN_DIR=$HOME/laar-build/gen \
+         -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
+         -DANDROID_PLATFORM=android-30 -DCMAKE_PREFIX_PATH=~/laar-build/android/prefix
+   cmake --build ~/laar-build/android/build/game --target main game
+   tools/android/build_apk.sh
+   ```
+4. Install the APK and copy your `exefs`, `romfs` and the built `libgame-<id>.so` to the app's folder
+   (`/sdcard/Android/data/io.github.laarecomp/files/`); [tools/android/README.md](tools/android/README.md) has the
+   exact commands. The game library is made from your own files: never share it.
+
+## FAQ
+
+#### What is static recompilation?
+Translating a program from one machine to another ahead of time, as a whole. Here every function of the Switch
+game's ARM64 code becomes a C function, which a C compiler turns into native code for the device. The project
+[N64: Recompiled](https://github.com/N64Recomp/N64Recomp) explains the idea well. Unlike an emulator, nothing is
+decoded or translated while the game runs.
+
+#### Is this a port or a decompilation?
+Neither. There is no source code of the game here: the recompiler works on the machine code in your own game files,
+and the runtime reimplements the parts of the Switch the game talks to (its OS services and its graphics API).
+
+#### How is this related to LAS Recomp?
+[LAS Recomp](https://github.com/peiikai/LASRecomp) is an existing recompilation of the same game for Windows,
+macOS and Linux, with its own Android fork. LAARecomp is a separate project written from scratch for Android, mostly
+to learn how it all works; LAS Recomp was a reference for facts (file layouts, behaviours) when stuck. No code was
+copied from it.
+
+#### Can I use an NSP or XCI file instead of the folders?
+No. Those are encrypted, and reading them needs your console's keys. This project never asks for keys, so it
+takes the already extracted `exefs` and `romfs` folders.
+
+#### Where are my saves?
+In the app's folder, `/sdcard/Android/data/io.github.laarecomp/files/save/`. Back it up before uninstalling the app:
+Android deletes that folder with it.
+
+## Building from source
+
+The recompiler is Python; the runtime and the generated code are C (GCC or Clang); the menus are C++ (RmlUi).
 
 ```
-python recompiler/recomp.py <path-to>/exefs --report build/la_report.txt --no-comments
-```
-
-The report lists each module and its build ID, how many functions were found and how,
-and every instruction the translator can't handle yet, sorted by how often it appears.
-That list decides what gets implemented next.
-
-## Building the whole game
-
-```
-python recompiler/recomp.py <path-to>/exefs -o ~/laar-build/gen --no-comments
+pip install -r requirements.txt
+python tests/run_tests.py                        # recompiler tests (needs nothing from the game)
+python tests/fuzz.py --random 20000              # instructions vs the Unicorn emulator
+python recompiler/recomp.py <your game>/exefs -o ~/laar-build/gen --no-comments
+tools/build_ui_deps.sh desktop                   # RmlUi + FreeType for the menus (optional)
 cmake -S . -B ~/laar-build/host -G Ninja -DGAME_GEN_DIR=$HOME/laar-build/gen
-cmake --build ~/laar-build/host
+cmake --build ~/laar-build/host                  # laa_host + libgame-<build id>.so
+~/laar-build/host/laa_host <your game>/exefs     # LAA_MENU=1 for the menus
 ```
 
-The generated C (531 MB, 290 files) is derived from your dump, so keep it outside this repo.
-On WSL keep it on the Linux side (`~/...`), not under `/mnt/c`. A full build takes ~9 minutes
-on 22 threads; after that only changed chunks recompile.
+The generated C (about 670 MB) is made from your game files: keep it outside this repository. Android:
+[tools/android/README.md](tools/android/README.md).
 
-## Layout
+### How it fits together
 
 ```
-recompiler/
-  arm64.py         decoder + translator: one ARM64 instruction -> C statements
-  recomp.py        main tool: load, discover functions, translate, write C + report
-  image.py         a loaded program in memory (segments, modules)
-  elf_loader.py    loads test ELFs
-  nso_loader.py    loads Switch NSO modules: LZ4, MOD0, dynamic symbols, relocations, linking
-  discover.py      finds functions in stripped code (symbols, eh_frame, pointers, calls, tail calls)
-runtime/
-  recomp_runtime.h CPU struct (registers, flags, memory) + helpers the generated C uses
-  recomp_runtime.c indirect calls, error reporting (later: OS services)
-host/main.c        desktop host program (for now: proves the whole game links)
-CMakeLists.txt     builds runtime + generated game code + host program
-tests/
-  programs/*.c     test programs; every test_* function is checked
-  support/         memset/memcpy for the ARM64 side, plus nso.ld / nso_crt0.s / elf2nso.py
-                   for building Switch-style test NSOs
-  run_tests.py     the test runner
-build/             generated files (git-ignored)
+recompiler/   ARM64 -> C: NSO loader, function discovery, the instruction translator (arm64.py), recomp.py
+runtime/      what the game runs on: CPU state and memory, the Horizon kernel and services (runtime/services),
+              NVN on Vulkan (runtime/nvn, runtime/render), the Maxwell shader translator (runtime/render/shader),
+              movies, the menus (runtime/ui)
+host/main.c   the program: laa_host on the desktop, libmain.so in the Android app
+res/ui/       the menus' documents, style sheets and fonts
+tools/        build and test tools; tools/thor: test scripts for the AYN Thor
+tests/        recompiler test programs, fuzzing, ASTC decoder tests
 ```
-
-## How the generated C looks
 
 This ARM64 code
 
@@ -103,70 +173,48 @@ void f_1010120(CPU *c) {
 }
 ```
 
-Registers live in a `CPU` struct, and guest memory is one flat array (`c->mem`) indexed by the ARM64 address.
-Branches inside a function become `goto`, `BL` becomes a C function call, and `BR` (jump tables)
-goes through a `switch`. The C compiler then optimises it all back into fast native code.
+Branches inside a function become `goto`, `BL` a C call, jump tables a `switch`; the C compiler optimises it all
+back into fast native code. The tests build small C programs as real ARM64 binaries (plain ELF, and Switch-style NSO
+modules), recompile them, and compare every `test_*` function's results with a native build on about 800 inputs
+each; the fuzzer checks single instructions bit for bit against [Unicorn](https://www.unicorn-engine.org).
 
-## Running the tests
+## Credits
 
-Requirements: Python 3.10+, a native C compiler (gcc or clang), and these Python packages:
+**Libraries and tools**
+- [SDL 3](https://libsdl.org) - window, input and audio (zlib license)
+- [RmlUi](https://github.com/mikke89/RmlUi) - the menus (MIT)
+- [FreeType](https://freetype.org) - the menus' text (FreeType License)
+- [Nunito](https://github.com/googlefonts/nunito) - the menus' font (SIL Open Font License 1.1, `res/ui/fonts/OFL-Nunito.txt`)
+- [Material Symbols](https://github.com/google/material-design-icons) - the menus' icons (Apache 2.0, `res/ui/fonts/LICENSE-MaterialSymbols.txt`)
+- [SPIR-V headers](https://github.com/KhronosGroup/SPIRV-Headers) by the Khronos Group - `third_party/spirv` (MIT-style license, in the files)
+- [Capstone](https://www.capstone-engine.org), [Unicorn](https://www.unicorn-engine.org), [pyelftools](https://github.com/eliben/pyelftools),
+  [python-lz4](https://github.com/python-lz4/python-lz4) - used by the recompiler and its tests
+- [Zig](https://ziglang.org) - its `zig cc` builds the ARM64 test programs (and, planned, the game's code on the device)
+- [libvpx](https://chromium.googlesource.com/webm/libvpx) - movies on the desktop build (BSD)
 
-```
-pip install -r requirements.txt
-```
+**Projects referenced, and special thanks**
+- **Ryujinx** - the Maxwell shader instruction encodings in `runtime/render/shader/maxwell_ops.h` were generated
+  from its shader decoder (MIT; notice in [THIRD_PARTY.md](THIRD_PARTY.md)), and it was the reference for Maxwell
+  instruction behaviour
+- **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by peiikai and its
+  [Android fork](https://github.com/mamcjr/LASRecompAndroid) by mamcjr - proof that this game can be recompiled,
+  and a reference for facts when stuck
+- **[Dusklight](https://github.com/TwilitRealm/dusklight)** by the TwilitRealm team - inspiration for the menus
+  (and their dark, warm colours)
+- **[N64: Recompiled](https://github.com/N64Recomp/N64Recomp)** and **[Zelda 64: Recompiled](https://github.com/Zelda64Recomp/Zelda64Recomp)** -
+  the idea of static recompilation for games
+- [Switchbrew](https://switchbrew.org) - the Switch homebrew community's documentation of its OS and file formats
+- [envytools](https://envytools.readthedocs.io) - NVIDIA GPU documentation
+- The *Arm Architecture Reference Manual* - instruction encodings and pseudocode
 
-The `ziglang` package provides `zig cc`, a Clang that can build ARM64 binaries on any PC with no extra setup.
+## Legal
 
-```
-python tests/run_tests.py                    # all programs, -O0 -O1 -O2 -O3 -Os, both formats
-python tests/run_tests.py -p bits -O 2 -f nso
-```
+LAARecomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
+and *Link's Awakening* are trademarks of Nintendo. No game files, game code, assets or fonts are included - not in
+this repository and not in any build. You must provide your own legally obtained copy of the game files to play.
 
-For each test program the runner:
+## License
 
-1. compiles it to a real ARM64 binary, in one of two formats:
-   - **elf**: a plain static ELF with a symbol table
-   - **nso**: built like a real Switch game, then loaded through the NSO loader. This is two
-     modules (`main` plus an `sdk` module it imports `memcpy` and friends from), with MOD0,
-     relocations, PLT calls between modules, and exception tables. Function discovery must find
-     every function without the symbol table, and the runner checks that it did,
-2. recompiles that binary back into C with `recomp.py`,
-3. compiles the same source natively for your PC,
-4. calls every `test_*` function both ways with about 800 input pairs (edge cases and random values) and compares the results.
-
-If the recompiled ARM64 code always matches the native build, the translations are correct.
-Test code must be free of undefined behaviour, because x86 and ARM64 handle it differently.
-For example, guard divisions by zero and mask shift amounts.
-
-### Adding a test
-
-Add a function to any file in `tests/programs/` (or create a new file):
-
-```c
-uint64_t test_something(uint64_t a, uint64_t b) { ... }
-```
-
-The runner finds it automatically.
-
-## Fuzzing
-
-`tests/fuzz.py` checks single instructions against [Unicorn](https://www.unicorn-engine.org/)
-(QEMU's ARM64 CPU). For each instruction word it makes random CPU states full of interesting values
-(NaNs, infinities, subnormals, saturation edges), runs the instruction in Unicorn and in our translated C,
-and compares every register and memory bit for bit.
-
-```
-python tests/fuzz.py --random 20000                       # random instructions
-python tests/fuzz.py --game <path-to>/exefs --simd-only    # the game's own instruction words
-```
-
-On an x86 PC, NaN *payloads* are compared loosely (Intel and ARM pick different NaN bit patterns;
-the recompiled code runs on ARM, where they match). `--strict-nan` compares them exactly on an ARM64 host.
-
-## References
-
-- *Arm Architecture Reference Manual for A-profile* (instruction encodings and pseudocode)
-- [Switchbrew](https://switchbrew.org): Switch OS services, NSO format
-- [envytools](https://envytools.readthedocs.io): NVIDIA GPU documentation
-- [N64Recomp](https://github.com/N64Recomp/N64Recomp): the same idea for N64
-- [LASRecomp](https://github.com/peiikai/LASRecomp): an existing Windows/macOS Link's Awakening recomp, used only as a reference when stuck
+LAARecomp's own code (the recompiler, the runtime, the tools) is open source under the [MIT License](LICENSE).
+Third-party components keep their own licenses, listed in [THIRD_PARTY.md](THIRD_PARTY.md). The license covers
+LAARecomp's code only - it grants nothing for Nintendo's game, which you must supply yourself.
