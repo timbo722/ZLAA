@@ -19,3 +19,7 @@ romfs/
 dump/
 dumps/
 game/
+
+# Local working notes (not part of the project)
+CLAUDE.md
+HANDOFF.md
