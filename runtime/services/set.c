@@ -4,6 +4,7 @@
  * switchbrew.org/wiki/Settings_services
  */
 #include "services.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* Language codes are the language's name, as up to 8 ASCII bytes in a u64. The index in
@@ -14,7 +15,7 @@ static const char *const languages[] = {
 };
 #define N_LANGUAGES_V1 15                      /* GetAvailableLanguageCodes (old) lists 15 */
 #define N_LANGUAGES ((int)(sizeof languages / sizeof *languages))
-#define SYSTEM_LANGUAGE 1                      /* en-US */
+#define SYSTEM_LANGUAGE 1                      /* en-US, unless LAA_LANGUAGE names another of the list */
 #define REGION_USA 1
 
 static uint64_t language_code(int index) {
@@ -22,6 +23,20 @@ static uint64_t language_code(int index) {
     memcpy(&v, languages[index], strlen(languages[index]));
     return v;
 }
+
+/* The console's language: LAA_LANGUAGE (a code from the list, e.g. "fr"), else American English */
+int set_language(void) {
+    static int lang = -1;
+    const char *want = getenv("LAA_LANGUAGE");
+    if (lang < 0) {
+        lang = SYSTEM_LANGUAGE;
+        for (int k = 0; want && k < N_LANGUAGES; k++)
+            if (strcmp(want, languages[k]) == 0) lang = k;
+    }
+    return lang;
+}
+
+const char *set_language_name(void) { return languages[set_language()]; }
 
 static void list_languages(IpcCall *call, int max) {
     IpcBuffer b = ipc_out_buffer(call, 0);
@@ -37,7 +52,7 @@ static void list_languages(IpcCall *call, int max) {
 static void set_dispatch(ServiceObject *self, IpcCall *call) {
     switch (call->cmd) {
     case 0:                     /* GetLanguageCode -> u64 */
-        ipc_out64(call, language_code(SYSTEM_LANGUAGE));
+        ipc_out64(call, language_code(set_language()));
         break;
     case 1:                     /* GetAvailableLanguageCodes -> count, codes in C buffer */
         list_languages(call, N_LANGUAGES_V1);

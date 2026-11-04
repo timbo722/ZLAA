@@ -32,6 +32,7 @@ void ui_pointer(const void *sdl_event);  /* mouse / touch (SDL_Event) */
  * nothing yet; UI_PLAY, UI_QUIT, UI_RESUME close the menu) */
 int ui_frame(void);
 void ui_apply_settings(void);            /* settings -> environment variables */
+int ui_settings_changed(void);           /* 1 once after the player changed a setting */
 
 #ifdef __cplusplus
 }

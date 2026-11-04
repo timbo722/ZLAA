@@ -60,6 +60,9 @@ static void map_face_buttons(SDL_Gamepad *pad) {
         face_bit[i] = l == SDL_GAMEPAD_BUTTON_LABEL_A ? BTN_A : l == SDL_GAMEPAD_BUTTON_LABEL_B ? BTN_B
                     : l == SDL_GAMEPAD_BUTTON_LABEL_X ? BTN_X : l == SDL_GAMEPAD_BUTTON_LABEL_Y ? BTN_Y : by_position[i];
     }
+    if (getenv("LAA_SWAP_FACE"))                     /* (the menu's "Button layout": A <-> B, X <-> Y) */
+        for (int i = 0; i < 4; i++)
+            face_bit[i] = face_bit[i] == BTN_A ? BTN_B : face_bit[i] == BTN_B ? BTN_A : face_bit[i] == BTN_X ? BTN_Y : BTN_X;
     int letter[4];
     for (int i = 0; i < 4; i++) letter[i] = face_bit[i] == BTN_A ? 0 : face_bit[i] == BTN_B ? 1 : face_bit[i] == BTN_X ? 2 : 3;
     printf("input: %s: south = %s, east = %s, west = %s, north = %s\n", SDL_GetGamepadName(pad), names[letter[0]],
@@ -194,6 +197,14 @@ static void menu_event(const SDL_Event *e) {
     if (e->type >= SDL_EVENT_MOUSE_MOTION && e->type <= SDL_EVENT_MOUSE_WHEEL) ui_pointer(e);
 }
 
+/* The player changed a setting: as environment variables now, read again where they can change live
+ * (the controller's button layout here, the FPS counter, the volume, the stick dead zone) */
+static void settings_changed(void) {
+    ui_apply_settings();
+    if (pad) map_face_buttons(pad);
+    kernel_settings_gen++;
+}
+
 static void pause_game(void) {                       /* the pause menu: the game stops */
     printf("menu: paused\n");
     kernel_set_suspended(SUSPEND_MENU, 1);
@@ -234,8 +245,10 @@ static void read_input(void) {
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) s.buttons |= BTN_ZR;
         int lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
         int rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX), ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
-        if (abs(lx) > 4000 || abs(ly) > 4000) { s.lx = lx; s.ly = ly; }
-        if (abs(rx) > 4000 || abs(ry) > 4000) { s.rx = rx; s.ry = ry; }
+        static int dead, gen = -1;                   /* stick dead zone (LAA_DEADZONE, of 32767; the menu's) */
+        if (gen != kernel_settings_gen) gen = kernel_settings_gen, dead = getenv("LAA_DEADZONE") ? atoi(getenv("LAA_DEADZONE")) : 4000;
+        if (abs(lx) > dead || abs(ly) > dead) { s.lx = lx; s.ly = ly; }
+        if (abs(rx) > dead || abs(ry) > dead) { s.rx = rx; s.ry = ry; }
     }
     if (s.lx > 32767) s.lx = 32767;
     if (s.ly > 32767) s.ly = 32767;
@@ -449,7 +462,10 @@ int main(int argc, char **argv) {
             }
             r = ui_frame();
             if (r == UI_QUIT) { fflush(NULL); _exit(0); }
+            if (ui_settings_changed()) settings_changed();
         }
+        if (pad) map_face_buttons(pad);              /* (the settings as Play applied them) */
+        kernel_settings_gen++;
     }
 #endif
 
@@ -501,6 +517,7 @@ int main(int argc, char **argv) {
         if (menu && ui_open()) {
             int r = ui_frame();
             if (r == UI_QUIT) { fflush(NULL); _exit(0); }
+            if (ui_settings_changed()) settings_changed();
             if (r == UI_RESUME) {
                 printf("menu: resumed\n");
                 render_ui_set(0);

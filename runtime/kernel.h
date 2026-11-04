@@ -196,6 +196,11 @@ enum { SUSPEND_BACKGROUND = 1, SUSPEND_MENU = 2 };
 void kernel_set_suspended(int why, int on);
 int kernel_wait_resumed(void);
 
+/* Counts changes of the menu's settings (main.c sets them as LAA_* variables, then adds one): code
+ * that reads a setting that can change while the game runs (the FPS counter, the volume) reads its
+ * variable again when this changed */
+extern volatile int kernel_settings_gen;
+
 /* Log of SVCs as they happen, when the LAA_TRACE_SVC environment variable is set */
 extern int ktrace;
 extern int ktrace_wait;     /* LAA_TRACE_WAIT: what threads go to sleep on */

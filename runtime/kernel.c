@@ -409,6 +409,8 @@ int kernel_start_main(void) {
 
 int kernel_wait_main(int timeout_ms) { return kthread_wait_main(main_thread, timeout_ms); }
 
+volatile int kernel_settings_gen;
+
 static pthread_mutex_t suspend_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t suspend_cond = PTHREAD_COND_INITIALIZER;
 static int suspended;

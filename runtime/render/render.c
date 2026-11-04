@@ -293,6 +293,7 @@ static struct {
     VkDeviceMemory image_memory;
     double window_start, last, worst;
     int frames;
+    int corner;                      /* LAA_FPS_CORNER: 0 bottom left, 1 bottom right, 2 top left, 3 top right */
     char text[OSD_CHARS + 1];
 } osd = { .on = -1 };
 
@@ -372,6 +373,8 @@ static void osd_draw(VkCommandBuffer cmd, VkImage dst) {      /* (dst: an out sl
     barrier(cmd, osd.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     int32_t scale = out.height >= 1000 ? 2 : 1, x = 4, y = (int32_t)out.height - OSD_H * scale - 4;   /* bottom left */
+    if (osd.corner & 1) x = (int32_t)out.width - OSD_W * scale - 4;
+    if (osd.corner & 2) y = 4;
     VkImageBlit blit = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                          .srcOffsets = { { 0, 0, 0 }, { OSD_W, OSD_H, 1 } },
                          .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
@@ -561,7 +564,13 @@ void render_present(uint64_t texture, const int32_t crop[4]) {
     render_gpu_timing_frame(nvn_frame_count());
     render_capture_print(nvn_frame_count());
     render_guard_check(nvn_frame_count());
-    if (osd.on < 0 && (osd.on = getenv("LAA_SHOW_FPS") && atoi(getenv("LAA_SHOW_FPS")))) osd_init();
+    static int settings_gen = -1;                    /* LAA_SHOW_FPS / LAA_FPS_CORNER: the menu can change them */
+    if (settings_gen != kernel_settings_gen) {
+        settings_gen = kernel_settings_gen;
+        osd.on = getenv("LAA_SHOW_FPS") && atoi(getenv("LAA_SHOW_FPS"));
+        osd.corner = getenv("LAA_FPS_CORNER") ? atoi(getenv("LAA_FPS_CORNER")) & 3 : 0;
+        if (osd.on && !osd.buffer) osd_init();
+    }
     if (osd.on) osd_update();
     int from_gpu = h && h->gpu_written;
     if (!from_gpu && read_guest_texture(gptr(texture)) != 0) return;

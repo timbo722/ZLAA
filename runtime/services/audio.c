@@ -212,7 +212,11 @@ static void output_open(void) {
  * off instead of clipping them. */
 static void output_write(float (*mix)[2]) {
     static float gain = -1;
-    if (gain < 0) gain = getenv("LAA_VOLUME") ? strtof(getenv("LAA_VOLUME"), NULL) : 3.0f;
+    static int gen = -1;
+    if (gen != kernel_settings_gen) {                /* (the menu's volume, read again when it changes) */
+        gen = kernel_settings_gen;
+        gain = getenv("LAA_VOLUME") ? strtof(getenv("LAA_VOLUME"), NULL) : 3.0f;
+    }
     if (!(gain >= 0 && gain <= 100)) gain = 3.0f;
     int16_t pcm[OUT_FRAMES * 2];
     for (int i = 0; i < OUT_FRAMES * 2; i++) {

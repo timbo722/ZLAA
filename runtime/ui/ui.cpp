@@ -29,6 +29,9 @@ extern "C" {
 #ifndef LAA_VERSION
 #define LAA_VERSION "dev"
 #endif
+#ifndef LAA_COMMIT
+#define LAA_COMMIT "unknown"
+#endif
 
 namespace {
 
@@ -42,23 +45,51 @@ struct Setting {
     const char *help;
 };
 
-const char *const kTabs[] = { "Display", "Audio", "About" };
+const char *const kTabs[] = { "Display", "Audio", "Controls", "Game", "Advanced", "About" };
+
+#define NEXT_START " Takes effect the next time the game starts."
 
 const std::vector<Setting> kSettings = {
     { "Display", "Mode", "LAA_DOCKED", { { "Handheld (720p)", NULL }, { "Docked (1080p)", "1" } }, 0,
       "How the game sees the console. Handheld renders at up to 720p, docked at up to 1080p: sharper, "
-      "but the GPU works about twice as hard (more heat). Takes effect the next time the game starts." },
+      "but the GPU works about twice as hard (more heat and battery)." NEXT_START },
     { "Display", "Frame rate counter", "LAA_SHOW_FPS", { { "Off", NULL }, { "On", "1" } }, 0,
-      "Frames per second and the slowest frame of the last half second, in the bottom-left corner. "
-      "Yellow when a frame missed the 60 Hz display." },
-    { "Audio", "Volume", "LAA_VOLUME", { { "Off", "0" }, { "Quiet", "1.5" }, { "Normal", "3" }, { "Loud", "5" } }, 2,
-      "The game's mix is quiet, so it is amplified (Normal: about +10 dB); loud peaks are rounded off "
-      "instead of clipping. Takes effect the next time the game starts." },
+      "Frames per second and the slowest frame of the last half second. Yellow when a frame missed "
+      "the 60 Hz display." },
+    { "Display", "Counter position", "LAA_FPS_CORNER",
+      { { "Bottom left", NULL }, { "Bottom right", "1" }, { "Top left", "2" }, { "Top right", "3" } }, 0,
+      "Which corner of the screen the frame rate counter sits in." },
+    { "Audio", "Volume", "LAA_VOLUME",
+      { { "Off", "0" }, { "25%", "0.75" }, { "50%", "1.5" }, { "75%", "2.25" }, { "100%", "3" }, { "125%", "3.75" },
+        { "150%", "4.5" }, { "200%", "6" } }, 4,
+      "The game's mix is quiet, so at 100% it is already amplified (about +10 dB); loud peaks are rounded off "
+      "instead of clipping." },
+    { "Controls", "Button layout", "LAA_SWAP_FACE", { { "As printed", NULL }, { "Swapped", "1" } }, 0,
+      "As printed: each button does what its letter says, as on a Switch. Swapped: A and B trade places, and "
+      "X and Y, for controllers labelled the Xbox way. The menus follow it too." },
+    { "Controls", "Stick dead zone", "LAA_DEADZONE",
+      { { "Small", "2000" }, { "Normal", NULL }, { "Large", "8000" } }, 1,
+      "How far a stick must move before it counts. Larger if Link drifts while you don't touch the stick, "
+      "smaller for finer control." },
+    { "Game", "Language", "LAA_LANGUAGE",
+      { { "English (US)", NULL }, { "English (UK)", "en-GB" }, { "French", "fr" }, { "French (Canada)", "fr-CA" },
+        { "German", "de" }, { "Italian", "it" }, { "Spanish", "es" }, { "Spanish (Latin America)", "es-419" },
+        { "Dutch", "nl" }, { "Russian", "ru" }, { "Japanese", "ja" }, { "Korean", "ko" },
+        { "Chinese (Simplified)", "zh-Hans" }, { "Chinese (Traditional)", "zh-Hant" } }, 0,
+      "The language the console tells the game to use. Japanese, Korean and Chinese need the Switch's own fonts "
+      "in the app's fonts folder: the free font that stands in for them has only Latin and Cyrillic letters." NEXT_START },
+    { "Advanced", "Fast core for the game", "LAA_NO_PIN", { { "On", NULL }, { "Off", "1" } }, 0,
+      "Keeps the game's main thread on the phone's fastest CPU core and the other work off it. Smoother; turn it "
+      "off only to compare." NEXT_START },
+    { "Advanced", "Performance hints", "LAA_NO_ADPF", { { "On", NULL }, { "Off", "1" } }, 0,
+      "Tells Android how long each frame may take (its performance hint API), so it can raise the CPU clock in "
+      "time." NEXT_START },
 };
 
 std::map<std::string, std::string> config;              /* NAME -> value, as saved */
 std::map<std::string, bool> fixed;                      /* set outside the menu (env.txt): not ours to change */
-UiPaths paths;
+UiPaths paths;                                          /* (pointing into path_copies: the caller's may go away) */
+std::string path_copies[6];
 
 int choice_of(const Setting &s) {
     if (fixed[s.var]) {
@@ -148,6 +179,7 @@ Rml::ElementDocument *start_doc, *settings_doc, *pause_doc;
 int showing;                                             /* 0: no menu, 1: start screen, 2: pause menu */
 int result;                                              /* what ui_frame returns next */
 int game_ready;                                          /* the start screen's Play works */
+int settings_changed;                                    /* (ui_settings_changed) */
 std::string tab = "Display";
 uint64_t held_since[UI_ACTIONS], repeat_at[UI_ACTIONS];  /* (ns) direction presses repeat while held */
 
@@ -192,7 +224,7 @@ void update_start_status() {
     } else {
         const char *v = strncmp(id, "AE16F71E002AF8CB", 16) == 0 ? "1.0.0"
                       : strncmp(id, "909E904AF78AC1B8", 16) == 0 ? "1.0.1 / 1.1.0" : "unknown version";
-        version = std::string("Link's Awakening ") + v + " \xC2\xB7 " + std::string(id, 8);
+        version = std::string("Link's Awakening ") + v;
         if (lib == 0) status = "good", label = "Ready", game_ready = 1;
         else status = "pending", label = "Game code not built yet";
     }
@@ -227,14 +259,28 @@ void build_settings() {
                 "</value></row>";
     }
     if (tab == "About")
-        rows = "<about><heading>LAARecomp " LAA_VERSION "</heading>"
-               "<p>Link's Awakening (2019), statically recompiled from your own copy of the game: its code translated "
-               "ahead of time into native code, and the Switch's system and graphics reimplemented. Not an emulator.</p>"
-               "<p>No part of the game comes with this app: it runs only from a dump of your own cartridge or download.</p>"
-               "<p>Fonts: Nunito (SIL Open Font License), Material Symbols (Apache 2.0). Menus made with RmlUi (MIT).</p></about>";
+        rows = "<about>"
+               "<about-head><about-title>LAARecomp</about-title><about-version>Version " LAA_VERSION
+               " \xC2\xB7 " LAA_COMMIT "</about-version></about-head>"
+               "<p>A static recompilation of The Legend of Zelda: Link's Awakening (Nintendo Switch, 2019) for "
+               "Android. The game's code was translated ahead of time into native code for this device, and the "
+               "Switch's system and graphics are rebuilt around it. It is not an emulator.</p>"
+               "<card><heading>Your game, your files</heading>"
+               "<p>Nothing of the game comes with this app: no code, art, music or fonts. It runs only from the "
+               "files of your own copy; the game's code is built from them, never shipped.</p></card>"
+               "<card><heading>Made with</heading>"
+               "<p>SDL 3 (zlib) \xC2\xB7 RmlUi (MIT) \xC2\xB7 FreeType (FTL) \xC2\xB7 Nunito (SIL OFL) \xC2\xB7 "
+               "Material Symbols (Apache 2.0)</p></card>"
+               "<card><heading>Thanks</heading>"
+               "<p>Ryujinx (its shader decoder was the reference for ours), LAS Recomp and Dusklight (ideas and "
+               "inspiration), and the Switchbrew wiki.</p></card>"
+               "<p class=\"hint legal\">A fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda "
+               "and Link's Awakening are trademarks of Nintendo.</p>"
+               "</about>";
     settings_doc->GetElementById("tab-bar")->SetInnerRML(tabs);
     settings_doc->GetElementById("rows")->SetInnerRML(rows);
     settings_doc->GetElementById("help")->SetInnerRML(tab == "About" ? "" : "<p class=\"hint\">Choose a setting to see what it does.</p>");
+    settings_doc->GetElementById("window")->SetClass("about", tab == "About");   /* (the About page has no help pane) */
 }
 
 void open_settings() {
@@ -276,6 +322,7 @@ void change_setting(int row, int step) {
     const char *v = s.choices[(size_t)c].value;
     config[s.var] = v ? v : "";
     save_config();
+    settings_changed = 1;
     build_settings();
     if (Rml::Element *e = settings_doc->GetElementById("row-" + std::to_string(row))) e->Focus(true);
 }
@@ -347,7 +394,12 @@ void act(int action) {
 
 extern "C" int ui_init(void *sdl_window, const UiPaths *p) {
     window = (SDL_Window *)sdl_window;
-    paths = *p;
+    const char *const in[6] = { p->exefs, p->romfs, p->game_dir, p->game_import, p->config, p->res };
+    const char **out[6] = { &paths.exefs, &paths.romfs, &paths.game_dir, &paths.game_import, &paths.config, &paths.res };
+    for (int k = 0; k < 6; k++) {
+        path_copies[k] = in[k] ? in[k] : "";
+        *out[k] = in[k] ? path_copies[k].c_str() : NULL;
+    }
     for (const Setting &s : kSettings) fixed[s.var] = getenv(s.var) != NULL;
     load_config();
     load_script();
@@ -469,6 +521,12 @@ extern "C" int ui_frame(void) {
         showing = 0;
     }
     return r;
+}
+
+extern "C" int ui_settings_changed(void) {
+    int c = settings_changed;
+    settings_changed = 0;
+    return c;
 }
 
 extern "C" void ui_apply_settings(void) {

@@ -539,8 +539,9 @@ static void app_functions_dispatch(ServiceObject *self, IpcCall *call) {
     case 20:                                  /* EnsureSaveData(user id) -> u64 extra space needed: none */
         ipc_out64(call, 0);
         break;
-    case 21: {                                /* GetDesiredLanguage -> language code */
-        char lang[8] = "en-US";
+    case 21: {                                /* GetDesiredLanguage -> language code (the console's) */
+        char lang[8] = { 0 };
+        memcpy(lang, set_language_name(), strlen(set_language_name()));
         ipc_out_bytes(call, lang, 8);
         break;
     }
