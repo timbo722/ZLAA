@@ -66,10 +66,9 @@ and the game's own dynamic resolution. Further into the game is still largely un
 - Handheld (720p) or docked (1080p) mode.
 - A start screen and a pause menu (the controller's Home/Mode button, Android's Back button):
 
-  ![Settings: display, audio, controls, game, advanced](docs/settings.jpg)
+  ![Settings: display, audio, controls, advanced](docs/settings.jpg)
 - Settings: mode, frame rate counter (and its corner), volume, button layout (as printed or swapped), stick dead
-  zone, the game's language (English, French, German, Italian, Spanish, Dutch, Russian, Japanese, Korean, Chinese),
-  and performance options. Most apply instantly, even from the pause menu.
+  zone and performance options. Most apply instantly, even from the pause menu.
 - Pressing Home suspends the game like a Switch does; coming back opens the pause menu.
 - The game's movies play through Android's own video decoder.
 - Shaders are compiled once and kept, so later sessions start without stutter.

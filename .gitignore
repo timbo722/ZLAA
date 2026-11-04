@@ -23,3 +23,6 @@ game/
 # Local working notes (not part of the project)
 CLAUDE.md
 HANDOFF.md
+
+# Machine-specific settings for tools/thor (device serial, local folders)
+tools/thor/local.sh

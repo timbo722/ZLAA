@@ -45,7 +45,7 @@ struct Setting {
     const char *help;
 };
 
-const char *const kTabs[] = { "Display", "Audio", "Controls", "Game", "Advanced", "About" };
+const char *const kTabs[] = { "Display", "Audio", "Controls", "Advanced", "About" };
 
 #define NEXT_START " Takes effect the next time the game starts."
 
@@ -71,13 +71,6 @@ const std::vector<Setting> kSettings = {
       { { "Small", "2000" }, { "Normal", NULL }, { "Large", "8000" } }, 1,
       "How far a stick must move before it counts. Larger if Link drifts while you don't touch the stick, "
       "smaller for finer control." },
-    { "Game", "Language", "LAA_LANGUAGE",
-      { { "English (US)", NULL }, { "English (UK)", "en-GB" }, { "French", "fr" }, { "French (Canada)", "fr-CA" },
-        { "German", "de" }, { "Italian", "it" }, { "Spanish", "es" }, { "Spanish (Latin America)", "es-419" },
-        { "Dutch", "nl" }, { "Russian", "ru" }, { "Japanese", "ja" }, { "Korean", "ko" },
-        { "Chinese (Simplified)", "zh-Hans" }, { "Chinese (Traditional)", "zh-Hant" } }, 0,
-      "The language the console tells the game to use. Japanese, Korean and Chinese need the Switch's own fonts "
-      "in the app's fonts folder: the free font that stands in for them has only Latin and Cyrillic letters." NEXT_START },
     { "Advanced", "Fast core for the game", "LAA_NO_PIN", { { "On", NULL }, { "Off", "1" } }, 0,
       "Keeps the game's main thread on the phone's fastest CPU core and the other work off it. Smoother; turn it "
       "off only to compare." NEXT_START },

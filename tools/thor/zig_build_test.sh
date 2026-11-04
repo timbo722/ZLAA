@@ -3,12 +3,13 @@
 # can a player's device build the game code?). Packs the generated C + runtime headers + libmain.so, pushes them and
 # zig (zig-aarch64-linux-<v>.tar.xz from ziglang.org, trimmed to what compiling needs) to /data/local/tmp/zt,
 # compiles 2 chunks at a time (each waits while a CPU zone is over 70 C: 6 at once reached 94 C), links with
-# zig's ld.lld against libmain.so (no libc needed) and pulls the result to Documents\LAARecomp\game as
+# zig's ld.lld against libmain.so (no libc needed) and pulls the result to $LAA_HOST_DIR/game as
 # libgame-<id>.ondevice-zig.so (try it with ab_game.sh). Deletes /data/local/tmp/zt afterwards.
 # 2026-11-01 (1.0.0, zig 0.14.1): 292 chunks ~5-11 s each, link < 1 s, game speed the same as the NDK build.
+. "$(dirname "$0")/env.sh"
 set -e
-ZT=$1; GEN=${2:-$HOME/laar-build/gen}; W=~/laar-build/android/win/platform-tools/adb.exe
-X=/mnt/c/Users/you/Documents/LAARecomp; T=$(mktemp -d); R=$(cd "$(dirname "$0")/../.." && pwd)
+ZT=$1; GEN=${2:-$HOME/laar-build/gen}
+T=$(mktemp -d); R=$(cd "$(dirname "$0")/../.." && pwd)
 ID=$(sed -n 's/set(GAME_BUILD_ID \(.*\))/\1/p' $GEN/sources.cmake)
 ABI=$(grep -o 'RECOMP_ABI=\\"[0-9a-f]*' ~/laar-build/android/build/game/build.ninja | head -1 | sed 's/.*"//')
 tar xf $ZT -C $T; Z=$(ls -d $T/zig-*); mkdir -p $T/pkg/zig/lib/libc/include $T/pkg/gamesrc
@@ -29,8 +30,8 @@ t0=\$(date +%s); ls gamesrc/*.c | xargs -P 2 -n 1 sh cc.sh; t1=\$(date +%s)
 echo "compiled \$(ls obj | wc -l) chunks in \$((t1 - t0)) s, linked in \$((\$(date +%s) - t1)) s"
 EOF
 tar czf $X/transfer/zt.tgz -C $T/pkg .; rm -rf $T
-$W -s <serial> shell "rm -rf /data/local/tmp/zt; mkdir -p /data/local/tmp/zt"
-$W -s <serial> push 'C:\Users\you\Documents\LAARecomp\transfer\zt.tgz' /data/local/tmp/zt/ > /dev/null
-$W -s <serial> shell "cd /data/local/tmp/zt && tar xzf zt.tgz && rm zt.tgz && sh build.sh"
-$W -s <serial> pull /data/local/tmp/zt/libgame-$ID.so "C:\\Users\\you\\Documents\\LAARecomp\\game\\libgame-$ID.ondevice-zig.so" | tail -1
-$W -s <serial> shell "rm -rf /data/local/tmp/zt"
+$W shell "rm -rf /data/local/tmp/zt; mkdir -p /data/local/tmp/zt"
+$W push "$(xa transfer/zt.tgz)" /data/local/tmp/zt/ > /dev/null
+$W shell "cd /data/local/tmp/zt && tar xzf zt.tgz && rm zt.tgz && sh build.sh"
+$W pull /data/local/tmp/zt/libgame-$ID.so "$(xa game/libgame-$ID.ondevice-zig.so)" | tail -1
+$W shell "rm -rf /data/local/tmp/zt"
