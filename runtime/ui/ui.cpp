@@ -162,10 +162,11 @@ System sys;
 Files files;
 SDL_Window *window;
 Rml::Context *context;
-Rml::ElementDocument *start_doc, *settings_doc, *pause_doc;
+Rml::ElementDocument *start_doc, *settings_doc, *pause_doc, *build_doc;
 int showing;                                             /* 0: no menu, 1: start screen, 2: pause menu */
 int result;                                              /* what ui_frame returns next */
 int game_ready;                                          /* the start screen's Play works */
+int needs_build;                                         /* the game files are there, their code isn't: Prepare Game */
 int settings_changed;                                    /* (ui_settings_changed) */
 std::string tab = "Video";
 uint64_t held_since[UI_ACTIONS], repeat_at[UI_ACTIONS];  /* (ns) direction presses repeat while held */
@@ -196,15 +197,27 @@ std::string esc(const std::string &s) {                  /* text -> RML */
 
 /* ---- the start screen ---- */
 
+void focus_first(Rml::ElementDocument *doc, const char *selector) {
+    if (Rml::Element *e = doc->QuerySelector(selector)) e->Focus(true);
+}
+
+/* The line above the status chip ("" hides it) */
+void note(const std::string &text, bool bad) {
+    Rml::Element *e = start_doc->GetElementById("start-note");
+    e->SetInnerRML(esc(text));
+    e->SetClass("shown", !text.empty());
+    e->SetClass("bad", bad);
+}
+
 void update_start_status() {
     char id[17] = "";
     std::string status, label, version;
     struct stat st;
     int lib = game_lib_find(paths.exefs, paths.game_dir, paths.game_import, id);
-    game_ready = 0;
+    game_ready = needs_build = 0;
     if (lib < 0) {
         status = "bad", label = "No game files";
-        version = "Put your dump's exefs and romfs folders in the app's folder";
+        version = "Choose Game Files: the folder with your dump's exefs and romfs";
     } else if (stat(paths.romfs, &st) != 0) {
         status = "bad", label = "The game's romfs folder is missing";
         version = std::string("Expected at ") + paths.romfs;
@@ -214,6 +227,7 @@ void update_start_status() {
         version = std::string("Link's Awakening ") + v;
         if (lib == 0) status = "good", label = "Ready", game_ready = 1;
         else status = "pending", label = "Game code not built yet";
+        needs_build = lib != 0;
     }
     Rml::Element *e = start_doc->GetElementById("game-status");
     e->SetAttribute("status", status);
@@ -221,21 +235,141 @@ void update_start_status() {
     start_doc->GetElementById("game-version")->SetInnerRML(esc(version));
     if (const char *crash = getenv("LAA_LAST_CRASH")) {   /* (main.c: the last session crashed) */
         const char *name = strrchr(crash, '/');
-        Rml::Element *note = start_doc->GetElementById("crash-note");
-        note->SetInnerRML(esc(std::string("The game closed unexpectedly last time. Its report is in crashes/") +
-                              (name ? name + 1 : crash) + "."));
-        note->SetClass("shown", true);
+        note(std::string("The game closed unexpectedly last time. Its report is in crashes/") + (name ? name + 1 : crash) +
+             ".", true);
+        unsetenv("LAA_LAST_CRASH");                      /* (said once) */
     }
     Rml::Element *play = start_doc->GetElementById("play");
-    if (game_ready) play->RemoveAttribute("disabled");
+    play->SetInnerRML(needs_build ? "<icon class=\"build\" />Prepare Game" : "<icon class=\"play\" />Play");
+    if (game_ready || needs_build) play->RemoveAttribute("disabled");
     else play->SetAttribute("disabled", "");
 }
 
-/* ---- the settings window ---- */
+/* ---- Game Files: the player picks the folder holding their dump (exefs/ and romfs/, or the exefs folder itself
+ * with romfs/ beside it). Android asks for "All files access" first, so the files are read where they are ---- */
+int picking;                                             /* 1: waiting for the permission, 2: for the picker */
 
-void focus_first(Rml::ElementDocument *doc, const char *selector) {
-    if (Rml::Element *e = doc->QuerySelector(selector)) e->Focus(true);
+bool is_dir(const std::string &p) { struct stat st; return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
+bool is_file(const std::string &p) { struct stat st; return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode); }
+
+void use_game_folder(const std::string &dir) {
+    std::string exefs, romfs, parent = dir.substr(0, dir.find_last_of('/'));
+    if (is_file(dir + "/exefs/main")) exefs = dir + "/exefs", romfs = dir + "/romfs";
+    else if (is_file(dir + "/main")) exefs = dir, romfs = parent + "/romfs";
+    if (exefs.empty()) {
+        note("No game files there: the folder needs your dump's exefs folder (with a file named main) and its romfs "
+             "folder.", true);
+        return;
+    }
+    if (!is_dir(romfs)) { note("Found exefs, but no romfs folder beside it (" + romfs + ").", true); return; }
+    config["LAA_EXEFS"] = exefs;
+    config["LAA_ROMFS"] = romfs;
+    save_config();
+    path_copies[0] = exefs;
+    path_copies[1] = romfs;
+    paths.exefs = path_copies[0].c_str();
+    paths.romfs = path_copies[1].c_str();
+    note("", false);
+    update_start_status();
+    focus_first(start_doc, game_ready ? "#play" : "#files");
 }
+
+void choose_game_files() {
+    if (!host_files_access()) {
+        picking = 1;
+        note("Allow \u201cAll files access\u201d for LAARecomp in the page that opens, then come back: it reads your game "
+             "files where they are.", false);
+        host_request_files_access();
+        return;
+    }
+    picking = 2;
+    note("Choose the folder with your dump's exefs and romfs folders.", false);
+    host_pick_folder();
+}
+
+void poll_picking() {
+    if (picking == 1 && host_files_access()) { picking = 2; host_pick_folder(); }
+    char dir[4096];
+    if (picking == 2 && host_picked_folder(dir, sizeof dir)) {
+        picking = 0;
+        if (dir[0]) use_game_folder(dir);
+        else note("", false);
+    }
+}
+
+/* ---- Prepare Game: the game's code built on the device (the host's builder), with its progress ---- */
+int build_shown_step = -1;
+
+std::string minutes(double s) {
+    char b[32];
+    snprintf(b, sizeof b, "%d:%02d", (int)s / 60, (int)s % 60);
+    return b;
+}
+
+void update_build() {
+    double fraction, elapsed;
+    int cooling;
+    char detail[256];
+    int step = host_build_progress(&fraction, detail, sizeof detail, &elapsed, &cooling);
+    bool running = step > UI_BUILD_IDLE && step < UI_BUILD_DONE;
+    if (build_doc->IsVisible()) {
+        char pct[16];
+        snprintf(pct, sizeof pct, "%d%%", (int)(fraction * 100));
+        build_doc->GetElementById("build-fill")->SetProperty("width", std::to_string(fraction * 100) + "%");
+        build_doc->GetElementById("build-percent")->SetInnerRML(running || step == UI_BUILD_DONE ? pct : "");
+        std::string t;
+        if (running && elapsed > 0) {
+            t = minutes(elapsed);
+            if (fraction > 0.05) t += " \xC2\xB7 about " + minutes(elapsed / fraction - elapsed) + " left";
+        }
+        build_doc->GetElementById("build-time")->SetInnerRML(esc(t));
+        build_doc->GetElementById("build-detail")->SetInnerRML(esc(detail));
+        if (step != build_shown_step) {                  /* the buttons for this step */
+            build_shown_step = step;
+            Rml::Element *go = build_doc->GetElementById("build-go"), *back = build_doc->GetElementById("build-back");
+            go->SetInnerRML(running ? "Cancel" : step == UI_BUILD_DONE ? "Play" : step == UI_BUILD_FAILED ? "Try Again" : "Start");
+            back->SetInnerRML(running ? "Hide" : "Back");
+            if (step == UI_BUILD_DONE) update_start_status();
+        }
+    }
+    if (running && !build_doc->IsVisible()) {             /* (hidden: the status chip shows how far it is) */
+        char b[64];
+        snprintf(b, sizeof b, "Preparing the game: %d%%", (int)(fraction * 100));
+        start_doc->GetElementById("game-status-label")->SetInnerRML(b);
+    }
+    static int last_step = -1;                           /* (finished while hidden: the start screen once) */
+    if (step != last_step && step == UI_BUILD_DONE) update_start_status();
+    last_step = step;
+}
+
+void open_build() {
+    build_shown_step = -1;
+    build_doc->Show(Rml::ModalFlag::Modal, Rml::FocusFlag::None);
+    build_doc->GetElementById("window")->SetAttribute("open", "");
+    update_build();
+    focus_first(build_doc, "#build-go");
+}
+
+void close_build() {
+    build_doc->GetElementById("window")->RemoveAttribute("open");
+    build_doc->Hide();
+    start_doc->Focus();
+    update_start_status();
+    focus_first(start_doc, "#play");
+}
+
+void build_go() {
+    double f, e;
+    int c;
+    char d[256];
+    int step = host_build_progress(&f, d, sizeof d, &e, &c);
+    if (step > UI_BUILD_IDLE && step < UI_BUILD_DONE) host_build_cancel();
+    else if (step == UI_BUILD_DONE && game_ready) { close_build(); result = UI_PLAY; }
+    else if (host_build_start(paths.exefs) != 0) build_doc->GetElementById("build-detail")->SetInnerRML("Can't build here.");
+    update_build();
+}
+
+/* ---- the settings window ---- */
 
 void build_settings() {
     std::string tabs, rows;
@@ -340,8 +474,12 @@ public:
             const std::string &id = e->GetId();
             if (id.empty()) continue;
             if (id == "play" && game_ready) { result = UI_PLAY; return; }
+            if (id == "play" && needs_build) { open_build(); return; }
+            if (id == "build-go") { build_go(); return; }
+            if (id == "build-back") { close_build(); return; }
             if (id == "resume") { result = UI_RESUME; return; }
             if (id == "settings") { open_settings(); return; }
+            if (id == "files") { choose_game_files(); return; }
             if (id == "quit") { result = UI_QUIT; return; }
             if (id == "close") { close_settings(); return; }
             if (id.rfind("tab-", 0) == 0 && id != "tab-bar") { tab = id.substr(4); build_settings(); return; }
@@ -376,7 +514,8 @@ void act(int action) {
         break;
     case UI_ACCEPT: key(Rml::Input::KI_RETURN); break;
     case UI_BACK:
-        if (in_settings) close_settings();
+        if (build_doc && build_doc->IsVisible()) close_build();
+        else if (in_settings) close_settings();
         else if (showing == 2) result = UI_RESUME;
         break;
     case UI_TAB_PREV: case UI_TAB_NEXT: if (in_settings) switch_tab(action == UI_TAB_PREV ? -1 : 1); break;
@@ -396,6 +535,14 @@ extern "C" int ui_init(void *sdl_window, const UiPaths *p) {
     }
     for (const Setting &s : kSettings) fixed[s.var] = getenv(s.var) != NULL;
     load_config();
+    for (int k = 0; k < 2; k++) {                        /* the game files the player chose (env.txt lines win) */
+        const char *var = k ? "LAA_ROMFS" : "LAA_EXEFS";
+        auto it = config.find(var);
+        if (!getenv(var) && it != config.end() && !it->second.empty()) {
+            path_copies[k] = it->second;
+            *out[k] = path_copies[k].c_str();
+        }
+    }
     load_script();
     if (ui_render_init() != 0) return -1;
     Rml::SetRenderInterface(ui_render_interface());
@@ -414,7 +561,8 @@ extern "C" int ui_init(void *sdl_window, const UiPaths *p) {
     start_doc = load("start.rml");
     settings_doc = load("settings.rml");
     pause_doc = load("pause.rml");
-    if (!start_doc || !settings_doc || !pause_doc) return -1;
+    build_doc = load("build.rml");
+    if (!start_doc || !settings_doc || !pause_doc || !build_doc) return -1;
     start_doc->GetElementById("version")->SetInnerRML(LAA_VERSION);
     return 0;
 }
@@ -425,7 +573,7 @@ extern "C" void ui_start_menu(void) {
     update_start_status();
     start_doc->Show();
     start_doc->SetClass("animate-in", true);
-    focus_first(start_doc, game_ready ? "#play" : "#settings");
+    focus_first(start_doc, game_ready || needs_build ? "#play" : "#files");
 }
 
 extern "C" int ui_skip_start(void) {
@@ -445,6 +593,8 @@ extern "C" void ui_pause(void) {
 }
 
 extern "C" int ui_open(void) { return showing != 0; }
+extern "C" const char *ui_game_exefs(void) { return paths.exefs; }
+extern "C" const char *ui_game_romfs(void) { return paths.romfs; }
 
 extern "C" void ui_input(int action, int down) {
     if (!showing || action < 0 || action >= UI_ACTIONS) return;
@@ -495,10 +645,16 @@ const char *run_script() {                               /* this frame's steps; 
 extern "C" int ui_frame(void) {
     if (!showing) return UI_NONE;
     static uint64_t last_frame;                          /* at most 60 frames a second (a menu needs no more; */
-    uint64_t now = SDL_GetTicksNS();                     /*  some displays don't make us wait) */
-    if (now - last_frame < 16600000ull) SDL_DelayNS(16600000ull - (now - last_frame));
+    uint64_t now = SDL_GetTicksNS();                     /*  some displays don't make us wait); 30 while the game */
+    double bf, be;                                       /*  code builds (less heat beside it) */
+    int bc;
+    char bd[8];
+    int bstep = host_build_progress(&bf, bd, sizeof bd, &be, &bc);
+    uint64_t frame_ns = bstep > UI_BUILD_IDLE && bstep < UI_BUILD_DONE ? 33300000ull : 16600000ull;
+    if (now - last_frame < frame_ns) SDL_DelayNS(frame_ns - (now - last_frame));
     last_frame = now = SDL_GetTicksNS();
     const char *shot = run_script();
+    if (showing == 1) { poll_picking(); update_build(); }
     for (int a = UI_UP; a <= UI_RIGHT; a++)              /* held directions repeat */
         if (held_since[a] && now >= repeat_at[a]) { repeat_at[a] = now + 90000000ull; act(a); }
     RenderUiTarget t;
@@ -517,6 +673,7 @@ extern "C" int ui_frame(void) {
     if (r != UI_NONE) {                                  /* the menu closes */
         result = UI_NONE;
         if (settings_doc->IsVisible()) close_settings();
+        build_doc->Hide();
         start_doc->Hide();
         pause_doc->Hide();
         if (r == UI_PLAY) ui_apply_settings();

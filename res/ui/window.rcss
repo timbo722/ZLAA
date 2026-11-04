@@ -53,6 +53,7 @@ heading.window-title icon {
 }
 
 icon.pause { decorator: text("&#xe034;" center center); }
+icon.build { decorator: text("&#xe863;" center center); }
 
 header {
     display: flex;
@@ -273,6 +274,43 @@ menu-list button:hover,
 menu-list button:focus-visible {
     color: var(--night);
     background-color: var(--gold);
+}
+
+/* the game code being built: a wider window, a progress bar, the percentage and the time */
+window.build {
+    width: 560dp;
+}
+
+progress-track {
+    display: block;
+    height: 12dp;
+    margin-top: var(--gap-md);
+    border-radius: 6dp;
+    background-color: rgba(var(--text-rgb), 8%);
+}
+
+progress-fill {
+    display: block;
+    height: 12dp;
+    width: 0%;
+    border-radius: 6dp;
+    background-color: var(--gold);
+}
+
+build-line {
+    display: flex;
+    justify-content: space-between;
+    margin-top: var(--gap-sm);
+    font-size: 16dp;
+}
+
+build-percent {
+    font-weight: bold;
+    color: var(--gold);
+}
+
+build-time {
+    color: var(--muted);
 }
 
 window.small hints {

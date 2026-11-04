@@ -1,0 +1,21 @@
+<rml>
+<head>
+    <title>Prepare the Game</title>
+    <link type="text/rcss" href="theme.rcss" />
+    <link type="text/rcss" href="window.rcss" />
+</head>
+<body>
+    <window id="window" class="small build">
+        <heading class="window-title"><icon class="build" />Prepare the Game</heading>
+        <p id="build-intro">Your copy's code is translated and compiled for this device, once. It takes about half an
+        hour: keep LAARecomp open (plugged in is best). The device gets warm; the build slows down to let it cool.</p>
+        <progress-track id="build-track"><progress-fill id="build-fill" /></progress-track>
+        <build-line><build-percent id="build-percent" /><build-time id="build-time" /></build-line>
+        <p id="build-detail" class="hint" />
+        <menu-list>
+            <button id="build-go">Start</button>
+            <button id="build-back">Back</button>
+        </menu-list>
+    </window>
+</body>
+</rml>

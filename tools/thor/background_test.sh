@@ -8,13 +8,13 @@ out=$1
 $W shell input keyevent KEYCODE_WAKEUP
 $W shell am force-stop io.github.laarecomp
 $W push "$(xa env/laa_env.txt)" $A/env.txt > /dev/null
-$W shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity > /dev/null
+$W shell am start -n io.github.laarecomp/.LAAActivity > /dev/null
 frames() { $W shell "grep -c 'presented' $A/log.txt" | tr -d '\r'; }
 for i in $(seq 60); do sleep 5; [ "$(frames)" -ge 8 ] && break; done           # in the village (frame 2400)
 for round in 1 2; do
   $W shell input keyevent KEYCODE_HOME; sleep 3; a=$(frames); sleep 12; b=$(frames)
   echo "round $round: hidden: frame-count lines $a -> $b; app pid $($W shell pidof io.github.laarecomp | tr -d '\r')"
-  $W shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity > /dev/null; sleep 12; c=$(frames)
+  $W shell am start -n io.github.laarecomp/.LAAActivity > /dev/null; sleep 12; c=$(frames)
   echo "round $round: back: frame-count lines $b -> $c"
   $W exec-out screencap -p > $out-round$round.png
 done

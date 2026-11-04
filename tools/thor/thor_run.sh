@@ -13,7 +13,7 @@ $W push "$(xa env/laa_env.txt)" $A/env.txt > /dev/null
 $W logcat -c
 TIS=/sys/devices/system/cpu/cpu7/cpufreq/stats/time_in_state   # (the prime core's time per clock: the governor
 tis_a=$($W shell cat $TIS | tr -d "\r")                #  varies it between sessions, and ms per frame with it)
-$W shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity > /dev/null
+$W shell am start -n io.github.laarecomp/.LAAActivity > /dev/null
 # until frame UNTIL, the app dies, or 6 minutes pass; the app's log.txt has everything (logcat drops lines)
 for i in $(seq 72); do
   sleep 5

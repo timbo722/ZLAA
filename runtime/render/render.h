@@ -48,6 +48,7 @@ void render_texels_written(uint64_t texture, uint32_t level, uint32_t layer, con
 /* The GPU works behind the CPU (submit.c): */
 void render_flush(void);             /* submit what was recorded and wait until the GPU has done everything */
 uint64_t render_fence_serial(void);  /* the GPU submission that finishes the work recorded so far */
+void render_submit(void);            /* the work recorded so far, to the GPU (no wait; under the GPU lock) */
 int render_wait_serial(uint64_t serial, uint64_t timeout_ns);   /* 0: finished, -1: timeout */
 void render_wait_done(uint64_t serial);   /* the same, from any thread, not counted as the game waiting */
 uint64_t render_serial_completed(void);   /* the newest submission the GPU has finished */

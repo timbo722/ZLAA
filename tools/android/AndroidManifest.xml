@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- LAARecomp's Android app. The activity is SDL's own (org.libsdl.app.SDLActivity): it
-     creates the window and loads libSDL3.so and libmain.so (our runtime + the game), then
-     calls main(). Landscape only, no touch controls (the AYN Thor has buttons). -->
+<!-- LAARecomp's Android app. The activity is SDL's (org.libsdl.app.SDLActivity, as our LAAActivity, which adds a
+     folder picker): it creates the window and loads libSDL3.so and libmain.so (our runtime), then calls main().
+     Landscape only, no touch controls (the AYN Thor has buttons). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.laarecomp"
     android:versionCode="1"
     android:versionName="0.1">
 
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="35" />
+
+    <!-- "All files access": the player's game files (6 GB) are read where they are, in a folder they choose -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- Vulkan 1.3 (the renderer needs it) and a gamepad -->
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x403000" android:required="true" />
@@ -27,7 +30,7 @@
         <profileable android:shell="true" />
 
         <activity
-            android:name="org.libsdl.app.SDLActivity"
+            android:name="io.github.laarecomp.LAAActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
             android:launchMode="singleInstance"

@@ -5,10 +5,11 @@
 #
 # An APK is a zip file holding:
 #   AndroidManifest.xml   what the app is (binary XML, made by aapt2)
-#   classes.dex           its Java code, compiled for Android's runtime (here: only SDL's activity)
+#   classes.dex           its Java code, compiled for Android's runtime (SDL's activity, our LAAActivity)
 #   lib/arm64-v8a/*.so    native libraries: SDL3 and libmain.so (our runtime; the game itself is
 #                         a library built from your own dump, pushed by tools/thor/deploy.sh)
 #   assets/res/...        the menus' documents, style sheets and fonts (res/ in the repo)
+#   assets/builder/...    what building the game code on the device needs besides lib/ (make_toolchain.py)
 #   META-INF/...          a signature: Android installs only signed apps
 #
 # Needs (see tools/android/README.md): $LAA_ANDROID with jdk-17*/, sdk/ (build-tools 35,
@@ -34,8 +35,8 @@ mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/zip/lib/arm64-v8a"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM" --manifest "$HERE/AndroidManifest.xml" \
     --min-sdk-version 30 --target-sdk-version 35
 
-# 2. Java: SDL's activity and helpers -> .class files -> classes.dex
-find "$SDL_JAVA" -name '*.java' > "$OUT/java_files.txt"
+# 2. Java: SDL's activity and helpers, our LAAActivity (java/) -> .class files -> classes.dex
+find "$SDL_JAVA" "$HERE/java" -name '*.java' > "$OUT/java_files.txt"
 javac -nowarn -source 11 -target 11 -classpath "$PLATFORM" -d "$OUT/classes" @"$OUT/java_files.txt" 2>&1 \
     | grep -v -E "^warning|^Note:|^[0-9]+ warning" || true
 "$BT/d8" --release --min-api 30 --lib "$PLATFORM" --output "$OUT/dex" $(find "$OUT/classes" -name '*.class')
@@ -44,6 +45,14 @@ javac -nowarn -source 11 -target 11 -classpath "$PLATFORM" -d "$OUT/classes" @"$
 #    the dynamic symbols stay, so crash backtraces still name f_<guest address> functions.
 "$STRIP" --strip-debug -o "$OUT/zip/lib/arm64-v8a/libmain.so" "$A/build/game/libmain.so"
 "$STRIP" --strip-debug -o "$OUT/zip/lib/arm64-v8a/libSDL3.so" "$A/prefix/lib/libSDL3.so"
+
+# 3b. The game code is built on the device (host/builder.c): Python, the python command and zig as native
+#     libraries (the only place an app may run programs from), the rest as an asset (make_toolchain.py makes them)
+TC=$A/toolchain/out
+python3 "$HERE/builder/make_toolchain.py" "$A"      # (~5 s: it holds the recompiler, so always fresh)
+cp "$TC"/lib/*.so "$OUT/zip/lib/arm64-v8a/"
+mkdir -p "$OUT/zip/assets/builder"
+cp "$TC/builder.tar" "$TC/builder.id" "$OUT/zip/assets/builder/"
 
 # 4. Into the zip: dex + libraries + the menus' files
 cp "$OUT/base.apk" "$OUT/unsigned.apk"

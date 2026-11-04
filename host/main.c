@@ -419,6 +419,108 @@ static void android_setup(const char **exefs, const char **romfs) {
 }
 #endif
 
+/* ---- finding the player's game files (ui.h): a folder picker, and on Android "All files access" so the files are
+ * read where they are. Android: LAAActivity's static methods (tools/android/java) through JNI; the desktop:
+ * SDL's folder dialog. ---- */
+#ifdef LAA_HAVE_UI
+#ifdef __ANDROID__
+#include <jni.h>
+#include "builder.h"
+
+static void call_activity(const char *name, const char *sig, jboolean *z, jstring *str) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject activity = (jobject)SDL_GetAndroidActivity();
+    if (!env || !activity) return;
+    jclass c = (*env)->GetObjectClass(env, activity);
+    jmethodID m = (*env)->GetStaticMethodID(env, c, name, sig);
+    if (m && z) *z = (*env)->CallStaticBooleanMethod(env, c, m);
+    else if (m && str) *str = (jstring)(*env)->CallStaticObjectMethod(env, c, m);
+    else if (m) (*env)->CallStaticVoidMethod(env, c, m);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, activity);
+}
+
+int host_files_access(void) {
+    jboolean z = JNI_FALSE;
+    call_activity("hasFilesAccess", "()Z", &z, NULL);
+    return z == JNI_TRUE;
+}
+
+void host_request_files_access(void) { call_activity("requestFilesAccess", "()V", NULL, NULL); }
+void host_pick_folder(void) { call_activity("pickFolder", "()V", NULL, NULL); }
+
+/* the game code, built on the device (builder.c) */
+_Static_assert(BUILD_FAILED == UI_BUILD_FAILED && BUILD_COMPILING == UI_BUILD_COMPILING, "builder.h and ui.h agree");
+
+int host_build_start(const char *exefs) {
+    const char *dir = getenv("LAA_GAME_DIR");
+    return dir ? builder_start(exefs, dir) : -1;
+}
+
+int host_build_progress(double *fraction, char *detail, size_t size, double *elapsed, int *cooling) {
+    BuildState s;
+    builder_state(&s);
+    *fraction = s.fraction;
+    snprintf(detail, size, "%s", s.detail);
+    *elapsed = s.elapsed;
+    *cooling = s.cooling;
+    return s.step;
+}
+
+void host_build_cancel(void) { builder_cancel(); }
+
+int host_picked_folder(char *out, size_t size) {
+    jstring s = NULL;
+    call_activity("takePickedFolder", "()Ljava/lang/String;", NULL, &s);
+    if (!s) return 0;
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    const char *c = (*env)->GetStringUTFChars(env, s, NULL);
+    snprintf(out, size, "%s", c ? c : "");
+    if (c) (*env)->ReleaseStringUTFChars(env, s, c);
+    (*env)->DeleteLocalRef(env, s);
+    return 1;
+}
+#else
+static SDL_Window *dialog_window;
+static SDL_Mutex *picked_lock;
+static char picked[4096];
+static int picked_ready;
+
+static void folder_chosen(void *userdata, const char *const *files, int filter) {
+    (void)userdata; (void)filter;
+    SDL_LockMutex(picked_lock);
+    snprintf(picked, sizeof picked, "%s", files && files[0] ? files[0] : "");
+    picked_ready = 1;
+    SDL_UnlockMutex(picked_lock);
+}
+
+int host_files_access(void) { return 1; }
+void host_request_files_access(void) {}
+int host_build_start(const char *exefs) { (void)exefs; return -1; }   /* (the desktop builds it with CMake) */
+int host_build_progress(double *fraction, char *detail, size_t size, double *elapsed, int *cooling) {
+    *fraction = 0; *elapsed = 0; *cooling = 0;
+    snprintf(detail, size, "On a PC the game code is built with CMake (see the README)");
+    return UI_BUILD_IDLE;
+}
+void host_build_cancel(void) {}
+
+void host_pick_folder(void) {
+    if (!picked_lock) picked_lock = SDL_CreateMutex();
+    SDL_ShowOpenFolderDialog(folder_chosen, NULL, dialog_window, NULL, false);
+}
+
+int host_picked_folder(char *out, size_t size) {
+    if (!picked_lock) return 0;
+    SDL_LockMutex(picked_lock);
+    int r = picked_ready;
+    if (r) { snprintf(out, size, "%s", picked); picked_ready = 0; }
+    SDL_UnlockMutex(picked_lock);
+    return r;
+}
+#endif
+#endif
+
 #define LOAD_BASE 0x8000000ull   /* must match recomp.py --base (same as yuzu/Ryujinx) */
 
 static int dump_image(const GameImage *img, const char *path) {
@@ -512,6 +614,9 @@ int main(int argc, char **argv) {
         snprintf(res, sizeof res, "%s", getenv("LAA_RES_DIR") ? getenv("LAA_RES_DIR") : LAA_RES_DIR);
 #endif
         UiPaths p = { exefs, romfs, game_dir, getenv("LAA_GAME_IMPORT"), config, res };
+#ifndef __ANDROID__
+        dialog_window = window;
+#endif
         menu = ui_init(window, &p) == 0;
         if (!menu) fprintf(stderr, "menu: couldn't start; starting the game\n");
     }
@@ -534,6 +639,8 @@ int main(int argc, char **argv) {
     if (menu) {
         if (pad) map_face_buttons(pad);              /* (the settings as Play applied them) */
         kernel_settings_gen++;
+        exefs = ui_game_exefs();                     /* (the player may have chosen other game files) */
+        romfs = ui_game_romfs();
     }
 #endif
 

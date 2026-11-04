@@ -173,10 +173,10 @@ if(ANDROID)
     if(NOT SDL3_FOUND)
         message(FATAL_ERROR "Android needs SDL3 (built for Android; add its install prefix to CMAKE_PREFIX_PATH)")
     endif()
-    add_library(main SHARED host/main.c)
+    add_library(main SHARED host/main.c host/builder.c)   # (builder.c: the game code built on the device)
     # the whole runtime, also what only the game library calls (recomp_bad_jump, recomp_aes, ...)
     target_link_libraries(main PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_runtime>" ${LAA_UI} m log android SDL3::SDL3)
-    target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1>)
+    target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1> RECOMP_ABI="${RECOMP_ABI}")
     target_compile_options(main PRIVATE -Wall)
     # Calls between the runtime's own functions go straight to them, not through the PLT: in a
     # shared library every global function could be replaced from outside, so each call took a

@@ -13,7 +13,7 @@ $W shell input keyevent KEYCODE_WAKEUP
 $W shell am force-stop io.github.laarecomp
 $W shell "mkdir -p $A/shots; rm -f $A/shots/*"
 $W push "$(xa env/laa_env.txt)" $A/env.txt > /dev/null
-$W shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity > /dev/null
+$W shell am start -n io.github.laarecomp/.LAAActivity > /dev/null
 sleep "$secs"
 $W exec-out screencap -p > "$out/end.png"
 $W shell am force-stop io.github.laarecomp

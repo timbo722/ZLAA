@@ -195,12 +195,16 @@ int nvn_sync_wait(const Sync *s, uint64_t timeout_ns) {
     return s->signaled ? 0 : -1;
 }
 
+/* nvnQueueFinish: everything submitted so far, done by the GPU. Waited for without the GPU lock (only the
+ * submit needs it): a loading thread waiting here held up the main thread's next frame (80 ms in the forest) */
 void nvn_queue_finish(void) {
 #ifdef LAA_HAVE_SDL
     if (render_active()) {
         pthread_mutex_lock(&gpu_lock);
-        render_flush();
+        render_submit();
+        uint64_t serial = render_fence_serial();
         pthread_mutex_unlock(&gpu_lock);
+        render_wait_serial(serial, UINT64_MAX);
     }
 #endif
 }

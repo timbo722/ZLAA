@@ -583,11 +583,19 @@ def main():
     ap.add_argument("--chunk-insns", type=int, default=CHUNK_INSNS,
                     help="chunked output: about this many instructions per .c file")
     ap.add_argument("--base", type=lambda s: int(s, 0), default=0x8000000, help="load address for NSO modules")
+    ap.add_argument("--progress", action="store_true",
+                    help="print 'progress <0..1>' lines (stdout) for a progress bar (the app's on-device build)")
     args = ap.parse_args()
+
+    def progress(x):
+        if args.progress:
+            print(f"progress {x:.3f}", flush=True)
 
     t0 = time.time()
     img = load(args.input, args.base)
+    progress(0.02)
     fs = discover(img)
+    progress(0.10)
     funcs = fs.funcs
     stats = Stats()
     comments = not args.no_comments
@@ -621,8 +629,10 @@ def main():
     global COLLECT_ABI
     t_abi = time.time()
     COLLECT_ABI = True
-    for addr, (name, size) in items:
+    for k, (addr, (name, size)) in enumerate(items):
         recompile_function(img, funcs, addr, name, size, Stats(), False)
+        if k % 5000 == 0:
+            progress(0.10 + 0.35 * k / len(items))
     COLLECT_ABI = False
     find_non_abi()
     FUNC_INFO.clear()
@@ -639,6 +649,8 @@ def main():
                 flush_chunk()
         if len(items) > 20000 and k % 20000 == 0 and k:
             print(f"  ... {k}/{len(items)} functions", file=sys.stderr)
+        if k % 5000 == 0:
+            progress(0.45 + 0.53 * k / len(items))
 
     if chunked:
         if chunk:

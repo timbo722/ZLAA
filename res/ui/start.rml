@@ -36,11 +36,12 @@
     </hero>
     <menu-list>
         <button id="play" class="rise d1"><icon class="play" />Play</button>
-        <button id="settings" class="rise d2"><icon class="gear" />Settings</button>
-        <button id="quit" class="rise d3"><icon class="exit" />Quit</button>
+        <button id="files" class="rise d2"><icon class="folder" />Game Files</button>
+        <button id="settings" class="rise d3"><icon class="gear" />Settings</button>
+        <button id="quit" class="rise d4"><icon class="exit" />Quit</button>
     </menu-list>
-    <crash-note id="crash-note" class="rise d4" />
-    <status-chip id="game-status" class="rise d4"><dot /><game-status-label id="game-status-label" /><game-version id="game-version" /></status-chip>
-    <version-label class="rise d5">Version <version-number id="version" /></version-label>
+    <start-note id="start-note" class="rise d5" />
+    <status-chip id="game-status" class="rise d5"><dot /><game-status-label id="game-status-label" /><game-version id="game-version" /></status-chip>
+    <version-label class="rise d6">Version <version-number id="version" /></version-label>
 </body>
 </rml>

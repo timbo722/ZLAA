@@ -44,7 +44,7 @@ adb push <your dump>/exefs /sdcard/Android/data/io.github.laarecomp/files/exefs
 adb push <your dump>/romfs /sdcard/Android/data/io.github.laarecomp/files/romfs
 adb shell mkdir -p /sdcard/Android/data/io.github.laarecomp/files/game
 adb push libgame-<id>.so /sdcard/Android/data/io.github.laarecomp/files/game/   # (strip --strip-debug first: ~150 MB)
-adb shell am start -n io.github.laarecomp/org.libsdl.app.SDLActivity
+adb shell am start -n io.github.laarecomp/.LAAActivity
 adb logcat -s LAARecomp            # everything the runtime prints (also files/log.txt)
 ```
 Options: put `LAA_*=value` lines in `files/env.txt` (e.g. `LAA_INPUT_SCRIPT=...`, `LAA_SCREENSHOT=/sdcard/Android/data/io.github.laarecomp/files/shots`).

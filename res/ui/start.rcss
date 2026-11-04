@@ -159,6 +159,8 @@ menu-list button icon {
 
 menu-list button icon.play { decorator: text("&#xe037;" center center); }
 menu-list button icon.gear { decorator: text("&#xe8b8;" center center); }
+menu-list button icon.folder { decorator: text("&#xe2c7;" center center); }
+menu-list button icon.build { decorator: text("&#xe863;" center center); }
 menu-list button icon.exit { decorator: text("&#xe9ba;" center center); }
 
 menu-list button:hover,
@@ -217,18 +219,19 @@ game-version {
     color: var(--muted);
 }
 
-/* the last session ended in a crash: where its report is (above the status chip) */
-crash-note {
+/* a line above the status chip: what to do next while choosing the game files, or that the last session crashed */
+start-note {
     display: none;
     position: absolute;
     left: 84dp;
     bottom: 92dp;
-    max-width: 560dp;
+    max-width: 600dp;
     font-size: 15dp;
-    color: var(--bad);
+    color: var(--muted);
 }
 
-crash-note.shown { display: block; }
+start-note.shown { display: block; }
+start-note.bad { color: var(--bad); }
 
 version-label {
     position: absolute;
@@ -253,5 +256,6 @@ body.animate-in .rise {
 .d1 { transition: opacity transform 0.4s 0.35s cubic-out; }
 .d2 { transition: opacity transform 0.4s 0.42s cubic-out; }
 .d3 { transition: opacity transform 0.4s 0.49s cubic-out; }
-.d4 { transition: opacity transform 0.4s 0.65s cubic-out; }
-.d5 { transition: opacity transform 0.4s 0.75s cubic-out; }
+.d4 { transition: opacity transform 0.4s 0.56s cubic-out; }
+.d5 { transition: opacity transform 0.4s 0.65s cubic-out; }
+.d6 { transition: opacity transform 0.4s 0.75s cubic-out; }
