@@ -73,14 +73,45 @@ static int copy_file(const char *src, const char *dst, const struct stat *st) {
     return -1;
 }
 
+/* Was the library built against this runtime's headers? Its id (game_abi.c) is a plain string in it, so the file is
+ * searched rather than loaded; the answer is kept for the file as it is (size, time). */
+static int abi_matches(const char *path, const struct stat *st) {
+    static char last_path[4200];
+    static off_t last_size;
+    static time_t last_time;
+    static int last;
+    if (strcmp(path, last_path) == 0 && st->st_size == last_size && st->st_mtime == last_time) return last;
+    int fd = open(path, O_RDONLY), found = 0;
+    static char buf[1 << 20];
+    size_t n = strlen(RECOMP_ABI), keep = 0;
+    ssize_t r;
+    while (fd >= 0 && !found && (r = read(fd, buf + keep, sizeof buf - keep)) > 0) {
+        size_t len = keep + (size_t)r;
+        found = memmem(buf, len, RECOMP_ABI, n) != NULL;
+        keep = len < n ? len : n - 1;                /* (an id split between two reads) */
+        memmove(buf, buf + len - keep, keep);
+    }
+    if (fd >= 0) close(fd);
+    snprintf(last_path, sizeof last_path, "%s", path);
+    last_size = st->st_size;
+    last_time = st->st_mtime;
+    return last = found;
+}
+
 int game_lib_find(const char *exefs_dir, const char *lib_dir, const char *import_dir, char id[17]) {
     if (main_build_id(exefs_dir, id) != 0) return -1;
     char path[4200];
     struct stat st;
-    snprintf(path, sizeof path, "%s/libgame-%s.so", lib_dir, id);
-    if (stat(path, &st) == 0) return 0;
-    snprintf(path, sizeof path, "%s/libgame-%s.so", import_dir ? import_dir : lib_dir, id);
-    return stat(path, &st) == 0 ? 0 : 1;
+    int outdated = 0;
+    for (int k = 0; k < 2; k++) {                    /* (an import that fits wins, as in game_lib_load) */
+        const char *dir = k == 0 ? import_dir : lib_dir;
+        if (!dir) continue;
+        snprintf(path, sizeof path, "%s/libgame-%s.so", dir, id);
+        if (stat(path, &st) != 0) continue;
+        if (abi_matches(path, &st)) return 0;
+        outdated = 1;
+    }
+    return outdated ? 2 : 1;
 }
 
 int game_lib_load(const char *exefs_dir, const char *lib_dir, const char *import_dir) {
@@ -93,7 +124,7 @@ int game_lib_load(const char *exefs_dir, const char *lib_dir, const char *import
     struct stat in, have;
     char src[4200];
     if (import_dir) snprintf(src, sizeof src, "%s/%s", import_dir, name);
-    if (import_dir && stat(src, &in) == 0 &&
+    if (import_dir && stat(src, &in) == 0 && abi_matches(src, &in) &&     /* (an outdated one is left there) */
         (stat(path, &have) != 0 || have.st_size != in.st_size || have.st_mtim.tv_sec != in.st_mtim.tv_sec)) {
         mkdir(lib_dir, 0755);
         printf("game: copying %s (%lld MB) to %s\n", src, (long long)in.st_size >> 20, lib_dir);

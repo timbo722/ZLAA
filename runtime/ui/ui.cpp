@@ -226,7 +226,7 @@ void update_start_status() {
                       : strncmp(id, "909E904AF78AC1B8", 16) == 0 ? "1.0.1 / 1.1.0" : "unknown version";
         version = std::string("Link's Awakening ") + v;
         if (lib == 0) status = "good", label = "Ready", game_ready = 1;
-        else status = "pending", label = "Game code not built yet";
+        else status = "pending", label = lib == 2 ? "Game code is from an older version" : "Game code not built yet";
         needs_build = lib != 0;
     }
     Rml::Element *e = start_doc->GetElementById("game-status");

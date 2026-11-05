@@ -6,8 +6,8 @@
  *   1. unpack the toolchain (assets/builder/builder.tar: Python's standard library, zig's headers, the recompiler,
  *      the runtime headers; tools/android/builder/make_toolchain.py) into files/toolchain, once per app version
  *   2. translate: recomp.py (run by libpylaunch.so, the python command) turns the dump's ARM64 code into ~290 C files
- *   3. compile them with zig cc (libzig.so), a few at a time, waiting whenever Android says the device is getting
- *      hot (its thermal headroom): the Thor reached 94 C with six at once
+ *   3. compile them with zig cc (libzig.so), two at a time while the device is cool, one when it is warm, none when
+ *      it is hot (heat() below): the Thor reached 94 C with six at once
  *   4. link them (zig's ld.lld) against libmain.so into files/game/libgame-<id>.so, where game_lib.c looks
  *
  * The programs are in the APK's native-library folder (the only place Android lets an app run programs from)
@@ -17,7 +17,7 @@
  * link.log; a failed step's last lines go to log.txt too).
  *
  * Heat: the tools run on the middle cores (3-6 of the Thor's eight: not the big one, which runs hottest) at low
- * priority, and compiles pause while Android says the device is close to throttling.
+ * priority, fewer of them as the device warms, and they are frozen while it is hot (heat() below).
  */
 #define _GNU_SOURCE
 #include "builder.h"
@@ -25,6 +25,7 @@
 #include <SDL3/SDL.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <poll.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -204,8 +205,13 @@ static pid_t run(const char *program, char *const argv[], const char *log, int *
     if (out_pipe && pipe(p) == 0) posix_spawn_file_actions_adddup2(&fa, p[1], 1);
     else posix_spawn_file_actions_addopen(&fa, 1, log, O_CREAT | O_WRONLY | O_APPEND, 0644);
     posix_spawn_file_actions_addopen(&fa, 2, log, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    posix_spawnattr_t at;                            /* (a process group of its own: zig cc runs the compiler as a */
+    posix_spawnattr_init(&at);                       /*  child of its own, and pausing or stopping must reach it too) */
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&at, 0);
     pid_t pid = -1;
-    int r = posix_spawn(&pid, path, &fa, NULL, argv, env);
+    int r = posix_spawn(&pid, path, &fa, &at, argv, env);
+    posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
     if (p[1] >= 0) close(p[1]);
     if (r != 0) { if (p[0] >= 0) close(p[0]); fprintf(stderr, "build: can't run %s: %s\n", path, strerror(r)); return -1; }
@@ -219,6 +225,67 @@ static int finished(pid_t pid, int block) {         /* -1 running, else the exit
     if (r == 0) return -1;
     if (r < 0) return 1;
     return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+}
+
+/* ---- heat: how much may run. The CPU's temperature where the app may read it (the hottest cpu-* zone), else
+ * Android's thermal headroom (0..1, 1 = throttling). Cool: two tools at once; warm: one; hot: the running tools are
+ * frozen (SIGSTOP: they lose nothing) until it is cooler again. The phone in someone's hands should stay at the
+ * temperature of light gaming, not of a benchmark: 94 C on the big core, 88 C on the middle ones, before this. ---- */
+enum { COOL, WARM, HOT };
+
+typedef struct AThermalManager AThermalManager;
+static float thermal_headroom(void) {               /* 0..1 (1 = throttling); -1 if Android can't tell (API < 31) */
+    static AThermalManager *(*acquire)(void);
+    static float (*headroom)(AThermalManager *, int);
+    static AThermalManager *mgr;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        void *h = dlopen("libandroid.so", RTLD_NOW);
+        acquire = h ? (AThermalManager *(*)(void))dlsym(h, "AThermal_acquireManager") : NULL;
+        headroom = h ? (float (*)(AThermalManager *, int))dlsym(h, "AThermal_getThermalHeadroom") : NULL;
+        mgr = acquire && headroom ? acquire() : NULL;
+    }
+    if (!mgr) return -1;
+    float v = headroom(mgr, 10);                     /* (in 10 s at this pace) */
+    return v != v ? -1 : v;                          /* (NaN: asked too often; no answer) */
+}
+
+static double cpu_temperature(void) {               /* C; -1 if the app may not read it */
+    double hottest = -1;
+    char path[96], type[32];
+    for (int z = 0; z < 128; z++) {
+        snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/type", z);
+        FILE *f = fopen(path, "r");
+        if (!f) { if (z > 40) break; continue; }
+        int ok = fgets(type, sizeof type, f) != NULL;
+        fclose(f);
+        if (!ok || strncmp(type, "cpu-", 4) != 0) continue;
+        snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/temp", z);
+        f = fopen(path, "r");
+        long v;
+        if (f && fscanf(f, "%ld", &v) == 1 && v > 0 && v / 1000.0 > hottest) hottest = v / 1000.0;
+        if (f) fclose(f);
+    }
+    return hottest;
+}
+
+static int heat(void) {                              /* COOL / WARM / HOT, with some hysteresis */
+    static int level = COOL;
+    static double checked, logged;
+    if (now_s() - checked < 2) return level;
+    checked = now_s();
+    double t = cpu_temperature();
+    float h = t < 0 ? thermal_headroom() : -1;
+    int was = level;
+    if (t >= 0) level = t >= 72 ? HOT : level == HOT && t >= 68 ? HOT : t >= 65 ? WARM : COOL;
+    else if (h >= 0) level = h >= 0.70f ? HOT : level == HOT && h >= 0.60f ? HOT : h >= 0.45f ? WARM : COOL;
+    if (level != was || now_s() - logged >= 60) {
+        logged = now_s();
+        printf("build: cpu %.1f C, thermal headroom %.2f: %s\n", t, h,
+               level == HOT ? "hot, paused" : level == WARM ? "warm, one tool at a time" : "cool");
+    }
+    return level;
 }
 
 /* ---- 2. translate ---- */
@@ -239,14 +306,38 @@ static int translate(const char *gen) {
     int out = -1;
     pid_t pid = run("libpylaunch.so", argv, log, &out);
     if (pid < 0) return fail("couldn't start the translator", NULL);
-    FILE *f = fdopen(out, "r");
-    char line[256];
-    while (f && fgets(line, sizeof line, f)) {
-        double x;
-        if (sscanf(line, "progress %lf", &x) == 1) set_state(BUILD_TRANSLATING, 0.02 + 0.23 * x, NULL);
-        if (cancel) kill(pid, SIGTERM);
+    char buf[4096], *line;
+    size_t used = 0;
+    int paused = 0;
+    for (;;) {                                       /* its progress lines; pausing it while the device is hot */
+        struct pollfd pf = { out, POLLIN, 0 };
+        int r = poll(&pf, 1, 1000);
+        if (r > 0) {
+            ssize_t n = read(out, buf + used, sizeof buf - 1 - used);
+            if (n <= 0) break;
+            used += (size_t)n;
+            buf[used] = 0;
+            char *start = buf;
+            while ((line = strchr(start, '\n'))) {
+                *line = 0;
+                double x;
+                if (sscanf(start, "progress %lf", &x) == 1) set_state(BUILD_TRANSLATING, 0.02 + 0.23 * x, NULL);
+                start = line + 1;
+            }
+            used -= (size_t)(start - buf);
+            memmove(buf, start, used);
+            if (used == sizeof buf - 1) used = 0;
+        }
+        int hot = heat() == HOT;
+        if (hot != paused) { kill(-pid, hot ? SIGSTOP : SIGCONT); paused = hot; }
+        pthread_mutex_lock(&lock);
+        state.cooling = paused;
+        snprintf(state.detail, sizeof state.detail, paused ? "Translating the game's code (the device is warm: "
+                 "pausing to let it cool)" : "Translating the game's code");
+        pthread_mutex_unlock(&lock);
+        if (cancel) { kill(-pid, SIGCONT); kill(-pid, SIGTERM); }
     }
-    if (f) fclose(f);
+    close(out);
     int st = finished(pid, 1);
     if (cancel) return -1;
     /* (status 1: some words couldn't be translated, as always: data among the code; the C is complete) */
@@ -258,25 +349,7 @@ static int translate(const char *gen) {
     return 0;
 }
 
-/* ---- 3. compile: a few at once, fewer when the device is hot ---- */
-typedef struct AThermalManager AThermalManager;
-static float thermal_headroom(void) {               /* 0..1 (1 = throttling); -1 if Android can't tell (API < 31) */
-    static AThermalManager *(*acquire)(void);
-    static float (*headroom)(AThermalManager *, int);
-    static AThermalManager *mgr;
-    static int tried;
-    if (!tried) {
-        tried = 1;
-        void *h = dlopen("libandroid.so", RTLD_NOW);
-        acquire = h ? (AThermalManager *(*)(void))dlsym(h, "AThermal_acquireManager") : NULL;
-        headroom = h ? (float (*)(AThermalManager *, int))dlsym(h, "AThermal_getThermalHeadroom") : NULL;
-        mgr = acquire && headroom ? acquire() : NULL;
-    }
-    if (!mgr) return -1;
-    float v = headroom(mgr, 10);                     /* (in 10 s at this pace) */
-    return v != v ? -1 : v;                          /* (NaN: asked too often; no answer) */
-}
-
+/* ---- 3. compile: a few at once, fewer when the device is warm ---- */
 static int newer(const char *a, const char *b) {     /* a exists and is newer than b */
     struct stat sa, sb;
     return stat(a, &sa) == 0 && stat(b, &sb) == 0 && sa.st_mtime >= sb.st_mtime;
@@ -295,17 +368,17 @@ static int compile_all(const char *gen, const char *obj) {
     snprintf(sources[n++], sizeof sources[0], "game_abi.c");   /* (from the runtime: the library's ABI id) */
     make_dirs(obj);
     const char *jobs_env = getenv("LAA_BUILD_JOBS");
-    int max_jobs = jobs_env ? atoi(jobs_env) : 2;
+    int max_jobs = jobs_env ? atoi(jobs_env) : 2;   /* (when cool; one when warm, none when hot) */
     if (max_jobs < 1) max_jobs = 1;
+    if (max_jobs > 8) max_jobs = 8;
     Job running[8];
-    int nrun = 0, next = 0, done = 0, failed = 0, hot = 0;
+    int nrun = 0, next = 0, done = 0, failed = 0, paused = 0;
     char log[4400], src[4400], out[4400], inc_gen[4400], inc_rt[4400], abi[200];
     snprintf(log, sizeof log, "%s/compile.log", log_dir);
     snprintf(inc_gen, sizeof inc_gen, "-I%s", gen);
     snprintf(inc_rt, sizeof inc_rt, "-I%s/runtime", tool_dir);
     snprintf(abi, sizeof abi, "-DRECOMP_ABI=\"%s\"", RECOMP_ABI);
     printf("build: compiling %d files, %d at a time\n", n, max_jobs);
-    double last_check = 0;
     while (!cancel && (next < n || nrun) && !failed) {
         for (int i = 0; i < nrun; i++) {             /* finished ones */
             int st = finished(running[i].pid, 0);
@@ -314,13 +387,12 @@ static int compile_all(const char *gen, const char *obj) {
             done++;
             running[i--] = running[--nrun];
         }
-        if (now_s() - last_check > 2) {              /* hot: no new compiles until it cools a little */
-            last_check = now_s();
-            float h = thermal_headroom();
-            if (h >= 0.95f && !hot) { hot = 1; printf("build: the device is hot (headroom %.2f): waiting\n", h); }
-            else if (h >= 0 && h < 0.85f && hot) { hot = 0; printf("build: cooler (headroom %.2f): going on\n", h); }
+        int level = heat(), hot = level == HOT, allowed = level == COOL ? max_jobs : level == WARM ? 1 : 0;
+        if (hot != paused) {                         /* hot: the running ones frozen; cooler: on again */
+            for (int i = 0; i < nrun; i++) kill(-running[i].pid, hot ? SIGSTOP : SIGCONT);
+            paused = hot;
         }
-        while (!failed && !hot && next < n && nrun < max_jobs) {
+        while (!failed && next < n && nrun < allowed) {
             const char *name = sources[next++];
             if (strcmp(name, "game_abi.c") == 0) snprintf(src, sizeof src, "%s/runtime/%s", tool_dir, name);
             else snprintf(src, sizeof src, "%s/%s", gen, name);
@@ -328,6 +400,8 @@ static int compile_all(const char *gen, const char *obj) {
             if (newer(out, src)) { done++; continue; }   /* (compiled before the app closed) */
             char *argv[] = { "zig", "cc", "-target", "aarch64-linux-musl", "-mcpu=generic+v8_2a", "-O2", "-g0", "-fPIC",
                              "-fwrapv", "-ffp-contract=off", "-fno-math-errno", "-w", "-fvisibility=hidden",
+                             "-fno-vectorize", "-fno-slp-vectorize", "-mllvm", "-enable-misched=false", "-mllvm",
+                             "-enable-post-misched=false",          /* (as CMakeLists.txt: ~20% faster, as fast) */
                              "-fdata-sections", "-ffunction-sections", "-funwind-tables", abi, inc_gen, inc_rt,
                              "-c", src, "-o", out, NULL };
             pid_t pid = run("libzig.so", argv, log, NULL);
@@ -337,7 +411,7 @@ static int compile_all(const char *gen, const char *obj) {
             nrun++;
         }
         char detail[160];
-        snprintf(detail, sizeof detail, hot ? "Compiling: %d of %d (the device is warm: waiting for it to cool)"
+        snprintf(detail, sizeof detail, hot ? "Compiling: %d of %d (the device is warm: pausing to let it cool)"
                                            : "Compiling: %d of %d", done, n);
         set_state(BUILD_COMPILING, 0.25 + 0.72 * done / n, detail);
         pthread_mutex_lock(&lock);
@@ -346,7 +420,10 @@ static int compile_all(const char *gen, const char *obj) {
         struct timespec ts = { 0, 200000000 };
         nanosleep(&ts, NULL);
     }
-    for (int i = 0; i < nrun; i++) { if (cancel || failed) kill(running[i].pid, SIGTERM); finished(running[i].pid, 1); }
+    for (int i = 0; i < nrun; i++) {
+        if (cancel || failed) { kill(-running[i].pid, SIGCONT); kill(-running[i].pid, SIGTERM); }
+        finished(running[i].pid, 1);
+    }
     return cancel || failed ? -1 : 0;
 }
 

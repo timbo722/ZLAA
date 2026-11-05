@@ -16,7 +16,7 @@ int game_lib_load(const char *exefs_dir, const char *lib_dir, const char *import
 
 /* Without loading anything: <exefs_dir>/main's build id (16 hex digits) into id, and whether the
  * game library made from it is there (in lib_dir or import_dir). 0 = there, 1 = not built yet,
- * -1 = no main in exefs_dir. */
+ * 2 = built against other runtime headers (an older app: build it again), -1 = no main in exefs_dir. */
 int game_lib_find(const char *exefs_dir, const char *lib_dir, const char *import_dir, char id[17]);
 
 /* "f_<guest address>" (written into buf) if pc is inside the game library's code, else NULL;

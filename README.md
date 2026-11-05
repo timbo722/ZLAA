@@ -74,27 +74,20 @@ and the game's own dynamic resolution. Further into the game is still largely un
 - The game's movies play through Android's own video decoder.
 - Shaders are compiled once and kept, so later sessions start without stutter.
 
-## Setup (for now)
+## Setup
 
-Until the app can build the game's code itself, everything runs from a PC with Linux or WSL2 (Windows), and the
-device connected with USB debugging:
+There is no release yet: build the APK from source ([Building from source](#building-from-source)). On the device:
 
-1. Extract your own game's `exefs` and `romfs` folders (not provided here) and keep them **outside** this folder.
-2. Set up the Android toolchain and build the menus' libraries: [tools/android/README.md](tools/android/README.md)
-   and `tools/build_ui_deps.sh`.
-3. Recompile the game's code from **your** `exefs` and build it for Android together with the app:
+1. Copy your own game's `exefs` and `romfs` folders (not provided here) into one folder on the device, for example
+   `LADump/1.0.0/` in its main storage.
+2. Open LAARecomp, choose **Game Files** and allow **All files access** when Android asks (the 6 GB are read where
+   they are, never copied), then choose that folder.
+3. Choose **Prepare Game**. The app translates your copy's code and compiles it for the device, once: about
+   BUILD_TIME. Keep the app open, ideally plugged in. It runs the device's middle cores at low priority and pauses
+   when Android says the device is getting hot.
+4. Choose **Play**.
 
-   ```
-   python recompiler/recomp.py <your game>/exefs -o ~/laar-build/gen --no-comments
-   cmake -S . -B ~/laar-build/android/build/game -G Ninja -DGAME_GEN_DIR=$HOME/laar-build/gen \
-         -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
-         -DANDROID_PLATFORM=android-30 -DCMAKE_PREFIX_PATH=~/laar-build/android/prefix
-   cmake --build ~/laar-build/android/build/game --target main game
-   tools/android/build_apk.sh
-   ```
-4. Install the APK and copy your `exefs`, `romfs` and the built `libgame-<id>.so` to the app's folder
-   (`/sdcard/Android/data/io.github.laarecomp/files/`); [tools/android/README.md](tools/android/README.md) has the
-   exact commands. The game library is made from your own files: never share it.
+The game code made in step 3 stays on your device: it is built from your own files and is never shared.
 
 ## FAQ
 
@@ -117,6 +110,17 @@ copied from it.
 #### Can I use an NSP or XCI file instead of the folders?
 No. Those are encrypted, and reading them needs your console's keys. This project never asks for keys, so it
 takes the already extracted `exefs` and `romfs` folders.
+
+#### Why does it want "All files access"?
+To read your game files where you put them. Android's normal file picker hands an app one file at a time through a
+slow channel; the game reads thousands of files from its 6 GB `romfs` while it runs. With this permission the app
+reads them directly, and doesn't need a second 6 GB copy in its own folder. It only reads the folder you choose (and
+writes its own app folder).
+
+#### Why does Prepare Game take so long, and why must it run on my device?
+The game's code (about 150,000 functions) is translated into C and compiled for your device: a lot of work for a
+phone. It can't be downloaded ready-made, because that would mean distributing Nintendo's code. It happens once
+per game version; an update of LAARecomp that changes how the code is translated asks for it again.
 
 #### Where are my saves?
 In the app's folder, `/sdcard/Android/data/io.github.laarecomp/files/save/`. Back it up before uninstalling the app:

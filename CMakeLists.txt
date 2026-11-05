@@ -163,6 +163,32 @@ set_target_properties(game PROPERTIES OUTPUT_NAME "game-${GAME_BUILD_ID}" JOB_PO
 target_include_directories(game PRIVATE "${GAME_GEN_DIR}" runtime)
 target_compile_definitions(game PRIVATE RECOMP_ABI="${RECOMP_ABI}")
 target_compile_options(game PRIVATE ${RECOMP_FLAGS} -w -fvisibility=hidden)
+# Lighter on the compiler, no slower to run (Thor, 2026-11-04: 17.41 vs 17.36 Gcycles in game code over three
+# alternating village walks): no vectorizing (it finds nothing in this code) and no instruction scheduling (the
+# cores reorder for themselves). ~20% less compile time; the on-device build (host/builder.c) uses the same.
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(game PRIVATE -fno-vectorize -fno-slp-vectorize
+                           "SHELL:-mllvm -enable-misched=false" "SHELL:-mllvm -enable-post-misched=false")
+else()                                          # (GCC's names for the same)
+    target_compile_options(game PRIVATE -fno-tree-vectorize -fno-tree-slp-vectorize -fno-schedule-insns
+                           -fno-schedule-insns2)
+endif()
+# Extra flags for the game code only (comparisons; e.g. the on-device build's lighter settings)
+set(GAME_EXTRA_FLAGS "" CACHE STRING "extra compile flags for the generated game code")
+if(GAME_EXTRA_FLAGS)
+    separate_arguments(_game_extra UNIX_COMMAND "${GAME_EXTRA_FLAGS}")
+    set(_pair "")
+    foreach(f ${_game_extra})                    # (-mllvm X stays a pair: CMake drops repeated flags)
+        if(_pair)
+            target_compile_options(game PRIVATE "SHELL:-mllvm ${f}")
+            set(_pair "")
+        elseif(f STREQUAL "-mllvm")
+            set(_pair 1)
+        else()
+            target_compile_options(game PRIVATE ${f})
+        endif()
+    endforeach()
+endif()
 if(NOT LAA_GAME_DEBUG_INFO)                     # (-g0 comes after the toolchain's -g)
     target_compile_options(game PRIVATE -g0)
 endif()

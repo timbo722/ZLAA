@@ -107,6 +107,29 @@ uint64_t recomp_cntpct(void);                        /* system counter, 19.2 MHz
 RECOMP_LD(8) RECOMP_LD(16) RECOMP_LD(32) RECOMP_LD(64)
 RECOMP_ST(8) RECOMP_ST(16) RECOMP_ST(32) RECOMP_ST(64)
 
+/* The same with guest memory's base in a local (generated functions: M = c->mem once). Read through c, the
+ * compiler loads c->mem again after every store to guest memory (a store through a byte pointer might have
+ * changed it); a local stays in a register: one load fewer per access, and less code to compile. */
+#ifdef RECOMP_CHECK_MEM
+#define mld8(m, a) ld8(c, a)
+#define mld16(m, a) ld16(c, a)
+#define mld32(m, a) ld32(c, a)
+#define mld64(m, a) ld64(c, a)
+#define mst8(m, a, v) st8(c, a, v)
+#define mst16(m, a, v) st16(c, a, v)
+#define mst32(m, a, v) st32(c, a, v)
+#define mst64(m, a, v) st64(c, a, v)
+#else
+#define RECOMP_MLD(bits)                                                    \
+    static inline uint64_t mld##bits(const uint8_t *m, uint64_t a) {        \
+        uint##bits##_t v; memcpy(&v, m + a, sizeof v); return v; }
+#define RECOMP_MST(bits)                                                    \
+    static inline void mst##bits(uint8_t *m, uint64_t a, uint64_t v) {      \
+        uint##bits##_t t = (uint##bits##_t)v; memcpy(m + a, &t, sizeof t); }
+RECOMP_MLD(8) RECOMP_MLD(16) RECOMP_MLD(32) RECOMP_MLD(64)
+RECOMP_MST(8) RECOMP_MST(16) RECOMP_MST(32) RECOMP_MST(64)
+#endif
+
 /* ---------------------------------------------------------------- atomics */
 /* ARMv8.0 (the Switch's CPU) has no atomic add/swap instructions. Instead code does:
  *     loop: LDAXR x1, [x0]        load and start watching the address ("exclusive monitor")
