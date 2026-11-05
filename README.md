@@ -82,9 +82,10 @@ There is no release yet: build the APK from source ([Building from source](#buil
    `LADump/1.0.0/` in its main storage.
 2. Open LAARecomp, choose **Game Files** and allow **All files access** when Android asks (the 6 GB are read where
    they are, never copied), then choose that folder.
-3. Choose **Prepare Game**. The app translates your copy's code and compiles it for the device, once: about
-   BUILD_TIME. Keep the app open, ideally plugged in. It runs the device's middle cores at low priority and pauses
-   when Android says the device is getting hot.
+3. Choose **Prepare Game**. The app translates your copy's code and compiles it for the device, once. For now this
+   is slow: about an hour and three quarters on the AYN Thor, because it keeps the device only warm (the board
+   around 45 C), pausing whenever it gets warmer. Making it faster is being worked on. Keep the app open, ideally
+   plugged in; if it closes, the build carries on from where it stopped.
 4. Choose **Play**.
 
 The game code made in step 3 stays on your device: it is built from your own files and is never shared.
