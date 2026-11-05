@@ -52,6 +52,7 @@ static BuildState state;                             /* (under lock) */
 static volatile int cancel;
 static char exefs_dir[4096], game_dir[4096], lib_dir[4096], files_dir[4096], tool_dir[4200], work_dir[4200], log_dir[4200];
 static char game_id[17];
+static char stamp[96];                               /* "<game id> <toolchain id>": what translated C and objects are for */
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
@@ -140,6 +141,7 @@ static int unpack_toolchain(void) {
     want[n] = 0;
     want[strcspn(want, "\r\n")] = 0;
     if (!want[0]) return fail("this app has no toolchain to build the game code with", NULL);
+    snprintf(stamp, sizeof stamp, "%s %s", game_id, want);   /* (another app version: everything made again) */
     snprintf(path, sizeof path, "%s/id", tool_dir);
     read_text(path, have, sizeof have);
     if (strcmp(want, have) == 0) return 0;
@@ -227,10 +229,11 @@ static int finished(pid_t pid, int block) {         /* -1 running, else the exit
     return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
 }
 
-/* ---- heat: how much may run. The CPU's temperature where the app may read it (the hottest cpu-* zone), else
- * Android's thermal headroom (0..1, 1 = throttling). Cool: two tools at once; warm: one; hot: the running tools are
- * frozen (SIGSTOP: they lose nothing) until it is cooler again. The phone in someone's hands should stay at the
- * temperature of light gaming, not of a benchmark: 94 C on the big core, 88 C on the middle ones, before this. ---- */
+/* ---- heat: how much may run. The board's temperature where the app may read it (the Thor: xo-therm), else the
+ * chip's (smoothed), else Android's thermal headroom (0..1, 1 = throttling). Cool: two tools at once; warm: one;
+ * hot: the running tools are frozen (SIGSTOP: they lose nothing) until it is cooler again. The device in someone's
+ * hands should stay at the warmth of light gaming, not of a benchmark: 94 C on the big core, 88 C on the middle
+ * ones, before this. ---- */
 enum { COOL, WARM, HOT };
 
 typedef struct AThermalManager AThermalManager;
@@ -251,16 +254,21 @@ static float thermal_headroom(void) {               /* 0..1 (1 = throttling); -1
     return v != v ? -1 : v;                          /* (NaN: asked too often; no answer) */
 }
 
-static double cpu_temperature(void) {               /* C; -1 if the app may not read it */
+/* The hottest zone of a kind (C; -1 if none can be read): "cpu-" for the chip, the board's own sensors otherwise */
+static double zone_temperature(const char *const *types, int prefix) {
     double hottest = -1;
-    char path[96], type[32];
-    for (int z = 0; z < 128; z++) {
+    char path[96], type[40];
+    for (int z = 0; z < 160; z++) {
         snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/type", z);
         FILE *f = fopen(path, "r");
         if (!f) { if (z > 40) break; continue; }
         int ok = fgets(type, sizeof type, f) != NULL;
         fclose(f);
-        if (!ok || strncmp(type, "cpu-", 4) != 0) continue;
+        if (!ok) continue;
+        type[strcspn(type, "\n")] = 0;
+        int match = 0;
+        for (const char *const *t = types; *t && !match; t++) match = prefix ? strncmp(type, *t, strlen(*t)) == 0 : strcmp(type, *t) == 0;
+        if (!match) continue;
         snprintf(path, sizeof path, "/sys/class/thermal/thermal_zone%d/temp", z);
         f = fopen(path, "r");
         long v;
@@ -271,18 +279,25 @@ static double cpu_temperature(void) {               /* C; -1 if the app may not 
 }
 
 static int heat(void) {                              /* COOL / WARM / HOT, with some hysteresis */
+    static const char *const board_types[] = { "xo-therm", "skin-therm", "quiet-therm", "sys-therm-0", "usb-therm", NULL };
+    static const char *const cpu_types[] = { "cpu-", NULL };
     static int level = COOL;
-    static double checked, logged;
+    static double checked, logged, cpu_avg = -1;
     if (now_s() - checked < 2) return level;
     checked = now_s();
-    double t = cpu_temperature();
-    float h = t < 0 ? thermal_headroom() : -1;
+    /* The board's temperature is what the hands feel, and it moves slowly; the chip's hottest spot jumps to 70 C
+     * within seconds of any load and back the moment it stops: alone, smoothed (half a minute), and as a cap */
+    double board = zone_temperature(board_types, 0), cpu = zone_temperature(cpu_types, 1);
+    if (cpu >= 0) cpu_avg = cpu_avg < 0 ? cpu : cpu_avg + (cpu - cpu_avg) * 0.07;
+    float h = board < 0 && cpu < 0 ? thermal_headroom() : -1;
     int was = level;
-    if (t >= 0) level = t >= 72 ? HOT : level == HOT && t >= 68 ? HOT : t >= 65 ? WARM : COOL;
+    if (cpu >= 88) level = HOT;
+    else if (board >= 0) level = board >= 46 ? HOT : level == HOT && board >= 44 ? HOT : board >= 42 ? WARM : COOL;
+    else if (cpu_avg >= 0) level = cpu_avg >= 72 ? HOT : level == HOT && cpu_avg >= 68 ? HOT : cpu_avg >= 65 ? WARM : COOL;
     else if (h >= 0) level = h >= 0.70f ? HOT : level == HOT && h >= 0.60f ? HOT : h >= 0.45f ? WARM : COOL;
     if (level != was || now_s() - logged >= 60) {
         logged = now_s();
-        printf("build: cpu %.1f C, thermal headroom %.2f: %s\n", t, h,
+        printf("build: board %.1f C, cpu %.1f C (smoothed %.1f), thermal headroom %.2f: %s\n", board, cpu, cpu_avg, h,
                level == HOT ? "hot, paused" : level == WARM ? "warm, one tool at a time" : "cool");
     }
     return level;
@@ -290,10 +305,10 @@ static int heat(void) {                              /* COOL / WARM / HOT, with 
 
 /* ---- 2. translate ---- */
 static int translate(const char *gen) {
-    char marker[4400], have[64], log[4400], script[4400], input[4200];
+    char marker[4400], have[96], log[4400], script[4400], input[4200];
     snprintf(marker, sizeof marker, "%s/.complete", gen);
     read_text(marker, have, sizeof have);
-    if (strcmp(have, game_id) == 0) return 0;        /* (done before: the app closed while compiling) */
+    if (strcmp(have, stamp) == 0) return 0;          /* (done before by this toolchain: the app closed while compiling) */
     printf("build: translating %s\n", exefs_dir);
     set_state(BUILD_TRANSLATING, 0.02, "Translating the game's code");
     snprintf(log, sizeof log, "%s/translate.log", log_dir);
@@ -345,7 +360,7 @@ static int translate(const char *gen) {
         show_log_tail(log, st);
         return fail("translating failed (see build/translate.log)", NULL);
     }
-    write_text(marker, game_id);
+    write_text(marker, stamp);
     return 0;
 }
 
@@ -366,7 +381,12 @@ static int compile_all(const char *gen, const char *obj) {
     }
     if (d) closedir(d);
     snprintf(sources[n++], sizeof sources[0], "game_abi.c");   /* (from the runtime: the library's ABI id) */
+    char obj_stamp[4400], have[96];                  /* (objects from another toolchain or game: none kept) */
+    snprintf(obj_stamp, sizeof obj_stamp, "%s/.stamp", obj);
+    read_text(obj_stamp, have, sizeof have);
+    if (strcmp(have, stamp) != 0) remove_tree(obj);
     make_dirs(obj);
+    write_text(obj_stamp, stamp);
     const char *jobs_env = getenv("LAA_BUILD_JOBS");
     int max_jobs = jobs_env ? atoi(jobs_env) : 2;   /* (when cool; one when warm, none when hot) */
     if (max_jobs < 1) max_jobs = 1;
@@ -438,7 +458,7 @@ static int link_library(const char *obj, const char *lib) {
     DIR *d = opendir(obj);
     struct dirent *e;
     while (f && d && (e = readdir(d)))
-        if (strstr(e->d_name, ".o")) fprintf(f, "%s/%s\n", obj, e->d_name);
+        if (strlen(e->d_name) > 2 && strcmp(e->d_name + strlen(e->d_name) - 2, ".o") == 0) fprintf(f, "%s/%s\n", obj, e->d_name);
     if (d) closedir(d);
     if (f) fclose(f);
     snprintf(rsp, sizeof rsp, "@%s", list);

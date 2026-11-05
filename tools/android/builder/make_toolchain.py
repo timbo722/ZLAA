@@ -9,7 +9,7 @@ Downloads, checked against pinned SHA-256 sums:
 and writes <android dir>/toolchain/out/:
   lib/   libpython3.14.so, libpylaunch.so (the python command: pylaunch.c), libzig.so (zig, renamed):
          programs go in the APK's native-library folder, the only place Android lets an app run them from
-  builder.tar   the rest, extracted by the app on first use: Python's standard library (py/stdlib.zip, without
+  builder.tar   the rest (made the same way from the same files: no dates in it), extracted by the app on first use: Python's standard library (py/stdlib.zip, without
          its tests and GUI tools) and the few extension modules the recompiler needs (py/lib-dynload), the parts of
          zig's library a C compile needs (zig/lib), the recompiler (recompiler/*.py) and the headers the generated
          code is compiled against (runtime/); plus builder.id, which changes when any of it does
@@ -93,8 +93,9 @@ def main():
                 add("py/LICENSE.txt", py_tar.extractfile(m).read())
             elif m.name.startswith(lib) and m.name.endswith(".py"):
                 rel = m.name[len(lib):]
-                if not rel.startswith(STDLIB_SKIP) and "/tests/" not in rel:
-                    z.writestr(rel, py_tar.extractfile(m).read())
+                if not rel.startswith(STDLIB_SKIP) and "/tests/" not in rel:   # (a fixed date: same files, same id)
+                    z.writestr(zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0)), py_tar.extractfile(m).read(),
+                               zipfile.ZIP_DEFLATED)
     add("py/stdlib.zip", stdlib.getvalue())
 
     # the python command
