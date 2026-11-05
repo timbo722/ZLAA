@@ -167,6 +167,7 @@ int showing;                                             /* 0: no menu, 1: start
 int result;                                              /* what ui_frame returns next */
 int game_ready;                                          /* the start screen's Play works */
 int needs_build;                                         /* the game files are there, their code isn't: Prepare Game */
+int needs_files;                                         /* no game files found: Play is Choose Game Files */
 int settings_changed;                                    /* (ui_settings_changed) */
 std::string tab = "Video";
 uint64_t held_since[UI_ACTIONS], repeat_at[UI_ACTIONS];  /* (ns) direction presses repeat while held */
@@ -201,8 +202,12 @@ void focus_first(Rml::ElementDocument *doc, const char *selector) {
     if (Rml::Element *e = doc->QuerySelector(selector)) e->Focus(true);
 }
 
-/* The line above the status chip ("" hides it) */
+void show_files_help(const std::string &extra, bool bad);
+std::string files_label();
+
+/* The line above the status chip ("" hides it); with the settings window open, its help pane says it */
 void note(const std::string &text, bool bad) {
+    if (settings_doc && settings_doc->IsVisible()) { show_files_help(text, bad); return; }
     Rml::Element *e = start_doc->GetElementById("start-note");
     e->SetInnerRML(esc(text));
     e->SetClass("shown", !text.empty());
@@ -214,12 +219,12 @@ void update_start_status() {
     std::string status, label, version;
     struct stat st;
     int lib = game_lib_find(paths.exefs, paths.game_dir, paths.game_import, id);
-    game_ready = needs_build = 0;
+    game_ready = needs_build = needs_files = 0;
     if (lib < 0) {
-        status = "bad", label = "No game files";
-        version = "Choose Game Files: the folder with your dump's exefs and romfs";
+        status = "bad", label = "No game files", needs_files = 1;
+        version = "Choose the folder with your dump's exefs and romfs";
     } else if (stat(paths.romfs, &st) != 0) {
-        status = "bad", label = "The game's romfs folder is missing";
+        status = "bad", label = "The game's romfs folder is missing", needs_files = 1;
         version = std::string("Expected at ") + paths.romfs;
     } else {
         const char *v = strncmp(id, "AE16F71E002AF8CB", 16) == 0 ? "1.0.0"
@@ -240,10 +245,11 @@ void update_start_status() {
         unsetenv("LAA_LAST_CRASH");                      /* (said once) */
     }
     Rml::Element *play = start_doc->GetElementById("play");
-    play->SetInnerRML(needs_build ? "<icon class=\"build\" />Prepare Game" : "<icon class=\"play\" />Play");
-    if (game_ready || needs_build) play->RemoveAttribute("disabled");
-    else play->SetAttribute("disabled", "");
+    play->SetInnerRML(needs_files ? "<icon class=\"folder\" />Choose Game Files"
+                      : needs_build ? "<icon class=\"build\" />Prepare Game" : "<icon class=\"play\" />Play");
 }
+
+void build_settings();
 
 /* ---- Game Files: the player picks the folder holding their dump (exefs/ and romfs/, or the exefs folder itself
  * with romfs/ beside it). Android asks for "All files access" first, so the files are read where they are ---- */
@@ -271,7 +277,13 @@ void use_game_folder(const std::string &dir) {
     paths.romfs = path_copies[1].c_str();
     note("", false);
     update_start_status();
-    focus_first(start_doc, game_ready ? "#play" : "#files");
+    if (settings_doc->IsVisible()) {                     /* (chosen from Settings: back on its row) */
+        build_settings();
+        focus_first(settings_doc, "#files-row");
+        show_files_help(game_ready ? "" : needs_build ? "Choose Play on the start screen to prepare the game." : "", false);
+    } else {
+        focus_first(start_doc, "#play");
+    }
 }
 
 void choose_game_files() {
@@ -386,6 +398,9 @@ void build_settings() {
                                : "<icon class=\"left\"/><span>" + esc(value) + "</span><icon class=\"right\"/>") +
                 "</value></row>";
     }
+    if (tab == "Interface" && showing == 1)              /* (not over the running game) */
+        rows = "<row id=\"files-row\"><key>Game Files</key><value><span>" + esc(files_label()) +
+               "</span><icon class=\"folder\"/></value></row>" + rows;
     if (tab == "About")
         rows = "<about>"
                "<about-head><about-title>LAARecomp</about-title><about-version>Version " LAA_VERSION
@@ -455,6 +470,26 @@ void change_setting(int row, int step) {
     if (Rml::Element *e = settings_doc->GetElementById("row-" + std::to_string(row))) e->Focus(true);
 }
 
+/* The game files' folder, short: "LADump/1.0.1" in the device's storage, "App folder" for the app's own */
+std::string files_label() {
+    if (needs_files) return "Not chosen";
+    std::string d = paths.exefs ? paths.exefs : "";
+    if (d.size() > 6 && d.compare(d.size() - 6, 6, "/exefs") == 0) d.erase(d.size() - 6);
+    if (d.find("/Android/data/") != std::string::npos) return "App folder";
+    const std::string storage = "/storage/emulated/0/";
+    if (d.rfind(storage, 0) == 0) d = d.substr(storage.size());
+    size_t a = d.find_last_of('/'), b = a == std::string::npos || a == 0 ? std::string::npos : d.find_last_of('/', a - 1);
+    return d.size() > 28 && b != std::string::npos ? "\xE2\x80\xA6" + d.substr(b) : d;   /* (long: its last two folders) */
+}
+
+void show_files_help(const std::string &extra, bool bad) {
+    std::string h = "<heading>Game Files</heading><p>The folder with your dump's exefs and romfs folders. Choose another "
+                    "to play another version; its code may need preparing first.</p>";
+    if (paths.exefs && !needs_files) h += "<p class=\"hint path\">" + esc(paths.exefs) + "</p>";
+    if (!extra.empty()) h += std::string("<p") + (bad ? " class=\"bad\"" : "") + ">" + esc(extra) + "</p>";
+    settings_doc->GetElementById("help")->SetInnerRML(h);
+}
+
 void show_help(int row) {
     if (row < 0) return;
     const Setting &s = kSettings[(size_t)row];
@@ -469,17 +504,22 @@ class Listener : public Rml::EventListener {
 public:
     void ProcessEvent(Rml::Event &event) override {
         Rml::Element *e = event.GetTargetElement();
-        if (event.GetId() == Rml::EventId::Focus) { show_help(row_of(e)); return; }
+        if (event.GetId() == Rml::EventId::Focus) {
+            if (e && e->GetId() == "files-row") show_files_help("", false);
+            else show_help(row_of(e));
+            return;
+        }
         for (; e; e = e->GetParentNode()) {
             const std::string &id = e->GetId();
             if (id.empty()) continue;
             if (id == "play" && game_ready) { result = UI_PLAY; return; }
             if (id == "play" && needs_build) { open_build(); return; }
+            if (id == "play" && needs_files) { choose_game_files(); return; }
+            if (id == "files-row") { choose_game_files(); return; }
             if (id == "build-go") { build_go(); return; }
             if (id == "build-back") { close_build(); return; }
             if (id == "resume") { result = UI_RESUME; return; }
             if (id == "settings") { open_settings(); return; }
-            if (id == "files") { choose_game_files(); return; }
             if (id == "quit") { result = UI_QUIT; return; }
             if (id == "close") { close_settings(); return; }
             if (id.rfind("tab-", 0) == 0 && id != "tab-bar") { tab = id.substr(4); build_settings(); return; }
@@ -573,7 +613,7 @@ extern "C" void ui_start_menu(void) {
     update_start_status();
     start_doc->Show();
     start_doc->SetClass("animate-in", true);
-    focus_first(start_doc, game_ready || needs_build ? "#play" : "#files");
+    focus_first(start_doc, "#play");
 }
 
 extern "C" int ui_skip_start(void) {

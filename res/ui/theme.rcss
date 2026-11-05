@@ -76,6 +76,7 @@ icon {
 icon.lock { decorator: text("&#xe897;" center center); }
 icon.left { decorator: text("&#xe5cb;" center center); }
 icon.right { decorator: text("&#xe5cc;" center center); }
+icon.folder { decorator: text("&#xe2c7;" center center); }
 
 /* a controller button in hints, shaped like the button: face buttons round, L and R the shoulder buttons' rounded
    outer corner (<key-cap class="l">L</key-cap>) */

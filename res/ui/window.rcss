@@ -144,6 +144,14 @@ pane#help heading {
     color: var(--gold);
 }
 
+pane#help p.path {
+    word-break: break-all;
+}
+
+pane#help p.bad {
+    color: var(--bad);
+}
+
 /* a setting: its name on the left, its value between arrows on the right */
 row {
     display: flex;
