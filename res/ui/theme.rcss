@@ -38,7 +38,7 @@ body {
     box-sizing: border-box;
 }
 
-div, p, heading, header, hero, eyebrow, game-title, menu-list, content, window, pane, tab-bar, about, footer, row,
+div, p, heading, header, hero, eyebrow, game-title, series-title, menu-list, content, window, pane, tab-bar, about, footer, row,
 status-chip, hints {
     display: block;
 }

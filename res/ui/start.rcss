@@ -107,12 +107,21 @@ hero {
     top: 19%;
 }
 
+hero.logo {
+    top: 6%;
+}
+
+hero.logo eyebrow {
+    margin-top: -6dp;                                /* (the logo's picture ends in a little empty space) */
+    margin-left: 14dp;
+}
+
 eyebrow {
     display: block;
     font-size: 17dp;
     color: var(--muted);
     letter-spacing: 1dp;
-    margin-top: var(--gap-sm);
+    margin-top: var(--gap-md);
 }
 
 studio-name {
@@ -132,6 +141,22 @@ series-title {
     font-effect: shadow(0dp 3dp #000000);
 }
 
+/* the title: the game's own logo (from the player's files, in our gold, a warm glow round it) or, without it, the
+   name as text */
+img.game-logo {
+    display: none;
+    width: 450dp;
+    margin-left: -12dp;
+}
+
+hero.logo img.game-logo {
+    display: block;
+}
+
+hero.logo series-title, hero.logo game-title {
+    display: none;
+}
+
 game-title {
     font-weight: 800;
     font-size: 64dp;
@@ -142,7 +167,7 @@ game-title {
 
 menu-list {
     position: absolute;
-    top: 45%;
+    top: 50%;
     left: 80dp;
     width: 300dp;
     display: flex;

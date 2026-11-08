@@ -140,7 +140,7 @@ if(SDL3_FOUND AND RmlUi_FOUND)
     enable_language(CXX)
     execute_process(COMMAND git describe --always --dirty --exclude "*" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
                     OUTPUT_VARIABLE LAA_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)   # (as of configuring)
-    add_library(laa_ui STATIC runtime/ui/ui.cpp runtime/ui/ui_render.cpp)
+    add_library(laa_ui STATIC runtime/ui/ui.cpp runtime/ui/ui_render.cpp runtime/ui/game_art.cpp)
     target_include_directories(laa_ui PRIVATE runtime)
     target_link_libraries(laa_ui PRIVATE RmlUi::Core SDL3::SDL3)
     target_compile_definitions(laa_ui PRIVATE LAA_VERSION="${PROJECT_VERSION}" LAA_COMMIT="${LAA_COMMIT}")

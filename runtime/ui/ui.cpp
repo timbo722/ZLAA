@@ -248,6 +248,10 @@ void update_start_status() {
              ".", true);
         unsetenv("LAA_LAST_CRASH");                      /* (said once) */
     }
+    std::vector<uint8_t> px;                         /* the game's logo as the title: with game files that have it */
+    int lw, lh;
+    bool logo = !needs_files && game_logo_rgba(paths.romfs, px, lw, lh);
+    start_doc->QuerySelector("hero")->SetClass("logo", logo);
     Rml::Element *play = start_doc->GetElementById("play");
     play->SetInnerRML(needs_files ? "<icon class=\"folder\" />Choose Game Files"
                       : needs_build ? "<icon class=\"build\" />Build Game" : "<icon class=\"play\" />Play");
@@ -279,6 +283,7 @@ void use_game_folder(const std::string &dir) {
     path_copies[1] = romfs;
     paths.exefs = path_copies[0].c_str();
     paths.romfs = path_copies[1].c_str();
+    Rml::ReleaseTextures();                          /* (images made from the game files: from the new ones) */
     note("", false);
     update_start_status();
     if (settings_doc->IsVisible()) {                     /* (chosen from Settings: back on its row) */

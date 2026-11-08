@@ -13,6 +13,7 @@
  * box-shadow, shaders for CSS gradients) isn't implemented: the menu's style sheets don't use it.
  */
 #include "ui_internal.h"
+#include "ui.h"
 #include "render/shader/builtin/builtin_shaders.h"
 extern "C" {
 #include "render/png.h"
@@ -454,9 +455,16 @@ void UiRenderer::draw_image(VkImageView view, float dim) {
 }
 
 /* Images named in documents (<img src>, image decorators): PNG files among the menu's own (SDL's loader), as RGBA,
- * premultiplied */
+ * premultiplied; "game-logo" is made from the player's game files */
 Rml::TextureHandle UiRenderer::LoadTexture(Rml::Vector2i &dimensions, const Rml::String &source) {
     dimensions = Rml::Vector2i(0, 0);
+    if (source.find("game-logo") != Rml::String::npos) {   /* (not a file: the game's own logo, game_art.cpp) */
+        std::vector<Rml::byte> px;
+        int w, h;
+        if (!game_logo_rgba(ui_game_romfs(), px, w, h)) return 0;
+        dimensions = Rml::Vector2i(w, h);
+        return GenerateTexture(Rml::Span<const Rml::byte>(px.data(), px.size()), dimensions);
+    }
     Rml::FileInterface *files = Rml::GetFileInterface();
     Rml::FileHandle f = files->Open(source);
     if (!f) return 0;
