@@ -3,6 +3,9 @@
  * Generated from the opcode patterns in Ryujinx's shader decoder (Ryujinx.Graphics.Shader,
  * MIT licence). Names carry the operand form: R (register), I (immediate), C (constant
  * buffer), RC, 32I. Most specific patterns first: the first match is the instruction.
+ *
+ * Ryujinx's MIT License (Copyright (c) Ryujinx Team and Contributors) applies to those patterns: its full
+ * text is in res/licenses/Ryujinx.txt.
  */
 #ifndef MAXWELL_OPS_H
 #define MAXWELL_OPS_H

@@ -1,0 +1,4 @@
+FreeType (the menus' text), linked into libmain.so.
+
+Portions of this software are copyright © 2026 The FreeType Project (www.freetype.org). All rights reserved.
+FreeType is distributed under the FreeType License (FTL); see https://freetype.org/license.html.

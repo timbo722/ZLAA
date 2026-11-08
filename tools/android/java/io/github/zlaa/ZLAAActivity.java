@@ -6,6 +6,7 @@ import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.KeyEvent;
 
 import org.libsdl.app.SDLActivity;
 
@@ -58,6 +59,21 @@ public class ZLAAActivity extends SDLActivity {
         String p = picked;
         picked = null;
         return p;
+    }
+
+    /** Android's Back key. SDL turns a controller's Back key into the controller's Back/Select button, which the
+     *  game reads as its Minus button (so Back opened the game's own menu). Sent as the system Back key instead,
+     *  it opens our pause menu during the game and goes back inside our menus (host/main.c menu_action). */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK && !SDLActivity.mBrokenLibraries) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0)
+                SDLActivity.onNativeKeyDown(KeyEvent.KEYCODE_BACK);
+            else if (event.getAction() == KeyEvent.ACTION_UP)
+                SDLActivity.onNativeKeyUp(KeyEvent.KEYCODE_BACK);
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override
