@@ -5,7 +5,7 @@
  *   IFileSystem  files and folders: save data, kept in a folder on the host
  *   IFile, IDirectory
  *
- * Save data goes to $LAA_SAVE_DIR, or ~/.local/share/LAARecomp/save, then
+ * Save data goes to $LAA_SAVE_DIR, or ~/.local/share/ZLAA/save, then
  * <program id>/<user id>/. Paths from the game are absolute inside the mounted filesystem
  * ("/save.bin"); ".." is refused so the game can't reach outside its folder.
  *
@@ -443,7 +443,7 @@ static ServiceObject *open_host_fs(const char *dir, int journaled) {
 static void save_root(char *out, size_t n) {
     const char *env = getenv("LAA_SAVE_DIR"), *home = getenv("HOME");
     if (env) snprintf(out, n, "%s", env);
-    else snprintf(out, n, "%s/.local/share/LAARecomp/save", home ? home : ".");
+    else snprintf(out, n, "%s/.local/share/ZLAA/save", home ? home : ".");
 }
 
 /* ---- ISaveDataInfoReader: lists save data; we report none ---- */

@@ -5,7 +5,7 @@
 #
 # An APK is a zip file holding:
 #   AndroidManifest.xml   what the app is (binary XML, made by aapt2), and res/: its icon
-#   classes.dex           its Java code, compiled for Android's runtime (SDL's activity, our LAAActivity)
+#   classes.dex           its Java code, compiled for Android's runtime (SDL's activity, our ZLAAActivity)
 #   lib/arm64-v8a/*.so    native libraries: SDL3 and libmain.so (our runtime; the game itself is
 #                         a library built from your own dump, pushed by tools/thor/deploy.sh)
 #   assets/res/...        the menus' documents, style sheets and fonts (res/ in the repo)
@@ -36,7 +36,7 @@ mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/zip/lib/arm64-v8a"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM" --manifest "$HERE/AndroidManifest.xml" -R "$OUT/res.zip" \
     --min-sdk-version 30 --target-sdk-version 35
 
-# 2. Java: SDL's activity and helpers, our LAAActivity (java/) -> .class files -> classes.dex
+# 2. Java: SDL's activity and helpers, our ZLAAActivity (java/) -> .class files -> classes.dex
 find "$SDL_JAVA" "$HERE/java" -name '*.java' > "$OUT/java_files.txt"
 javac -nowarn -source 11 -target 11 -classpath "$PLATFORM" -d "$OUT/classes" @"$OUT/java_files.txt" 2>&1 \
     | grep -v -E "^warning|^Note:|^[0-9]+ warning" || true
@@ -74,7 +74,7 @@ EOF
 #    key made once (a key of your own; it only proves the next build comes from the same place)
 KEY=$A/debug.keystore
 if [ ! -f "$KEY" ]; then
-    keytool -genkeypair -keystore "$KEY" -storepass android -keypass android -alias laarecomp \
+    keytool -genkeypair -keystore "$KEY" -storepass android -keypass android -alias zlaa \
         -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ZLAA debug" > /dev/null 2>&1
 fi
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"

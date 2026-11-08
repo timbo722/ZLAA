@@ -7,13 +7,13 @@ T=$(cd "$(dirname "$0")" && pwd); S=${LAA_OUT:-$HOME/laar-build/thor-out}; mkdir
 $W push "$(xa env/laa_env.txt)" $A/env.txt > /dev/null
 $W shell "rm -f /data/local/tmp/play_*.mp4"
 echo "waiting for the app to start $(date +%T)"
-while [ -z "$($W shell pidof io.github.laarecomp | tr -d '\r')" ]; do sleep 0.3; done
+while [ -z "$($W shell pidof io.github.zlaa | tr -d '\r')" ]; do sleep 0.3; done
 echo "app started $(date +%T)"
 $W logcat -c
 $W logcat -b all -v time > $S/play_${tag}_logcat.txt 2>&1 &
 lc=$!
 n=0
-while [ -n "$($W shell pidof io.github.laarecomp | tr -d '\r')" ]; do
+while [ -n "$($W shell pidof io.github.zlaa | tr -d '\r')" ]; do
   $W shell screenrecord --time-limit 180 --bit-rate 8000000 /data/local/tmp/play_$n.mp4
   n=$((n+1))
 done

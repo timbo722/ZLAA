@@ -1,4 +1,4 @@
 # local.sh: this machine's settings for the scripts in tools/thor (copy to local.sh; it stays out of git)
 LAA_ADB=~/laar-build/android/win/platform-tools/adb.exe     # WSL: the Windows adb.exe (USB); elsewhere just adb
 LAA_ADB_SERIAL=                                             # the device's serial (adb devices), when several are connected
-LAA_HOST_DIR=/mnt/c/Users/<you>/Documents/LAARecomp          # with adb.exe: a folder on a Windows drive
+LAA_HOST_DIR=/mnt/c/Users/<you>/Documents/ZLAA          # with adb.exe: a folder on a Windows drive

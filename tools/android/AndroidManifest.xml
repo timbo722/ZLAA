@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- ZLAA's Android app. The activity is SDL's (org.libsdl.app.SDLActivity, as our LAAActivity, which adds a
+<!-- ZLAA's Android app. The activity is SDL's (org.libsdl.app.SDLActivity, as our ZLAAActivity, which adds a
      folder picker): it creates the window and loads libSDL3.so and libmain.so (our runtime), then calls main().
      Landscape only, no touch controls (the AYN Thor has buttons). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.laarecomp"
+    package="io.github.zlaa"
     android:versionCode="1"
     android:versionName="0.1">
 
@@ -32,7 +32,7 @@
         <profileable android:shell="true" />
 
         <activity
-            android:name="io.github.laarecomp.LAAActivity"
+            android:name="io.github.zlaa.ZLAAActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
             android:launchMode="singleInstance"

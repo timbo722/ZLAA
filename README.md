@@ -126,7 +126,7 @@ phone. It can't be downloaded ready-made, because that would mean distributing N
 per game version; an update of ZLAA that changes how the code is translated asks for it again.
 
 #### Where are my saves?
-In the app's folder, `/sdcard/Android/data/io.github.laarecomp/files/save/`. Back it up before uninstalling the app:
+In the app's folder, `/sdcard/Android/data/io.github.zlaa/files/save/`. Back it up before uninstalling the app:
 Android deletes that folder with it.
 
 ## Building from source

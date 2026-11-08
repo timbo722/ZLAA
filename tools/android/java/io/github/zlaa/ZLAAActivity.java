@@ -1,4 +1,4 @@
-package io.github.laarecomp;
+package io.github.zlaa;
 
 import android.content.Intent;
 import android.net.Uri;
@@ -10,11 +10,11 @@ import android.util.Log;
 import org.libsdl.app.SDLActivity;
 
 /**
- * LAAActivity - SDL's activity, plus what the start screen needs from Android to find the player's game files
+ * ZLAAActivity - SDL's activity, plus what the start screen needs from Android to find the player's game files
  * where they are: a folder picker and "All files access" (the game's 6 GB are read in place, never copied).
  * The native side (host/main.c) calls these static methods through JNI and polls takePickedFolder().
  */
-public class LAAActivity extends SDLActivity {
+public class ZLAAActivity extends SDLActivity {
     private static final String TAG = "ZLAA";
     private static final int PICK_FOLDER = 0x4C41;
 

@@ -290,12 +290,14 @@ static const struct { const char *name; double all, fewer, pause, resume; int jo
 static int speed = BUILD_BALANCED;
 
 /* ---- the progress bar: the share of the time, done / (done + still to go), so the bar and the time left agree.
- * What is still to go: translating, from the translator's own progress (until then a typical 14 min); compiling,
+ * What is still to go: translating, from the translator's own progress (until then a typical 11 min); compiling,
  * from the rate it goes at (MB of C done per second, the pauses included; until it has been going a while,
  * blended with a typical rate for the chosen speed, measured on the AYN Thor). ---- */
-#define TYPICAL_TRANSLATE_S 840.0
-#define TYPICAL_C_MB 660.0
-static const double typical_s_per_mb[] = { 8.4, 5.0, 3.5 };   /* cool, balanced, fast */
+#define TYPICAL_TRANSLATE_S 660.0
+#define TYPICAL_C_MB 680.0
+/* (Thor, 2026-11-07: Balanced compiled 680 MB in ~42 min; Cool took 94 min before the lane loops were written out,
+ * which saved 22%: ~73 min now; Fast not yet measured) */
+static const double typical_s_per_mb[] = { 6.5, 3.7, 2.8 };   /* cool, balanced, fast */
 static double build_t0;
 
 static double typical_total(void) { return TYPICAL_TRANSLATE_S + TYPICAL_C_MB * typical_s_per_mb[speed]; }

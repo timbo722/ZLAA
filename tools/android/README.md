@@ -36,18 +36,18 @@ tools/android/build_apk.sh                                 # -> $LAA_ANDROID/ZLA
 
 ## On the device
 
-The app reads everything from its own folder, `/sdcard/Android/data/io.github.laarecomp/files/`
+The app reads everything from its own folder, `/sdcard/Android/data/io.github.zlaa/files/`
 (no storage permission needed; adb can write there):
 ```
 adb install -r $LAA_ANDROID/ZLAA.apk
-adb push <your dump>/exefs /sdcard/Android/data/io.github.laarecomp/files/exefs
-adb push <your dump>/romfs /sdcard/Android/data/io.github.laarecomp/files/romfs
-adb shell mkdir -p /sdcard/Android/data/io.github.laarecomp/files/game
-adb push libgame-<id>.so /sdcard/Android/data/io.github.laarecomp/files/game/   # (strip --strip-debug first: ~150 MB)
-adb shell am start -n io.github.laarecomp/.LAAActivity
+adb push <your dump>/exefs /sdcard/Android/data/io.github.zlaa/files/exefs
+adb push <your dump>/romfs /sdcard/Android/data/io.github.zlaa/files/romfs
+adb shell mkdir -p /sdcard/Android/data/io.github.zlaa/files/game
+adb push libgame-<id>.so /sdcard/Android/data/io.github.zlaa/files/game/   # (strip --strip-debug first: ~150 MB)
+adb shell am start -n io.github.zlaa/.ZLAAActivity
 adb logcat -s ZLAA            # everything the runtime prints (also files/log.txt)
 ```
-Options: put `LAA_*=value` lines in `files/env.txt` (e.g. `LAA_INPUT_SCRIPT=...`, `LAA_SCREENSHOT=/sdcard/Android/data/io.github.laarecomp/files/shots`).
+Options: put `LAA_*=value` lines in `files/env.txt` (e.g. `LAA_INPUT_SCRIPT=...`, `LAA_SCREENSHOT=/sdcard/Android/data/io.github.zlaa/files/shots`).
 The dump comes from your own Switch and stays on your own devices: never in this repo or a release.
 The same goes for the game library, which is made from it: at start-up the app copies `files/game/libgame-<id>.so`
 to its internal storage (Android runs code only from there) whenever the pushed one differs, then opens it.

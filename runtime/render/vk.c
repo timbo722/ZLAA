@@ -270,7 +270,7 @@ int vk_create_swapchain(uint32_t width, uint32_t height) {
 }
 
 /* ---- the pipeline cache: LAA_CACHE_DIR/pipelines.bin (Android: the app folder's cache/,
- * desktop: ~/.cache/LAARecomp). Compiling a pipeline takes the Adreno driver several ms, and
+ * desktop: ~/.cache/ZLAA). Compiling a pipeline takes the Adreno driver several ms, and
  * each new one stalls the frame that first needs it; with the cache that happens once ever.
  * (The driver checks the file's header and ignores a cache from another driver or device.) */
 static char cache_path[1100];
@@ -281,7 +281,7 @@ static void load_pipeline_cache(void) {
     if (!dir && home) {                              /* desktop default */
         snprintf(made, sizeof made, "%s/.cache", home);
         mkdir(made, 0755);
-        snprintf(made, sizeof made, "%s/.cache/LAARecomp", home);
+        snprintf(made, sizeof made, "%s/.cache/ZLAA", home);
         dir = made;
     }
     void *data = NULL;

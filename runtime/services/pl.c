@@ -4,7 +4,7 @@
  * The Switch's system fonts are Nintendo's and are not part of the game, so this project
  * never ships them. The font for each of the 6 slots comes from, in order:
  *   1. the player's own dump of that system font, in $LAA_FONT_DIR or
- *      ~/.local/share/LAARecomp/fonts (the .bfttf files from the console's system data)
+ *      ~/.local/share/ZLAA/fonts (the .bfttf files from the console's system data)
  *   2. a font already installed on the host: $LAA_HOST_FONT, or DejaVu Sans on Linux, or
  *      Noto Serif on Android. It must have U+25A1 (white square): the game puts that glyph
  *      in its cache at startup and crashes if the font lacks it. Roboto doesn't have it.
@@ -83,7 +83,7 @@ static void load_fonts(void) {
     const char *env = getenv("LAA_FONT_DIR"), *home = getenv("HOME");
     char dir[2048];
     if (env) snprintf(dir, sizeof dir, "%s", env);
-    else snprintf(dir, sizeof dir, "%s/.local/share/LAARecomp/fonts", home ? home : ".");
+    else snprintf(dir, sizeof dir, "%s/.local/share/ZLAA/fonts", home ? home : ".");
 
     host_fonts[0] = getenv("LAA_HOST_FONT");
 

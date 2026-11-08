@@ -7,7 +7,7 @@ H=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 [ -f "$H/local.sh" ] && . "$H/local.sh"
 thor_adb() { "${LAA_ADB:-adb}" ${LAA_ADB_SERIAL:+-s "$LAA_ADB_SERIAL"} "$@"; }
 W=thor_adb
-A=/storage/emulated/0/Android/data/io.github.laarecomp/files      # the app's folder on the device
+A=/storage/emulated/0/Android/data/io.github.zlaa/files      # the app's folder on the device
 X=${LAA_HOST_DIR:-$HOME/laar-build/thor-files}; mkdir -p "$X"/env "$X"/transfer
 case ${LAA_ADB:-adb} in *.exe) XW=$(wslpath -w "$X");; *) XW=;; esac
 xa() { if [ -n "$XW" ]; then printf '%s\\%s' "$XW" "${1//\//\\}"; else printf '%s/%s' "$X" "$1"; fi; }   # $X/<path> as adb sees it

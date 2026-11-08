@@ -420,7 +420,7 @@ static void android_setup(const char **exefs, const char **romfs) {
 #endif
 
 /* ---- finding the player's game files (ui.h): a folder picker, and on Android "All files access" so the files are
- * read where they are. Android: LAAActivity's static methods (tools/android/java) through JNI; the desktop:
+ * read where they are. Android: ZLAAActivity's static methods (tools/android/java) through JNI; the desktop:
  * SDL's folder dialog. ---- */
 #ifdef LAA_HAVE_UI
 #ifdef __ANDROID__
@@ -537,8 +537,27 @@ static int dump_image(const GameImage *img, const char *path) {
     return 0;
 }
 
+#ifndef __ANDROID__
+/* The project was called LAARecomp until 2026-11-07: its desktop folders (settings, shader cache, saves and fonts)
+ * move to the new name once */
+static void move_old_folders(void) {
+    const char *home = getenv("HOME");
+    static const char *const parents[] = { ".config", ".cache", ".local/share" };
+    char from[4096], to[4096];
+    for (int i = 0; home && i < 3; i++) {
+        snprintf(from, sizeof from, "%s/%s/LAARecomp", home, parents[i]);
+        snprintf(to, sizeof to, "%s/%s/ZLAA", home, parents[i]);
+        struct stat st;
+        if (stat(from, &st) == 0 && stat(to, &st) != 0 && rename(from, to) == 0) printf("moved %s to %s\n", from, to);
+    }
+}
+#endif
+
 int main(int argc, char **argv) {
     const char *exefs = NULL, *romfs = NULL, *dump = NULL;
+#ifndef __ANDROID__
+    move_old_folders();
+#endif
     int headless = 0;
     for (int k = 1; k < argc; k++) {
         if (strcmp(argv[k], "--romfs") == 0 && k + 1 < argc) romfs = argv[++k];
@@ -601,7 +620,7 @@ int main(int argc, char **argv) {
         const char *home = getenv("HOME");
         if (getenv("LAA_CONFIG")) snprintf(config, sizeof config, "%s", getenv("LAA_CONFIG"));
         else {
-            snprintf(config, sizeof config, "%s/.config/LAARecomp", home ? home : ".");
+            snprintf(config, sizeof config, "%s/.config/ZLAA", home ? home : ".");
             char parent[4096];
             snprintf(parent, sizeof parent, "%s/.config", home ? home : ".");
             mkdir(parent, 0755);
