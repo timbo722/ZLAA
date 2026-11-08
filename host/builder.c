@@ -6,8 +6,8 @@
  *   1. unpack the toolchain (assets/builder/builder.tar: Python's standard library, zig's headers, the recompiler,
  *      the runtime headers; tools/android/builder/make_toolchain.py) into files/toolchain, once per app version
  *   2. translate: recomp.py (run by libpylaunch.so, the python command) turns the dump's ARM64 code into ~290 C files
- *   3. compile them with zig cc (libzig.so), two at a time while the device is cool, one when it is warm, none when
- *      it is hot (heat() below): the Thor reached 94 C with six at once
+ *   3. compile them with zig cc (libzig.so), a few at a time, fewer as the device warms, none when it is warm
+ *      enough (heat() below; the player chooses how warm: Cool, Balanced, Fast): the Thor reached 94 C with six at once
  *   4. link them (zig's ld.lld) against libmain.so into files/game/libgame-<id>.so, where game_lib.c looks
  *
  * The programs are in the APK's native-library folder (the only place Android lets an app run programs from)
@@ -132,6 +132,9 @@ static void calm_down(void) {
     setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
 }
 
+static void estimate(double still_to_go);
+static double typical_total(void);
+
 /* ---- 1. the toolchain: a tar file among the APK's assets (SDL reads assets for relative paths) ---- */
 static int unpack_toolchain(void) {
     char want[64], have[64], path[4400];
@@ -175,7 +178,7 @@ static int unpack_toolchain(void) {
         if (fd >= 0) close(fd);
         if (size % 512) SDL_SeekIO(io, (Sint64)(512 - size % 512), SDL_IO_SEEK_CUR);
         done += 512 + (Sint64)((size + 511) / 512 * 512);
-        set_state(BUILD_PREPARING, total > 0 ? 0.02 * (double)done / (double)total : 0, NULL);
+        estimate(60 * (1 - (double)done / (double)(total > 0 ? total : 1)) + typical_total());
     }
     SDL_CloseIO(io);
     if (cancel) return -1;
@@ -185,7 +188,7 @@ static int unpack_toolchain(void) {
 }
 
 /* ---- running the tools ---- */
-typedef struct { pid_t pid; int out; char name[256]; } Job;
+typedef struct { pid_t pid; int out; char name[256]; double bytes; } Job;
 
 /* Start a program from the native-library folder; its stdout to a pipe (out_pipe) or with stderr to log */
 static pid_t run(const char *program, char *const argv[], const char *log, int *out_pipe) {
@@ -234,7 +237,6 @@ static int finished(pid_t pid, int block) {         /* -1 running, else the exit
  * hot: the running tools are frozen (SIGSTOP: they lose nothing) until it is cooler again. The device in someone's
  * hands should stay at the warmth of light gaming, not of a benchmark: 94 C on the big core, 88 C on the middle
  * ones, before this. ---- */
-enum { COOL, WARM, HOT };
 
 typedef struct AThermalManager AThermalManager;
 static float thermal_headroom(void) {               /* 0..1 (1 = throttling); -1 if Android can't tell (API < 31) */
@@ -278,29 +280,64 @@ static double zone_temperature(const char *const *types, int prefix) {
     return hottest;
 }
 
-static int heat(void) {                              /* COOL / WARM / HOT, with some hysteresis */
+/* The speeds the player can choose (the board's temperature, C): all tools below `all`, one fewer below `fewer`,
+ * none from `pause` until it is under `resume` again */
+static const struct { const char *name; double all, fewer, pause, resume; int jobs; } speeds[] = {
+    { "cool", 42, 46, 46, 44, 2 },
+    { "balanced", 46, 49, 49, 47, 2 },
+    { "fast", 49, 52, 52, 50, 3 },
+};
+static int speed = BUILD_BALANCED;
+
+/* ---- the progress bar: the share of the time, done / (done + still to go), so the bar and the time left agree.
+ * What is still to go: translating, from the translator's own progress (until then a typical 14 min); compiling,
+ * from the rate it goes at (MB of C done per second, the pauses included; until it has been going a while,
+ * blended with a typical rate for the chosen speed, measured on the AYN Thor). ---- */
+#define TYPICAL_TRANSLATE_S 840.0
+#define TYPICAL_C_MB 660.0
+static const double typical_s_per_mb[] = { 8.4, 5.0, 3.5 };   /* cool, balanced, fast */
+static double build_t0;
+
+static double typical_total(void) { return TYPICAL_TRANSLATE_S + TYPICAL_C_MB * typical_s_per_mb[speed]; }
+
+static void estimate(double still_to_go) {
+    double done = now_s() - build_t0, f = done / (done + (still_to_go > 0 ? still_to_go : 0) + 1e-9);
+    pthread_mutex_lock(&lock);
+    if (f > state.fraction) state.fraction = f > 0.995 ? 0.995 : f;   /* (never backwards) */
+    pthread_mutex_unlock(&lock);
+}
+
+static int heat(void) {                              /* how many tools may run now (0: all frozen) */
     static const char *const board_types[] = { "xo-therm", "skin-therm", "quiet-therm", "sys-therm-0", "usb-therm", NULL };
     static const char *const cpu_types[] = { "cpu-", NULL };
-    static int level = COOL;
+    static int paused, allowed = -1;
     static double checked, logged, cpu_avg = -1;
-    if (now_s() - checked < 2) return level;
+    int max = speeds[speed].jobs;
+    const char *jobs_env = getenv("LAA_BUILD_JOBS");    /* (tests: a fixed number when cool) */
+    if (jobs_env && atoi(jobs_env) > 0) max = atoi(jobs_env) > 8 ? 8 : atoi(jobs_env);
+    if (allowed >= 0 && now_s() - checked < 2) return allowed;
     checked = now_s();
     /* The board's temperature is what the hands feel, and it moves slowly; the chip's hottest spot jumps to 70 C
      * within seconds of any load and back the moment it stops: alone, smoothed (half a minute), and as a cap */
     double board = zone_temperature(board_types, 0), cpu = zone_temperature(cpu_types, 1);
     if (cpu >= 0) cpu_avg = cpu_avg < 0 ? cpu : cpu_avg + (cpu - cpu_avg) * 0.07;
     float h = board < 0 && cpu < 0 ? thermal_headroom() : -1;
-    int was = level;
-    if (cpu >= 88) level = HOT;
-    else if (board >= 0) level = board >= 46 ? HOT : level == HOT && board >= 44 ? HOT : board >= 42 ? WARM : COOL;
-    else if (cpu_avg >= 0) level = cpu_avg >= 72 ? HOT : level == HOT && cpu_avg >= 68 ? HOT : cpu_avg >= 65 ? WARM : COOL;
-    else if (h >= 0) level = h >= 0.70f ? HOT : level == HOT && h >= 0.60f ? HOT : h >= 0.45f ? WARM : COOL;
-    if (level != was || now_s() - logged >= 60) {
+    double all = speeds[speed].all, fewer = speeds[speed].fewer, pause = speeds[speed].pause, resume = speeds[speed].resume;
+    double t = board;                                /* (no board sensor: the smoothed chip, on a scale 20 C up) */
+    if (t < 0 && cpu_avg >= 0) t = cpu_avg - 20;
+    else if (t < 0 && h >= 0) t = all + (h - 0.45) / 0.25 * (pause - all);   /* (headroom 0.45 .. 0.70) */
+    int was = allowed;
+    if (cpu >= 88) paused = 1;                       /* (the chip's cap, whatever the speed) */
+    else if (t >= pause) paused = 1;
+    else if (paused && (t < 0 || t < resume)) paused = 0;
+    allowed = paused ? 0 : t < 0 || t < all ? max : t < fewer ? max - 1 : 1;
+    if (allowed < 0) allowed = 0;
+    if (allowed != was || now_s() - logged >= 60) {
         logged = now_s();
-        printf("build: board %.1f C, cpu %.1f C (smoothed %.1f), thermal headroom %.2f: %s\n", board, cpu, cpu_avg, h,
-               level == HOT ? "hot, paused" : level == WARM ? "warm, one tool at a time" : "cool");
+        printf("build: board %.1f C, cpu %.1f C (smoothed %.1f), thermal headroom %.2f (%s): %d at a time\n", board, cpu,
+               cpu_avg, h, speeds[speed].name, allowed);
     }
-    return level;
+    return allowed;
 }
 
 /* ---- 2. translate ---- */
@@ -310,7 +347,8 @@ static int translate(const char *gen) {
     read_text(marker, have, sizeof have);
     if (strcmp(have, stamp) == 0) return 0;          /* (done before by this toolchain: the app closed while compiling) */
     printf("build: translating %s\n", exefs_dir);
-    set_state(BUILD_TRANSLATING, 0.02, "Translating the game's code");
+    set_state(BUILD_TRANSLATING, -1, "Translating the game's code");
+    double t_start = now_s(), x = 0, compile_guess = TYPICAL_C_MB * typical_s_per_mb[speed];
     snprintf(log, sizeof log, "%s/translate.log", log_dir);
     snprintf(script, sizeof script, "%s/recompiler/recomp.py", tool_dir);
     snprintf(input, sizeof input, "%s", exefs_dir);
@@ -335,15 +373,18 @@ static int translate(const char *gen) {
             char *start = buf;
             while ((line = strchr(start, '\n'))) {
                 *line = 0;
-                double x;
-                if (sscanf(start, "progress %lf", &x) == 1) set_state(BUILD_TRANSLATING, 0.02 + 0.23 * x, NULL);
+                double p;
+                if (sscanf(start, "progress %lf", &p) == 1) x = p;
                 start = line + 1;
             }
             used -= (size_t)(start - buf);
             memmove(buf, start, used);
             if (used == sizeof buf - 1) used = 0;
         }
-        int hot = heat() == HOT;
+        double t = now_s() - t_start;                 /* (still to go: the rest of this at its pace, then compiling) */
+        estimate((x > 0.03 && t > 30 ? t * (1 - x) / x : TYPICAL_TRANSLATE_S - t > 60 ? TYPICAL_TRANSLATE_S - t : 60)
+                 + compile_guess);
+        int hot = heat() == 0;
         if (hot != paused) { kill(-pid, hot ? SIGSTOP : SIGCONT); paused = hot; }
         pthread_mutex_lock(&lock);
         state.cooling = paused;
@@ -381,16 +422,26 @@ static int compile_all(const char *gen, const char *obj) {
     }
     if (d) closedir(d);
     snprintf(sources[n++], sizeof sources[0], "game_abi.c");   /* (from the runtime: the library's ABI id) */
+    static double bytes[512];                        /* each file's size: what the progress counts */
+    double total_bytes = 0, done_bytes = 0, compiled_bytes = 0, c_start = now_s();
+    for (int i = 0; i < n; i++) {
+        char p[4400];
+        struct stat st;
+        snprintf(p, sizeof p, "%s/%s", gen, sources[i]);
+        bytes[i] = stat(p, &st) == 0 ? (double)st.st_size : 1000;
+        total_bytes += bytes[i];
+    }
     char obj_stamp[4400], have[96];                  /* (objects from another toolchain or game: none kept) */
     snprintf(obj_stamp, sizeof obj_stamp, "%s/.stamp", obj);
     read_text(obj_stamp, have, sizeof have);
-    if (strcmp(have, stamp) != 0) remove_tree(obj);
+    if (strcmp(have, stamp) != 0) {                  /* (and zig's own cache of compiled files with them) */
+        char cache[4400];
+        snprintf(cache, sizeof cache, "%s/zigcache", work_dir);
+        remove_tree(obj);
+        remove_tree(cache);
+    }
     make_dirs(obj);
     write_text(obj_stamp, stamp);
-    const char *jobs_env = getenv("LAA_BUILD_JOBS");
-    int max_jobs = jobs_env ? atoi(jobs_env) : 2;   /* (when cool; one when warm, none when hot) */
-    if (max_jobs < 1) max_jobs = 1;
-    if (max_jobs > 8) max_jobs = 8;
     Job running[8];
     int nrun = 0, next = 0, done = 0, failed = 0, paused = 0;
     char log[4400], src[4400], out[4400], inc_gen[4400], inc_rt[4400], abi[200];
@@ -398,26 +449,29 @@ static int compile_all(const char *gen, const char *obj) {
     snprintf(inc_gen, sizeof inc_gen, "-I%s", gen);
     snprintf(inc_rt, sizeof inc_rt, "-I%s/runtime", tool_dir);
     snprintf(abi, sizeof abi, "-DRECOMP_ABI=\"%s\"", RECOMP_ABI);
-    printf("build: compiling %d files, %d at a time\n", n, max_jobs);
+    printf("build: compiling %d files (%s)\n", n, speeds[speed].name);
     while (!cancel && (next < n || nrun) && !failed) {
         for (int i = 0; i < nrun; i++) {             /* finished ones */
             int st = finished(running[i].pid, 0);
             if (st < 0) continue;
             if (st != 0) { failed = 1; show_log_tail(log, st); fail("compiling %s failed (see build/compile.log)", running[i].name); }
             done++;
+            done_bytes += running[i].bytes;
+            compiled_bytes += running[i].bytes;
             running[i--] = running[--nrun];
         }
-        int level = heat(), hot = level == HOT, allowed = level == COOL ? max_jobs : level == WARM ? 1 : 0;
+        int allowed = heat(), hot = allowed == 0;
         if (hot != paused) {                         /* hot: the running ones frozen; cooler: on again */
             for (int i = 0; i < nrun; i++) kill(-running[i].pid, hot ? SIGSTOP : SIGCONT);
             paused = hot;
         }
         while (!failed && next < n && nrun < allowed) {
+            double file_bytes = bytes[next];
             const char *name = sources[next++];
             if (strcmp(name, "game_abi.c") == 0) snprintf(src, sizeof src, "%s/runtime/%s", tool_dir, name);
             else snprintf(src, sizeof src, "%s/%s", gen, name);
             snprintf(out, sizeof out, "%s/%.*s.o", obj, (int)(strlen(name) - 2), name);
-            if (newer(out, src)) { done++; continue; }   /* (compiled before the app closed) */
+            if (newer(out, src)) { done++; done_bytes += file_bytes; continue; }   /* (compiled before the app closed) */
             char *argv[] = { "zig", "cc", "-target", "aarch64-linux-musl", "-mcpu=generic+v8_2a", "-O2", "-g0", "-fPIC",
                              "-fwrapv", "-ffp-contract=off", "-fno-math-errno", "-w", "-fvisibility=hidden",
                              "-fno-vectorize", "-fno-slp-vectorize", "-mllvm", "-enable-misched=false", "-mllvm",
@@ -427,13 +481,21 @@ static int compile_all(const char *gen, const char *obj) {
             pid_t pid = run("libzig.so", argv, log, NULL);
             if (pid < 0) { failed = 1; fail("couldn't start the compiler", NULL); break; }
             running[nrun].pid = pid;
+            running[nrun].bytes = file_bytes;
             snprintf(running[nrun].name, sizeof running[0].name, "%s", name);
             nrun++;
         }
         char detail[160];
         snprintf(detail, sizeof detail, hot ? "Compiling: %d of %d (the device is warm: pausing to let it cool)"
                                            : "Compiling: %d of %d", done, n);
-        set_state(BUILD_COMPILING, 0.25 + 0.72 * done / n, detail);
+        set_state(BUILD_COMPILING, -1, detail);
+        double typical = 1e6 / typical_s_per_mb[speed], t = now_s() - c_start, rate = typical;
+        if (compiled_bytes > 0 && t > 60) {          /* (its own pace, trusted more as more is done) */
+            double w = compiled_bytes / (0.15 * total_bytes);
+            if (w > 1) w = 1;
+            rate = w * compiled_bytes / t + (1 - w) * typical;
+        }
+        estimate((total_bytes - done_bytes) / rate + 10);
         pthread_mutex_lock(&lock);
         state.cooling = hot;
         pthread_mutex_unlock(&lock);
@@ -462,7 +524,8 @@ static int link_library(const char *obj, const char *lib) {
     if (d) closedir(d);
     if (f) fclose(f);
     snprintf(rsp, sizeof rsp, "@%s", list);
-    set_state(BUILD_LINKING, 0.97, "Linking");
+    set_state(BUILD_LINKING, -1, "Linking");
+    estimate(10);
     char *argv[] = { "zig", "ld.lld", "-shared", "-o", (char *)lib, rsp, main_so, "-soname", soname, "--gc-sections",
                      "-z", "noexecstack", NULL };
     pid_t pid = run("libzig.so", argv, log, NULL);
@@ -479,6 +542,7 @@ static void *build_thread(void *arg) {
     snprintf(obj, sizeof obj, "%s/obj", work_dir);
     snprintf(lib, sizeof lib, "%s/libgame-%s.so", work_dir, game_id);
     snprintf(dst, sizeof dst, "%s/libgame-%s.so", game_dir, game_id);
+    build_t0 = now_s();
     make_dirs(work_dir);
     make_dirs(log_dir);
     for (int k = 0; k < 3; k++) {                    /* (each build's logs fresh) */
@@ -496,8 +560,11 @@ static void *build_thread(void *arg) {
     SDL_EnableScreenSaver();
     if (ok) {
         printf("build: libgame-%s.so made in %.0f s\n", game_id, now_s() - t0);
-        remove_tree(gen);                             /* (~700 MB of C and the objects: not needed any more) */
-        remove_tree(obj);
+        remove_tree(gen);                             /* (~700 MB of C, the objects and zig's cache: not needed */
+        remove_tree(obj);                             /*  any more) */
+        char cache[4400];
+        snprintf(cache, sizeof cache, "%s/zigcache", work_dir);
+        remove_tree(cache);
         set_state(BUILD_DONE, 1, "Done");
     } else if (cancel) {
         printf("build: cancelled after %.0f s (what is done is kept)\n", now_s() - t0);
@@ -506,7 +573,7 @@ static void *build_thread(void *arg) {
     return NULL;
 }
 
-int builder_start(const char *exefs, const char *lib_dir_for_game) {
+int builder_start(const char *exefs, const char *lib_dir_for_game, int build_speed) {
     pthread_mutex_lock(&lock);
     int busy = state.step > BUILD_IDLE && state.step < BUILD_DONE;
     pthread_mutex_unlock(&lock);
@@ -525,6 +592,7 @@ int builder_start(const char *exefs, const char *lib_dir_for_game) {
     const char *external = SDL_GetAndroidExternalStoragePath();   /* (the logs where the player can find them) */
     snprintf(log_dir, sizeof log_dir, "%s/build", external ? external : files_dir);
     cancel = 0;
+    speed = build_speed >= BUILD_COOL && build_speed <= BUILD_FAST ? build_speed : BUILD_BALANCED;
     pthread_mutex_lock(&lock);
     memset(&state, 0, sizeof state);
     state.step = BUILD_PREPARING;

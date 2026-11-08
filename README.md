@@ -82,7 +82,7 @@ There is no release yet: build the APK from source ([Building from source](#buil
    `LADump/1.0.0/` in its main storage.
 2. Open LAARecomp, choose **Game Files** and allow **All files access** when Android asks (the 6 GB are read where
    they are, never copied), then choose that folder.
-3. Choose **Prepare Game**. The app translates your copy's code and compiles it for the device, once. For now this
+3. Choose **Build Game**. The app translates your copy's code and compiles it for the device, once. For now this
    is slow: about an hour and three quarters on the AYN Thor, because it keeps the device only warm (the board
    around 45 C), pausing whenever it gets warmer. Making it faster is being worked on. Keep the app open, ideally
    plugged in; if it closes, the build carries on from where it stopped.
@@ -118,7 +118,7 @@ slow channel; the game reads thousands of files from its 6 GB `romfs` while it r
 reads them directly, and doesn't need a second 6 GB copy in its own folder. It only reads the folder you choose (and
 writes its own app folder).
 
-#### Why does Prepare Game take so long, and why must it run on my device?
+#### Why does Build Game take so long, and why must it run on my device?
 The game's code (about 150,000 functions) is translated into C and compiled for your device: a lot of work for a
 phone. It can't be downloaded ready-made, because that would mean distributing Nintendo's code. It happens once
 per game version; an update of LAARecomp that changes how the code is translated asks for it again.

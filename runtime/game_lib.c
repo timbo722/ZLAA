@@ -98,6 +98,11 @@ static int abi_matches(const char *path, const struct stat *st) {
     return last = found;
 }
 
+int game_lib_outdated(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && !abi_matches(path, &st);
+}
+
 int game_lib_find(const char *exefs_dir, const char *lib_dir, const char *import_dir, char id[17]) {
     if (main_build_id(exefs_dir, id) != 0) return -1;
     char path[4200];

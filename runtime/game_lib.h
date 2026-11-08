@@ -19,6 +19,9 @@ int game_lib_load(const char *exefs_dir, const char *lib_dir, const char *import
  * 2 = built against other runtime headers (an older app: build it again), -1 = no main in exefs_dir. */
 int game_lib_find(const char *exefs_dir, const char *lib_dir, const char *import_dir, char id[17]);
 
+/* 1 if the file is a game library built against other runtime headers (an older app's: of no use) */
+int game_lib_outdated(const char *path);
+
 /* "f_<guest address>" (written into buf) if pc is inside the game library's code, else NULL;
  * *offset (if not NULL) = pc's distance from that function's start. (The game's functions
  * are hidden symbols there, so dladdr can't name them.) */

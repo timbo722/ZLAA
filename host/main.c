@@ -453,9 +453,9 @@ void host_pick_folder(void) { call_activity("pickFolder", "()V", NULL, NULL); }
 /* the game code, built on the device (builder.c) */
 _Static_assert(BUILD_FAILED == UI_BUILD_FAILED && BUILD_COMPILING == UI_BUILD_COMPILING, "builder.h and ui.h agree");
 
-int host_build_start(const char *exefs) {
+int host_build_start(const char *exefs, int speed) {
     const char *dir = getenv("LAA_GAME_DIR");
-    return dir ? builder_start(exefs, dir) : -1;
+    return dir ? builder_start(exefs, dir, speed) : -1;
 }
 
 int host_build_progress(double *fraction, char *detail, size_t size, double *elapsed, int *cooling) {
@@ -497,7 +497,7 @@ static void folder_chosen(void *userdata, const char *const *files, int filter) 
 
 int host_files_access(void) { return 1; }
 void host_request_files_access(void) {}
-int host_build_start(const char *exefs) { (void)exefs; return -1; }   /* (the desktop builds it with CMake) */
+int host_build_start(const char *exefs, int speed) { (void)exefs; (void)speed; return -1; }   /* (the desktop: CMake) */
 int host_build_progress(double *fraction, char *detail, size_t size, double *elapsed, int *cooling) {
     *fraction = 0; *elapsed = 0; *cooling = 0;
     snprintf(detail, size, "On a PC the game code is built with CMake (see the README)");

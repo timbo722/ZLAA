@@ -312,6 +312,12 @@ build-line {
     font-size: 16dp;
 }
 
+p.speed-help {
+    margin: 0 0 var(--gap-sm) 0;
+    text-align: center;
+    font-size: 15dp;
+}
+
 build-percent {
     font-weight: bold;
     color: var(--gold);

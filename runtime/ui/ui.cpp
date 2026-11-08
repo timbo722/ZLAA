@@ -21,7 +21,9 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -166,7 +168,7 @@ Rml::ElementDocument *start_doc, *settings_doc, *pause_doc, *build_doc;
 int showing;                                             /* 0: no menu, 1: start screen, 2: pause menu */
 int result;                                              /* what ui_frame returns next */
 int game_ready;                                          /* the start screen's Play works */
-int needs_build;                                         /* the game files are there, their code isn't: Prepare Game */
+int needs_build;                                         /* the game files are there, their code isn't: Build Game */
 int needs_files;                                         /* no game files found: Play is Choose Game Files */
 int settings_changed;                                    /* (ui_settings_changed) */
 std::string tab = "Video";
@@ -204,6 +206,8 @@ void focus_first(Rml::ElementDocument *doc, const char *selector) {
 
 void show_files_help(const std::string &extra, bool bad);
 std::string files_label();
+std::string space_label();
+void show_space_help();
 
 /* The line above the status chip ("" hides it); with the settings window open, its help pane says it */
 void note(const std::string &text, bool bad) {
@@ -246,7 +250,7 @@ void update_start_status() {
     }
     Rml::Element *play = start_doc->GetElementById("play");
     play->SetInnerRML(needs_files ? "<icon class=\"folder\" />Choose Game Files"
-                      : needs_build ? "<icon class=\"build\" />Prepare Game" : "<icon class=\"play\" />Play");
+                      : needs_build ? "<icon class=\"build\" />Build Game" : "<icon class=\"play\" />Play");
 }
 
 void build_settings();
@@ -280,7 +284,7 @@ void use_game_folder(const std::string &dir) {
     if (settings_doc->IsVisible()) {                     /* (chosen from Settings: back on its row) */
         build_settings();
         focus_first(settings_doc, "#files-row");
-        show_files_help(game_ready ? "" : needs_build ? "Choose Play on the start screen to prepare the game." : "", false);
+        show_files_help(game_ready ? "" : needs_build ? "Choose Build Game on the start screen next." : "", false);
     } else {
         focus_first(start_doc, "#play");
     }
@@ -309,8 +313,27 @@ void poll_picking() {
     }
 }
 
-/* ---- Prepare Game: the game's code built on the device (the host's builder), with its progress ---- */
+/* ---- Build Game: the game's code built on the device (the host's builder), with its progress ---- */
 int build_shown_step = -1;
+
+/* How warm the device may get while it builds (config LAA_BUILD_SPEED: 0 cool, 1 balanced, 2 fast) */
+const char *const kSpeedNames[] = { "Cool", "Balanced", "Fast" };
+const char *const kSpeedHelp[] = { "Stays barely warm; the slowest.", "Gets warm; about twice as fast as Cool.",
+                                   "Gets warm to the touch; the fastest." };
+
+int build_speed() {
+    auto it = config.find("LAA_BUILD_SPEED");
+    int v = it == config.end() || it->second.empty() ? 1 : atoi(it->second.c_str());
+    return v < 0 || v > 2 ? 1 : v;
+}
+
+void show_build_speed(bool running) {
+    int v = build_speed();
+    Rml::Element *b = build_doc->GetElementById("build-speed");
+    b->SetInnerRML(std::string("Speed: ") + kSpeedNames[v]);
+    if (running) b->SetAttribute("disabled", ""); else b->RemoveAttribute("disabled");
+    build_doc->GetElementById("build-speed-help")->SetInnerRML(running ? "" : kSpeedHelp[v]);
+}
 
 std::string minutes(double s) {
     char b[32];
@@ -330,9 +353,16 @@ void update_build() {
         build_doc->GetElementById("build-fill")->SetProperty("width", std::to_string(fraction * 100) + "%");
         build_doc->GetElementById("build-percent")->SetInnerRML(running || step == UI_BUILD_DONE ? pct : "");
         std::string t;
-        if (running && elapsed > 0) {
-            t = minutes(elapsed);
-            if (fraction > 0.05) t += " \xC2\xB7 about " + minutes(elapsed / fraction - elapsed) + " left";
+        if (running && elapsed > 0) {                    /* (the builder's fraction is of the time: done / total) */
+            t = minutes(elapsed) + " \xC2\xB7 ";
+            double left = fraction > 0 ? elapsed * (1 - fraction) / fraction : -1;
+            int m = (int)(left / 60 + 0.5);
+            char b[48];
+            if (elapsed < 60 || left < 0) snprintf(b, sizeof b, "estimating\xE2\x80\xA6");
+            else if (m < 2) snprintf(b, sizeof b, "about a minute left");
+            else if (m < 60) snprintf(b, sizeof b, "about %d min left", m < 15 ? m : (m + 2) / 5 * 5);
+            else snprintf(b, sizeof b, "about %d h %02d min left", (m + 2) / 5 * 5 / 60, (m + 2) / 5 * 5 % 60);
+            t += b;
         }
         build_doc->GetElementById("build-time")->SetInnerRML(esc(t));
         build_doc->GetElementById("build-detail")->SetInnerRML(esc(detail));
@@ -341,12 +371,13 @@ void update_build() {
             Rml::Element *go = build_doc->GetElementById("build-go"), *back = build_doc->GetElementById("build-back");
             go->SetInnerRML(running ? "Cancel" : step == UI_BUILD_DONE ? "Play" : step == UI_BUILD_FAILED ? "Try Again" : "Start");
             back->SetInnerRML(running ? "Hide" : "Back");
+            show_build_speed(running || step == UI_BUILD_DONE);
             if (step == UI_BUILD_DONE) update_start_status();
         }
     }
     if (running && !build_doc->IsVisible()) {             /* (hidden: the status chip shows how far it is) */
         char b[64];
-        snprintf(b, sizeof b, "Preparing the game: %d%%", (int)(fraction * 100));
+        snprintf(b, sizeof b, "Building the game: %d%%", (int)(fraction * 100));
         start_doc->GetElementById("game-status-label")->SetInnerRML(b);
     }
     static int last_step = -1;                           /* (finished while hidden: the start screen once) */
@@ -377,7 +408,7 @@ void build_go() {
     int step = host_build_progress(&f, d, sizeof d, &e, &c);
     if (step > UI_BUILD_IDLE && step < UI_BUILD_DONE) host_build_cancel();
     else if (step == UI_BUILD_DONE && game_ready) { close_build(); result = UI_PLAY; }
-    else if (host_build_start(paths.exefs) != 0) build_doc->GetElementById("build-detail")->SetInnerRML("Can't build here.");
+    else if (host_build_start(paths.exefs, build_speed()) != 0) build_doc->GetElementById("build-detail")->SetInnerRML("Can't build here.");
     update_build();
 }
 
@@ -401,6 +432,10 @@ void build_settings() {
     if (tab == "Interface" && showing == 1)              /* (not over the running game) */
         rows = "<row id=\"files-row\"><key>Game Files</key><value><span>" + esc(files_label()) +
                "</span><icon class=\"folder\"/></value></row>" + rows;
+#ifdef __ANDROID__
+    if (tab == "Interface" && showing == 1)
+        rows += "<row id=\"space-row\"><key>Free Up Space</key><value><span>" + esc(space_label()) + "</span></value></row>";
+#endif
     if (tab == "About")
         rows = "<about>"
                "<about-head><about-title>LAARecomp</about-title><about-version>Version " LAA_VERSION
@@ -470,6 +505,93 @@ void change_setting(int row, int step) {
     if (Rml::Element *e = settings_doc->GetElementById("row-" + std::to_string(row))) e->Focus(true);
 }
 
+/* ---- Free Up Space (Android): what the app keeps in its private storage and no longer needs - a build's work
+ * folder, the unpacked build tools (unpacked again when needed), game code built against an older app's headers,
+ * and game code folders not in use (files/game-*: test builds). Saves and working game code stay. ---- */
+long long tree_bytes(const std::string &p) {
+    struct stat st;
+    if (lstat(p.c_str(), &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) return st.st_size;
+    long long n = 0;
+    if (DIR *d = opendir(p.c_str())) {
+        while (struct dirent *e = readdir(d))
+            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) n += tree_bytes(p + "/" + e->d_name);
+        closedir(d);
+    }
+    return n;
+}
+
+void remove_tree(const std::string &p) {
+    struct stat st;
+    if (lstat(p.c_str(), &st) != 0) return;
+    if (S_ISDIR(st.st_mode)) {
+        if (DIR *d = opendir(p.c_str())) {
+            while (struct dirent *e = readdir(d))
+                if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) remove_tree(p + "/" + e->d_name);
+            closedir(d);
+        }
+        rmdir(p.c_str());
+    } else {
+        unlink(p.c_str());
+    }
+}
+
+std::vector<std::string> unneeded_files() {
+    std::vector<std::string> out;
+#ifdef __ANDROID__
+    const char *internal = SDL_GetAndroidInternalStoragePath();
+    if (!internal) return out;
+    std::string files = internal, game = paths.game_dir ? paths.game_dir : "";
+    double f, e;
+    int c;
+    char d[8];
+    int step = host_build_progress(&f, d, sizeof d, &e, &c);
+    if (!(step > UI_BUILD_IDLE && step < UI_BUILD_DONE)) {   /* (never under a running build) */
+        out.push_back(files + "/build");
+        out.push_back(files + "/toolchain");
+    }
+    if (DIR *dir = opendir(game.c_str())) {
+        while (struct dirent *ent = readdir(dir)) {
+            std::string p = game + "/" + ent->d_name;
+            if (strncmp(ent->d_name, "libgame-", 8) == 0 && game_lib_outdated(p.c_str())) out.push_back(p);
+        }
+        closedir(dir);
+    }
+    if (DIR *dir = opendir(files.c_str())) {
+        while (struct dirent *ent = readdir(dir)) {
+            std::string p = files + "/" + ent->d_name;
+            if (strncmp(ent->d_name, "game-", 5) == 0 && p != game) out.push_back(p);
+        }
+        closedir(dir);
+    }
+#endif
+    return out;
+}
+
+[[maybe_unused]] std::string space_label() {        /* (the row is Android's only) */
+    long long n = 0;
+    for (const std::string &p : unneeded_files()) n += tree_bytes(p);
+    char b[32];
+    if (n < 1000000) return "Nothing to clear";
+    snprintf(b, sizeof b, "%.0f MB", n / 1e6);
+    return b;
+}
+
+void free_up_space() {
+    long long n = 0;
+    for (const std::string &p : unneeded_files()) { n += tree_bytes(p); remove_tree(p); }
+    printf("menu: freed %.0f MB\n", n / 1e6);
+    build_settings();
+    focus_first(settings_doc, "#space-row");
+}
+
+void show_space_help() {
+    settings_doc->GetElementById("help")->SetInnerRML(
+        "<heading>Free Up Space</heading><p>Removes what LAARecomp no longer needs: what is left of a finished or "
+        "stopped build, the unpacked build tools (unpacked again when needed), and game code from older versions of "
+        "the app. Your saves and the game code in use are kept.</p>");
+}
+
 /* The game files' folder, short: "LADump/1.0.1" in the device's storage, "App folder" for the app's own */
 std::string files_label() {
     if (needs_files) return "Not chosen";
@@ -506,6 +628,7 @@ public:
         Rml::Element *e = event.GetTargetElement();
         if (event.GetId() == Rml::EventId::Focus) {
             if (e && e->GetId() == "files-row") show_files_help("", false);
+            else if (e && e->GetId() == "space-row") show_space_help();
             else show_help(row_of(e));
             return;
         }
@@ -516,7 +639,14 @@ public:
             if (id == "play" && needs_build) { open_build(); return; }
             if (id == "play" && needs_files) { choose_game_files(); return; }
             if (id == "files-row") { choose_game_files(); return; }
+            if (id == "space-row") { free_up_space(); return; }
             if (id == "build-go") { build_go(); return; }
+            if (id == "build-speed") {                    /* Cool -> Balanced -> Fast -> Cool */
+                config["LAA_BUILD_SPEED"] = std::to_string((build_speed() + 1) % 3);
+                save_config();
+                show_build_speed(false);
+                return;
+            }
             if (id == "build-back") { close_build(); return; }
             if (id == "resume") { result = UI_RESUME; return; }
             if (id == "settings") { open_settings(); return; }

@@ -345,6 +345,7 @@ def recompile_function(img, funcs, start, name, size, stats, comments=True):
         uses = first_uses(plain)
         FUNC_INFO[cname(start)] = (follows_abi(plain, uses), re.search(r"\bst64\(c, .*\bX(19|2[0-8])\)", text) is not None,
                                    set(re.findall(r"\b(f_[0-9a-f]+)\(c\)", text)), reads_scratch(uses[0]))
+    body = [unroll_lanes(l) for l in body]
     decls, body = cache_registers(body) if cache else ([], body)
     out = [f"/* {name} */", f"void {cname(start)}(CPU *c) {{"]
     out.extend(decls)
@@ -482,6 +483,32 @@ _FLAG_FN_RE = re.compile(r"\b(" + "|".join(_FLAG_FNS) + r")\(c, ")
 def _local_flags(l):
     l = _FLAG_RE.sub(lambda m: "F" + m.group(1).upper(), l)
     return _FLAG_FN_RE.sub(lambda m: _FLAG_FNS[m.group(1)] + "(&FN, &FZ, &FC, &FV, ", l)
+
+
+# A vector instruction works on each lane in a small loop (for (int k = 0; k < 4; k++) { r.f[k] = ...; }), and
+# math-heavy functions have thousands of them: the C compiler then spent a third of its time rotating loops before
+# unrolling every one (funcs_0164: 71 s, the median file 8 s). Written out lane by lane here: the same code.
+_LANE_LOOP_RE = re.compile(r"for \(int k = (\d+); k < (\d+); k\+\+\) \{")
+_K_RE = re.compile(r"\bk\b")
+
+
+def unroll_lanes(line):
+    out, i = "", 0
+    while True:
+        m = _LANE_LOOP_RE.search(line, i)
+        if not m:
+            return out + line[i:]
+        depth, j = 1, m.end()                        # the body: up to the matching }
+        while j < len(line) and depth:
+            depth += {"{": 1, "}": -1}.get(line[j], 0)
+            j += 1
+        body = line[m.end():j - 1]
+        if depth or _LANE_LOOP_RE.search(body):      # (unbalanced or nested: left as it is)
+            out += line[i:j]
+        else:
+            out += line[i:m.start()] + "{" + "".join("{" + _K_RE.sub(str(k), body) + "}"   # (each lane its own block:
+                                                     for k in range(int(m.group(1)), int(m.group(2)))) + "}"   # locals in it)
+        i = j
 
 
 # Guest memory's base in a local too (M = c->mem): read through c it is loaded again after every store to guest
@@ -647,11 +674,12 @@ def main():
         if args.progress:
             print(f"progress {x:.3f}", flush=True)
 
+    # (the shares are the steps' times: loading ~2%, finding the functions ~6%, the first pass ~57%, writing the C ~35%)
     t0 = time.time()
     img = load(args.input, args.base)
     progress(0.02)
     fs = discover(img)
-    progress(0.10)
+    progress(0.08)
     funcs = fs.funcs
     stats = Stats()
     comments = not args.no_comments
@@ -688,7 +716,7 @@ def main():
     for k, (addr, (name, size)) in enumerate(items):
         recompile_function(img, funcs, addr, name, size, Stats(), False)
         if k % 5000 == 0:
-            progress(0.10 + 0.35 * k / len(items))
+            progress(0.08 + 0.57 * k / len(items))
     COLLECT_ABI = False
     find_non_abi()
     FUNC_INFO.clear()
@@ -706,7 +734,7 @@ def main():
         if len(items) > 20000 and k % 20000 == 0 and k:
             print(f"  ... {k}/{len(items)} functions", file=sys.stderr)
         if k % 5000 == 0:
-            progress(0.45 + 0.53 * k / len(items))
+            progress(0.65 + 0.34 * k / len(items))
 
     if chunked:
         if chunk:

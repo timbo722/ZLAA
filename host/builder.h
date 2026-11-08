@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 enum { BUILD_IDLE, BUILD_PREPARING, BUILD_TRANSLATING, BUILD_COMPILING, BUILD_LINKING, BUILD_DONE, BUILD_FAILED };
+enum { BUILD_COOL, BUILD_BALANCED, BUILD_FAST };      /* how warm the device may get (builder.c: speeds) */
 
 typedef struct {
     int step;                /* BUILD_* */
@@ -19,9 +20,9 @@ typedef struct {
     double started, elapsed; /* seconds */
 } BuildState;
 
-/* Start building libgame-<id>.so for the dump's exefs into lib_dir (a thread; returns at once). 0 = started or
- * already running, -1 = can't (no game files) */
-int builder_start(const char *exefs, const char *lib_dir);
+/* Start building libgame-<id>.so for the dump's exefs into lib_dir (a thread; returns at once) at a speed
+ * (BUILD_COOL / _BALANCED / _FAST). 0 = started or already running, -1 = can't (no game files) */
+int builder_start(const char *exefs, const char *lib_dir, int speed);
 void builder_state(BuildState *out);
 void builder_cancel(void);
 
