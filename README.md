@@ -59,8 +59,8 @@ your romfs ───────────────────────
 
 ## Where it stands
 
-ZLAA is young. The opening of the game (Toronbo Shores, Mabe Village, the fields around it and the Mysterious
-Forest) plays at a steady 60 fps at 720p on the AYN Thor, with sound, the game's movies and its own dynamic resolution.
+ZLAA is young. The opening of the game (Toronbo Shores, Mabe Village, the fields around it and the first
+areas) plays at a steady 60 fps at 720p on the AYN Thor, with sound, the game's movies and its own dynamic resolution.
 Beyond that, little has been played yet, so expect surprises. If something breaks, please
 [open an issue](../../issues) and include your device, your game version and the app's `log.txt` (in
 `Android/data/io.github.zlaa/files/`).
