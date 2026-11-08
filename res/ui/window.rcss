@@ -202,7 +202,7 @@ row:focus-visible value icon {
     color: var(--gold);
 }
 
-/* the About page: the whole width (no help pane), a title line, then short cards */
+/* the About page: the whole width (no help pane), a title line, a paragraph, the project link, a closing line */
 window.about pane#help {
     display: none;
 }
@@ -234,29 +234,6 @@ about-version {
 
 about row {
     margin: var(--gap-md) 0 var(--gap-xs) 0;
-}
-
-cards {                                                   /* (two cards side by side: the page fits without scrolling) */
-    display: flex;
-    gap: var(--gap-md);
-}
-
-cards card {
-    flex: 1 1 0;
-}
-
-card {
-    display: block;
-    margin-top: var(--gap-md);
-    padding: 14dp 18dp 4dp 18dp;
-    border-radius: 18dp;
-    background-color: rgba(var(--text-rgb), 5%);
-}
-
-card heading {
-    font-size: 17dp;
-    color: var(--gold);
-    margin-bottom: var(--gap-xs);
 }
 
 p.legal {
