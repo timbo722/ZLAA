@@ -32,6 +32,15 @@ if(CMAKE_C_FLAGS MATCHES "fast-math" OR CMAKE_C_FLAGS_RELEASE MATCHES "fast-math
 endif()
 set(RECOMP_FLAGS -fwrapv -ffp-contract=off -fno-math-errno)
 
+# No build machine's folders in the binaries (__FILE__, assert messages, debug info): paths relative to the source
+# and build folders instead
+get_filename_component(_real_source "${CMAKE_SOURCE_DIR}" REALPATH)
+foreach(_dir "${CMAKE_SOURCE_DIR}" "${_real_source}" "${CMAKE_BINARY_DIR}" "$ENV{HOME}")   # (HOME: the NDK's headers)
+    if(_dir)
+        add_compile_options("-ffile-prefix-map=${_dir}/=")
+    endif()
+endforeach()
+
 # The ABI id: the headers the generated code is compiled against. The runtime refuses a game
 # library built with other ones (game_lib.c); CMake re-runs when they change.
 set(_abi_headers runtime/recomp_runtime.h runtime/recomp_simd.h)

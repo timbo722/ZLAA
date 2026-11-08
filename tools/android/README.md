@@ -17,7 +17,8 @@ installed system-wide.
    NDK=$LAA_ANDROID/sdk/ndk/27.2.12479018
    cmake -S src/SDL3-3.4.2 -B build/sdl3 -G Ninja -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_BUILD_TYPE=Release \
-         -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DCMAKE_INSTALL_PREFIX=$LAA_ANDROID/prefix
+         -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DCMAKE_INSTALL_PREFIX=$LAA_ANDROID/prefix \
+         "-DCMAKE_C_FLAGS=-ffile-prefix-map=$HOME/=" "-DCMAKE_CXX_FLAGS=-ffile-prefix-map=$HOME/="   # (no home folder in the app)
    cmake --build build/sdl3 && cmake --install build/sdl3
    ```
 4. **The menus' libraries** (RmlUi + FreeType, static; downloaded into `~/laar-build/deps/src`), for Android and the

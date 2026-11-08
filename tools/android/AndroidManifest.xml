@@ -4,8 +4,8 @@
      Landscape only, no touch controls (the AYN Thor has buttons). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.zlaa"
-    android:versionCode="1"
-    android:versionName="0.1">
+    android:versionCode="100"
+    android:versionName="0.1.0">
 
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="35" />
 

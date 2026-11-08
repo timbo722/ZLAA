@@ -627,11 +627,43 @@ void show_help(int row) {
 
 /* ---- clicks ---- */
 
+/* The last control that had focus (by id: the settings rows are made again on every change). A touch on the
+ * background focuses whatever is there (any element can take focus in RmlUi), where the d-pad and A do nothing:
+ * the next button press puts the focus back here (restore_focus), so touch and the controller can take turns. */
+Rml::ElementDocument *last_focus_doc;
+std::string last_focus_id;
+
+bool is_control(Rml::Element *e) {                      /* buttons and rows (theme.rcss: tab-index: auto) */
+    return e && e != e->GetOwnerDocument() && e->GetComputedValues().tab_index() == Rml::Style::TabIndex::Auto;
+}
+
+Rml::ElementDocument *top_doc() {                        /* the document the controller works in now */
+    if (build_doc && build_doc->IsVisible()) return build_doc;
+    if (settings_doc && settings_doc->IsVisible()) return settings_doc;
+    return showing == 2 ? pause_doc : start_doc;
+}
+
+/* After a touch left no control focused: focus the last one (or the screen's first) and say so: that press only
+ * shows where the focus is, as on a console */
+bool restore_focus() {
+    Rml::Element *f = context->GetFocusElement();
+    Rml::ElementDocument *doc = top_doc();
+    if (is_control(f) && f->GetOwnerDocument() == doc) return false;
+    Rml::Element *to = last_focus_doc == doc && !last_focus_id.empty() ? doc->GetElementById(last_focus_id) : NULL;
+    if (!to || !to->IsVisible(true))
+        to = doc->QuerySelector(doc == build_doc ? "#build-go" : doc == settings_doc ? "row" : doc == pause_doc ? "#resume" : "#play");
+    return to && to->Focus(true);
+}
+
 class Listener : public Rml::EventListener {
 public:
     void ProcessEvent(Rml::Event &event) override {
         Rml::Element *e = event.GetTargetElement();
         if (event.GetId() == Rml::EventId::Focus) {
+            if (is_control(e) && !e->GetId().empty()) {   /* (where the controller carries on) */
+                last_focus_doc = e->GetOwnerDocument();
+                last_focus_id = e->GetId();
+            }
             if (e && e->GetId() == "files-row") show_files_help("", false);
             else if (e && e->GetId() == "space-row") show_space_help();
             else show_help(row_of(e));
@@ -680,6 +712,7 @@ void key(Rml::Input::KeyIdentifier k) {
 void act(int action) {
     bool in_settings = settings_doc && settings_doc->IsVisible();
     context->ProcessMouseLeave();                        /* (buttons: only the focus is highlighted, not where a touch was) */
+    if (action <= UI_ACCEPT && restore_focus()) return;  /* (after a touch: this press finds the focus again) */
     switch (action) {
     case UI_UP: key(Rml::Input::KI_UP); break;
     case UI_DOWN: key(Rml::Input::KI_DOWN); break;

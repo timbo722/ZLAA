@@ -18,6 +18,9 @@ DESKTOP_PREFIX=${LAA_DEPS_ROOT:-$HOME/laar-build/deps/root}/usr
 build() {   # build <name> <prefix> <cmake args...>
     local name=$1 prefix=$2; shift 2
     local b=$HOME/laar-build/deps/build-$name
+    # (paths in the libraries relative to the sources: no build machine's folders in the app)
+    local map="-ffile-prefix-map=$SRC/= -ffile-prefix-map=$b/= -ffile-prefix-map=$HOME/="
+    set -- "$@" "-DCMAKE_C_FLAGS=$map" "-DCMAKE_CXX_FLAGS=$map"
     # FreeType without its optional helpers (zlib, bzip2, PNG, HarfBuzz, Brotli): plain TrueType/OpenType fonts
     cmake -S "$SRC/freetype-$FREETYPE" -B "$b/freetype" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$prefix" -DFT_DISABLE_ZLIB=ON -DFT_DISABLE_BZIP2=ON \

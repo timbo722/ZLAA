@@ -3,6 +3,12 @@
 #
 #   tools/android/build_apk.sh            -> $LAA_ANDROID/ZLAA.apk
 #
+# Signed with a debug key made once ($LAA_ANDROID/debug.keystore), or, for a release, with the key in
+# LAA_SIGN_KEYSTORE (password in the file LAA_SIGN_PASS_FILE, alias LAA_SIGN_ALIAS, default zlaa). Android installs
+# an update only when it is signed with the same key as the installed app: keep the release key (and a copy of it)
+# outside the repository, and never lose it. The version comes from CMakeLists.txt's project(VERSION): versionName
+# 0.1.0, versionCode 100 (major * 10000 + minor * 100 + patch; it must grow with every release).
+#
 # An APK is a zip file holding:
 #   AndroidManifest.xml   what the app is (binary XML, made by aapt2), and res/: its icon
 #   classes.dex           its Java code, compiled for Android's runtime (SDL's activity, our ZLAAActivity)
@@ -26,6 +32,9 @@ NDK=$(ls -d "$A"/sdk/ndk/* | head -1)
 STRIP=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
 SDL_JAVA=$(ls -d "$A"/src/SDL3-*/android-project/app/src/main/java | head -1)
 OUT=$A/apk
+VERSION=$(sed -n 's/^project(ZLAA VERSION \([0-9.]*\).*/\1/p' "$HERE/../../CMakeLists.txt")
+IFS=. read -r V1 V2 V3 <<< "$VERSION"
+VERSION_CODE=$((V1 * 10000 + V2 * 100 + V3))
 export JAVA_HOME=$JDK PATH=$JDK/bin:$PATH
 
 rm -rf "$OUT"
@@ -34,7 +43,8 @@ mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/zip/lib/arm64-v8a"
 # 1. The manifest and the app icon (res/android: tools/make_icon.py) -> a bare APK (binary XML + the icon)
 "$BT/aapt2" compile --dir "$HERE/../../res/android" -o "$OUT/res.zip"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM" --manifest "$HERE/AndroidManifest.xml" -R "$OUT/res.zip" \
-    --min-sdk-version 30 --target-sdk-version 35
+    --min-sdk-version 30 --target-sdk-version 35 --version-name "$VERSION" --version-code "$VERSION_CODE" \
+    --replace-version
 
 # 2. Java: SDL's activity and helpers, our ZLAAActivity (java/) -> .class files -> classes.dex
 find "$SDL_JAVA" "$HERE/java" -name '*.java' > "$OUT/java_files.txt"
@@ -55,6 +65,15 @@ cp "$TC"/lib/*.so "$OUT/zip/lib/arm64-v8a/"
 mkdir -p "$OUT/zip/assets/builder"
 cp "$TC/builder.tar" "$TC/builder.id" "$OUT/zip/assets/builder/"
 
+# 3c. No build machine's folders in what we built (they name the person who built it): the builds map them away
+#     (-ffile-prefix-map: CMakeLists.txt, tools/build_ui_deps.sh, SDL3 in tools/android/README.md)
+for f in "$OUT/zip/lib/arm64-v8a/libmain.so" "$OUT/zip/lib/arm64-v8a/libSDL3.so" "$OUT/zip/lib/arm64-v8a/libpylaunch.so"; do
+    if grep -q -a -F "$HOME/" "$f"; then
+        echo "$(basename "$f") holds paths under $HOME (e.g. $(strings -a "$f" | grep -F -m1 "$HOME/")): rebuild it with -ffile-prefix-map" >&2
+        exit 1
+    fi
+done
+
 # 4. Into the zip: dex + libraries + the menus' files
 cp "$OUT/base.apk" "$OUT/unsigned.apk"
 cp "$OUT/dex/classes.dex" "$OUT/zip/"
@@ -70,14 +89,21 @@ with zipfile.ZipFile(apk, "a", zipfile.ZIP_DEFLATED) as z:
             z.write(path, os.path.relpath(path, root))
 EOF
 
-# 5. Align (uncompressed data on 4-byte boundaries, as Android expects) and sign with a debug
-#    key made once (a key of your own; it only proves the next build comes from the same place)
-KEY=$A/debug.keystore
-if [ ! -f "$KEY" ]; then
-    keytool -genkeypair -keystore "$KEY" -storepass android -keypass android -alias zlaa \
-        -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ZLAA debug" > /dev/null 2>&1
+# 5. Align (uncompressed data on 4-byte boundaries, as Android expects) and sign: the release key when one is given,
+#    else a debug key made once (a key of your own; it only proves the next build comes from the same place)
+if [ -n "${LAA_SIGN_KEYSTORE:-}" ]; then
+    KEY=$LAA_SIGN_KEYSTORE
+    PASS=(--ks-key-alias "${LAA_SIGN_ALIAS:-zlaa}" --ks-pass "file:$LAA_SIGN_PASS_FILE")   # (key password = the keystore's)
+else
+    KEY=$A/debug.keystore
+    if [ ! -f "$KEY" ]; then
+        keytool -genkeypair -keystore "$KEY" -storepass android -keypass android -alias zlaa \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ZLAA debug" > /dev/null 2>&1
+    fi
+    PASS=(--ks-pass pass:android --key-pass pass:android)
 fi
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
-"$BT/apksigner" sign --ks "$KEY" --ks-pass pass:android --key-pass pass:android \
-    --out "$A/ZLAA.apk" "$OUT/aligned.apk"
+"$BT/apksigner" sign --ks "$KEY" "${PASS[@]}" --out "$A/ZLAA.apk" "$OUT/aligned.apk"
+"$BT/apksigner" verify "$A/ZLAA.apk"
+echo "ZLAA $VERSION (versionCode $VERSION_CODE), signed with $KEY"
 ls -la "$A/ZLAA.apk"

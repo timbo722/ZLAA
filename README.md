@@ -23,9 +23,8 @@ emulation**: no instruction is interpreted while the game runs.
 > - Linux x86-64 (desktop build): a development tool, not a way to play.
 
 > [!WARNING]
-> **Early and experimental. There is no release yet.** Setting the game up currently needs a PC: the game's code is
-> recompiled and built there from your own game files, then copied to the device with adb (see
-> [Setup](#setup-for-now)). Building it on the device itself, from the start screen, is the next big step.
+> **Early and experimental.** Everything happens on the device: you choose your own game files, the app builds the
+> game's code from them once (about an hour), then you play. No PC is needed. Only the AYN Thor has been tested.
 
 > [!NOTE]
 > **No game files are included.** ZLAA needs your own legally obtained copy of the extracted game files of
@@ -53,7 +52,8 @@ and the game's own dynamic resolution. Further into the game is still largely un
 
 ### Known issues
 
-- Rarely (about 1 run in 30 in testing) the GPU hangs for a moment on the beach, with glitched frames.
+- Rarely (about 1 run in 30 in testing: the beach, a cave in the Mysterious Forest) the GPU hangs for a moment,
+  with a short freeze and glitched frames. The game carries on.
 - Some stutter in a few places (the beach), and short hitches the first time new effects appear while their
   shaders are prepared.
 - A slight, fast flicker on edges while walking: the game's own aliasing (it shows on a Switch too).
@@ -78,16 +78,18 @@ and the game's own dynamic resolution. Further into the game is still largely un
 
 ## Setup
 
-There is no release yet: build the APK from source ([Building from source](#building-from-source)). On the device:
+Download `ZLAA.apk` from the [Releases](../../releases) page and install it (Android asks you to allow installing
+apps from that source). Then, on the device:
 
 1. Copy your own game's `exefs` and `romfs` folders (not provided here) into one folder on the device, for example
    `LADump/1.0.0/` in its main storage.
 2. Open ZLAA, choose **Game Files** and allow **All files access** when Android asks (the 6 GB are read where
    they are, never copied), then choose that folder.
-3. Choose **Build Game**. The app translates your copy's code and compiles it for the device, once. For now this
-   is slow: about an hour and three quarters on the AYN Thor, because it keeps the device only warm (the board
-   around 45 C), pausing whenever it gets warmer. Making it faster is being worked on. Keep the app open, ideally
-   plugged in; if it closes, the build carries on from where it stopped.
+3. Choose **Build Game**. The app translates your copy's code and compiles it for the device, once. On the AYN
+   Thor this takes about 55 minutes at the default speed, **Balanced** (the board around 47 C). **Cool** keeps the
+   device cooler and takes about twice as long; **Fast** lets it get warmer. Whatever the speed, it pauses whenever
+   the device gets too warm. Keep the app open, ideally plugged in; if it closes, the build carries on from where it
+   stopped. Afterwards, **Settings > Interface > Free Up Space** removes what the build left behind.
 4. Choose **Play**.
 
 The game code made in step 3 stays on your device: it is built from your own files and is never shared.
@@ -124,6 +126,12 @@ writes its own app folder).
 The game's code (about 150,000 functions) is translated into C and compiled for your device: a lot of work for a
 phone. It can't be downloaded ready-made, because that would mean distributing Nintendo's code. It happens once
 per game version; an update of ZLAA that changes how the code is translated asks for it again.
+
+#### Can I build the game's code on a PC instead?
+Not with a tool meant for players, for now. Developers can build it with the steps in
+[Building from source](#building-from-source) ([tools/android/README.md](tools/android/README.md) for Android) and
+copy the `libgame-<build id>.so` into `/sdcard/Android/data/io.github.zlaa/files/game/`: the app picks it up when it
+starts.
 
 #### Where are my saves?
 In the app's folder, `/sdcard/Android/data/io.github.zlaa/files/save/`. Back it up before uninstalling the app:
@@ -196,7 +204,8 @@ each; the fuzzer checks single instructions bit for bit against [Unicorn](https:
 - [SPIR-V headers](https://github.com/KhronosGroup/SPIRV-Headers) by the Khronos Group - `third_party/spirv` (MIT-style license, in the files)
 - [Capstone](https://www.capstone-engine.org), [Unicorn](https://www.unicorn-engine.org), [pyelftools](https://github.com/eliben/pyelftools),
   [python-lz4](https://github.com/python-lz4/python-lz4) - used by the recompiler and its tests
-- [Zig](https://ziglang.org) - its `zig cc` builds the ARM64 test programs (and, planned, the game's code on the device)
+- [Zig](https://ziglang.org) - its `zig cc` builds the game's code on the device, and the ARM64 test programs (MIT)
+- [Python](https://www.python.org) - python.org's Android package runs the recompiler on the device (PSF License)
 - [libvpx](https://chromium.googlesource.com/webm/libvpx) - movies on the desktop build (BSD)
 
 **Projects referenced, and special thanks**

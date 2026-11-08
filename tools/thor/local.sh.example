@@ -2,3 +2,6 @@
 LAA_ADB=~/laar-build/android/win/platform-tools/adb.exe     # WSL: the Windows adb.exe (USB); elsewhere just adb
 LAA_ADB_SERIAL=                                             # the device's serial (adb devices), when several are connected
 LAA_HOST_DIR=/mnt/c/Users/<you>/Documents/ZLAA          # with adb.exe: a folder on a Windows drive
+# The release signing key (tools/android/build_apk.sh; without these: a debug key). Keep it outside the repository.
+# export LAA_SIGN_KEYSTORE=~/laar-build/keys/zlaa-release.p12
+# export LAA_SIGN_PASS_FILE=~/laar-build/keys/zlaa-release.pass
