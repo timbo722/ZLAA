@@ -4,7 +4,7 @@
 #   tools/android/build_apk.sh            -> $LAA_ANDROID/LAARecomp.apk
 #
 # An APK is a zip file holding:
-#   AndroidManifest.xml   what the app is (binary XML, made by aapt2)
+#   AndroidManifest.xml   what the app is (binary XML, made by aapt2), and res/: its icon
 #   classes.dex           its Java code, compiled for Android's runtime (SDL's activity, our LAAActivity)
 #   lib/arm64-v8a/*.so    native libraries: SDL3 and libmain.so (our runtime; the game itself is
 #                         a library built from your own dump, pushed by tools/thor/deploy.sh)
@@ -31,8 +31,9 @@ export JAVA_HOME=$JDK PATH=$JDK/bin:$PATH
 rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/zip/lib/arm64-v8a"
 
-# 1. The manifest -> a bare APK (binary XML; no other resources)
-"$BT/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM" --manifest "$HERE/AndroidManifest.xml" \
+# 1. The manifest and the app icon (res/android: tools/make_icon.py) -> a bare APK (binary XML + the icon)
+"$BT/aapt2" compile --dir "$HERE/../../res/android" -o "$OUT/res.zip"
+"$BT/aapt2" link -o "$OUT/base.apk" -I "$PLATFORM" --manifest "$HERE/AndroidManifest.xml" -R "$OUT/res.zip" \
     --min-sdk-version 30 --target-sdk-version 35
 
 # 2. Java: SDL's activity and helpers, our LAAActivity (java/) -> .class files -> classes.dex

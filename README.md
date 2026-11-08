@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" alt="LAARecomp's icon: a glowing egg on a dark mountain at night"></p>
+
 # LAARecomp
 
 > [!IMPORTANT]
