@@ -152,20 +152,4 @@ ZLAA is an unofficial fan project with no connection to Nintendo, and Nintendo h
 
 # License
 
-ZLAA's own code is free to use under the [MIT License](LICENSE). Code from other projects keeps its own license; their notices come with the app (`res/licenses`). None of this gives any rights to Nintendo's game itself.
-
-### Third-party code in the app
-
-The Android app carries these components. Each one's source, at the version inside the app, is linked below:
-
-| Component | Version | License | Source code |
-| --- | --- | --- | --- |
-| SDL 3 | 3.4.2 | zlib | https://github.com/libsdl-org/SDL/releases/tag/release-3.4.2 |
-| RmlUi | 6.3 | MIT | https://github.com/mikke89/RmlUi/releases/tag/6.3 |
-| FreeType | 2.14.3 | FreeType License | https://gitlab.freedesktop.org/freetype/freetype/-/tags/VER-2-14-3 |
-| Python, python.org's Android package (runs the recompiler) | 3.14.10 | PSF License | https://www.python.org/downloads/release/python-31410/ |
-| Zig (compiles the game; contains LLVM, Clang, LLD and musl's C headers) | 0.14.1 | MIT; LLVM: Apache 2.0 with LLVM exceptions; musl: MIT | https://ziglang.org/download/0.14.1/zig-0.14.1.tar.xz |
-| Nunito font | 3.602 | SIL OFL 1.1 | https://github.com/googlefonts/nunito |
-| Material Symbols Rounded font (subset) | 2.978 | Apache 2.0 | https://github.com/google/material-design-icons |
-
-How each one is fetched and built is in `tools/build_ui_deps.sh`, `tools/android/builder/make_toolchain.py`, `tools/make_fonts.py` and [tools/android/README.md](tools/android/README.md) (SDL 3).
+ZLAA's own code is free to use under the [MIT License](LICENSE). Code from other projects keeps its own license. None of this gives any rights to Nintendo's game itself.
