@@ -232,6 +232,19 @@ about-version {
     color: var(--muted);
 }
 
+about row {
+    margin: var(--gap-md) 0 var(--gap-xs) 0;
+}
+
+cards {                                                   /* (two cards side by side: the page fits without scrolling) */
+    display: flex;
+    gap: var(--gap-md);
+}
+
+cards card {
+    flex: 1 1 0;
+}
+
 card {
     display: block;
     margin-top: var(--gap-md);

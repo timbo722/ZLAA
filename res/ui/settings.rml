@@ -15,7 +15,7 @@
             <pane id="rows" class="rows" />
             <pane id="help" />
         </content>
-        <footer><hints><span><key-cap class="l">L</key-cap><key-cap class="r">R</key-cap>Page</span><span><key-cap>A</key-cap>Change</span><span><key-cap>B</key-cap>Back</span></hints></footer>
+        <footer><hints><span><key-cap class="l">L</key-cap><key-cap class="r">R</key-cap>Page</span><span><key-cap>A</key-cap><hint-text id="hint-a">Change</hint-text></span><span><key-cap>B</key-cap>Back</span></hints></footer>
     </window>
 </body>
 </rml>

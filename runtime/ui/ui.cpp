@@ -31,9 +31,15 @@ extern "C" {
 #ifndef LAA_VERSION
 #define LAA_VERSION "dev"
 #endif
+#if __has_include("laa_build_info.h")
+#include "laa_build_info.h"                              /* (LAA_COMMIT, made at every build) */
+#endif
 #ifndef LAA_COMMIT
 #define LAA_COMMIT "unknown"
 #endif
+
+#define LAA_PROJECT_URL "https://github.com/timbo722/ZLAA"
+#define LAA_PROJECT_URL_SHORT "github.com/timbo722/ZLAA"
 
 namespace {
 
@@ -441,29 +447,38 @@ void build_settings() {
     if (tab == "Interface" && showing == 1)
         rows += "<row id=\"space-row\"><key>Free Up Space</key><value><span>" + esc(space_label()) + "</span></value></row>";
 #endif
-    if (tab == "About")
+    if (tab == "About") {
+        /* the game files as the start screen says them ("Ready · Link's Awakening 1.0.0"): what a bug report needs */
+        std::string game = start_doc->GetElementById("game-status-label")->GetInnerRML() + " \xC2\xB7 " +
+                           start_doc->GetElementById("game-version")->GetInnerRML();
         rows = "<about>"
                "<about-head><about-title>ZLAA</about-title><about-version>Version " LAA_VERSION
-               " \xC2\xB7 " LAA_COMMIT "</about-version></about-head>"
+               " \xC2\xB7 build " LAA_COMMIT "</about-version></about-head>"
                "<p>A static recompilation of The Legend of Zelda: Link's Awakening (Nintendo Switch, 2019) for "
-               "Android. The game's code was translated ahead of time into native code for this device, and the "
-               "Switch's system and graphics are rebuilt around it. It is not an emulator.</p>"
-               "<card><heading>Your game, your files</heading>"
-               "<p>Nothing of the game comes with this app: no code, art, music or fonts. It runs only from the "
-               "files of your own copy; the game's code is built from them, never shipped.</p></card>"
+               "Android. The game's code is translated into native code for this device, and the Switch's system and "
+               "graphics are rebuilt around it. It is not an emulator. Nothing of the game comes with this app: it "
+               "runs only from the files of your own copy.</p>"
+               "<row id=\"link-row\"><key>Updates and Bug Reports</key><value><span>" LAA_PROJECT_URL_SHORT
+               "</span><icon class=\"right\"/></value></row>"
+               "<p class=\"hint\">Your game files: " + game + "</p>"
+               "<cards>"
                "<card><heading>Made with</heading>"
-               "<p>SDL 3 (zlib) \xC2\xB7 RmlUi (MIT) \xC2\xB7 FreeType (FTL) \xC2\xB7 Nunito (SIL OFL) \xC2\xB7 "
-               "Material Symbols (Apache 2.0)</p></card>"
+               "<p>SDL 3 (zlib) \xC2\xB7 RmlUi (MIT) \xC2\xB7 FreeType (FTL) \xC2\xB7 Python (PSF) \xC2\xB7 "
+               "Zig (MIT) \xC2\xB7 Nunito (SIL OFL) \xC2\xB7 Material Symbols (Apache 2.0)</p></card>"
                "<card><heading>Thanks</heading>"
-               "<p>Ryujinx (its shader decoder was the reference for ours), LAS Recomp and Dusklight (ideas and "
-               "inspiration), and the Switchbrew wiki.</p></card>"
-               "<p class=\"hint legal\">A fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda "
-               "and Link's Awakening are trademarks of Nintendo.</p>"
+               "<p>Ryujinx (the reference for our shader translator), LAS Recomp and its Android fork, Dusklight "
+               "(the menus' inspiration), N64: Recompiled, and the Switchbrew wiki.</p></card>"
+               "</cards>"
+               "<p class=\"hint legal\">Open source under the MIT License. Made almost entirely with AI (Claude), "
+               "directed and tested by a human. A fan project, not affiliated with or endorsed by Nintendo. The "
+               "Legend of Zelda and Link's Awakening are trademarks of Nintendo.</p>"
                "</about>";
+    }
     settings_doc->GetElementById("tab-bar")->SetInnerRML(tabs);
     settings_doc->GetElementById("rows")->SetInnerRML(rows);
     settings_doc->GetElementById("help")->SetInnerRML(tab == "About" ? "" : "<p class=\"hint\">Choose a setting to see what it does.</p>");
     settings_doc->GetElementById("window")->SetClass("about", tab == "About");   /* (the About page has no help pane) */
+    settings_doc->GetElementById("hint-a")->SetInnerRML(tab == "About" ? "Open" : "Change");
 }
 
 void open_settings() {
@@ -677,6 +692,7 @@ public:
             if (id == "play" && needs_files) { choose_game_files(); return; }
             if (id == "files-row") { choose_game_files(); return; }
             if (id == "space-row") { free_up_space(); return; }
+            if (id == "link-row") { SDL_OpenURL(LAA_PROJECT_URL); return; }
             if (id == "build-go") { build_go(); return; }
             if (id == "build-speed") {                    /* Cool -> Balanced -> Fast -> Cool */
                 config["LAA_BUILD_SPEED"] = std::to_string((build_speed() + 1) % 3);
