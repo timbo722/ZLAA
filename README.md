@@ -48,11 +48,11 @@ your romfs ───────────────────────
 
 ## Where it stands
 
-ZLAA is young. The first areas of the game (Mabe Village, Toronbo Shores, Mysterious Forest, etc.) play at a steady 60 fps at 720p on the AYN Thor, with sound and its own dynamic resolution. Beyond that, little has been played yet, so expect surprises. If something breaks, please [open an issue](../../issues) and include your device, your game version and the app's `log.txt` (in `Android/data/io.github.zlaa/files/`). I'm currently playing through and will patch out any bugs I come along.
+ZLAA is young. The first areas of the game (Mabe Village, Toronbo Shores, Mysterious Forest, etc.) play at a steady 60 fps at 720p on the AYN Thor, with sound and the game's own dynamic resolution. Beyond that, little has been played yet, so expect surprises. If something breaks, please [open an issue](../../issues) and include your device, your game version and the app's `log.txt` (in `Android/data/io.github.zlaa/files/`). I'm currently playing through and will patch out any bugs I come across.
 
 ### Rough edges
 
-- Once in a while (about 3% of the time), the GPU stalls: a short freeze and a few broken frames, then the game carries on.
+- Once in a while (about 1 in 30 play sessions), the GPU stalls: a short freeze and a few broken frames, then the game carries on.
 - Short hitches the first time a new effect appears, while its shader is prepared, and some stutter on the beach.
 - Versions 1.0.1 and 1.1.0 pass tests, but only 1.0.0 has had long play sessions.
 
@@ -152,4 +152,4 @@ ZLAA is an unofficial fan project with no connection to Nintendo, and Nintendo h
 
 # License
 
-ZLAA's own code is free to use under the [MIT License](LICENSE). Code from other projects keeps its own license. None of this gives any rights to Nintendo's game itself.
+ZLAA's own code is free to use under the [MIT License](LICENSE). Code from other projects keeps its own license.
