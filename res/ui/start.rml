@@ -31,8 +31,9 @@
         <sparkle class="t2" style="left: 82.4%; top: 87%; width: 36dp;" />
     </sea>
     <hero class="rise d0">
-        <eyebrow><studio-name>ZLAA</studio-name> presents</eyebrow>
+        <series-title>The Legend of Zelda</series-title>
         <game-title>Link's Awakening</game-title>
+        <eyebrow><studio-name>ZLAA</studio-name></eyebrow>
     </hero>
     <menu-list>
         <button id="play" class="rise d1"><icon class="play" />Play</button>

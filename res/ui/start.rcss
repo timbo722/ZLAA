@@ -100,7 +100,7 @@ sparkle.t3 { animation: 1.7s sine-in-out infinite alternate glint; }
     to { opacity: 0.55; }
 }
 
-/* the title: a small line above it, as a film's opening says who presents it */
+/* the title: the game's full name, ZLAA small below it */
 hero {
     position: absolute;
     left: 96dp;
@@ -112,13 +112,24 @@ eyebrow {
     font-size: 17dp;
     color: var(--muted);
     letter-spacing: 1dp;
-    margin-bottom: var(--gap-xs);
+    margin-top: var(--gap-sm);
 }
 
 studio-name {
     font-weight: 800;
     color: var(--gold);
     letter-spacing: 2dp;
+}
+
+/* the full name: the series small, spaced, gold above the game's own */
+series-title {
+    display: block;
+    font-weight: 800;
+    font-size: 22dp;
+    letter-spacing: 4dp;
+    text-transform: uppercase;
+    color: var(--gold);
+    font-effect: shadow(0dp 3dp #000000);
 }
 
 game-title {
