@@ -1,4 +1,4 @@
-# LAARecomp: builds the recompiled game code + runtime.
+# ZLAA: builds the recompiled game code + runtime.
 #
 #   python recompiler/recomp.py <exefs dir> -o ~/laar-build/gen --no-comments
 #   cmake -S . -B ~/laar-build/host -G Ninja -DGAME_GEN_DIR=$HOME/laar-build/gen
@@ -9,7 +9,7 @@
 # program (laa_host, or libmain.so on Android) opens at start-up (runtime/game_lib.c): no
 # build of the program itself contains any of the game's code.
 cmake_minimum_required(VERSION 3.20)
-project(LAARecomp VERSION 0.1.0 LANGUAGES C)
+project(ZLAA VERSION 0.1.0 LANGUAGES C)
 
 set(GAME_GEN_DIR "" CACHE PATH "Folder written by recomp.py -o (chunked generated C)")
 if(NOT EXISTS "${GAME_GEN_DIR}/sources.cmake")
@@ -146,7 +146,7 @@ if(SDL3_FOUND AND RmlUi_FOUND)
     target_compile_definitions(laa_ui PRIVATE LAA_VERSION="${PROJECT_VERSION}" LAA_COMMIT="${LAA_COMMIT}")
     target_compile_options(laa_ui PRIVATE -Wall -fno-exceptions -fno-rtti)
     set(LAA_UI laa_ui)
-    message(STATUS "Menus: RmlUi ${RmlUi_VERSION} (LAARecomp ${PROJECT_VERSION}, ${LAA_COMMIT})")
+    message(STATUS "Menus: RmlUi ${RmlUi_VERSION} (ZLAA ${PROJECT_VERSION}, ${LAA_COMMIT})")
 else()
     message(STATUS "Menus: off (no RmlUi: tools/build_ui_deps.sh)")
 endif()

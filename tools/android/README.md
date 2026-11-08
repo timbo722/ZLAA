@@ -1,4 +1,4 @@
-# Building LAARecomp for Android
+# Building ZLAA for Android
 
 Everything lives in `$LAA_ANDROID` (default `~/laar-build/android`), outside the repo. Nothing is
 installed system-wide.
@@ -31,7 +31,7 @@ cmake -S . -B $LAA_ANDROID/build/game -G Ninja -DGAME_GEN_DIR=$HOME/laar-build/g
       -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
       -DANDROID_PLATFORM=android-30 -DCMAKE_PREFIX_PATH=$LAA_ANDROID/prefix -DCMAKE_FIND_ROOT_PATH=$LAA_ANDROID/prefix
 cmake --build $LAA_ANDROID/build/game --target main game # -> libmain.so, libgame-<main build id>.so
-tools/android/build_apk.sh                                 # -> $LAA_ANDROID/LAARecomp.apk (no game code in it)
+tools/android/build_apk.sh                                 # -> $LAA_ANDROID/ZLAA.apk (no game code in it)
 ```
 
 ## On the device
@@ -39,13 +39,13 @@ tools/android/build_apk.sh                                 # -> $LAA_ANDROID/LAA
 The app reads everything from its own folder, `/sdcard/Android/data/io.github.laarecomp/files/`
 (no storage permission needed; adb can write there):
 ```
-adb install -r $LAA_ANDROID/LAARecomp.apk
+adb install -r $LAA_ANDROID/ZLAA.apk
 adb push <your dump>/exefs /sdcard/Android/data/io.github.laarecomp/files/exefs
 adb push <your dump>/romfs /sdcard/Android/data/io.github.laarecomp/files/romfs
 adb shell mkdir -p /sdcard/Android/data/io.github.laarecomp/files/game
 adb push libgame-<id>.so /sdcard/Android/data/io.github.laarecomp/files/game/   # (strip --strip-debug first: ~150 MB)
 adb shell am start -n io.github.laarecomp/.LAAActivity
-adb logcat -s LAARecomp            # everything the runtime prints (also files/log.txt)
+adb logcat -s ZLAA            # everything the runtime prints (also files/log.txt)
 ```
 Options: put `LAA_*=value` lines in `files/env.txt` (e.g. `LAA_INPUT_SCRIPT=...`, `LAA_SCREENSHOT=/sdcard/Android/data/io.github.laarecomp/files/shots`).
 The dump comes from your own Switch and stays on your own devices: never in this repo or a release.

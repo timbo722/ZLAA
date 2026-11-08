@@ -615,7 +615,7 @@ def identify(build_id):
 
 
 def write_report(path, img, fs, stats, seconds):
-    lines = ["LAARecomp recompiler report", "=" * 40, ""]
+    lines = ["ZLAA recompiler report", "=" * 40, ""]
     lines.append("Modules:")
     for m in img.modules:
         bid = m.build_id.rstrip(bytes(1)).hex()

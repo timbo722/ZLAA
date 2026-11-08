@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- LAARecomp's Android app. The activity is SDL's (org.libsdl.app.SDLActivity, as our LAAActivity, which adds a
+<!-- ZLAA's Android app. The activity is SDL's (org.libsdl.app.SDLActivity, as our LAAActivity, which adds a
      folder picker): it creates the window and loads libSDL3.so and libmain.so (our runtime), then calls main().
      Landscape only, no touch controls (the AYN Thor has buttons). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -18,7 +18,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
-        android:label="LAARecomp"
+        android:label="ZLAA"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:hasCode="true"

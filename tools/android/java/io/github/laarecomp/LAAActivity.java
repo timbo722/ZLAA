@@ -15,7 +15,7 @@ import org.libsdl.app.SDLActivity;
  * The native side (host/main.c) calls these static methods through JNI and polls takePickedFolder().
  */
 public class LAAActivity extends SDLActivity {
-    private static final String TAG = "LAARecomp";
+    private static final String TAG = "ZLAA";
     private static final int PICK_FOLDER = 0x4C41;
 
     /** The folder chosen: a file path; "" when the picker was cancelled or the folder can't be read as a path;

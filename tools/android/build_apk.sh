@@ -1,7 +1,7 @@
 #!/bin/bash
-# build_apk.sh - package LAARecomp as an Android app (APK), step by step, without Gradle.
+# build_apk.sh - package ZLAA as an Android app (APK), step by step, without Gradle.
 #
-#   tools/android/build_apk.sh            -> $LAA_ANDROID/LAARecomp.apk
+#   tools/android/build_apk.sh            -> $LAA_ANDROID/ZLAA.apk
 #
 # An APK is a zip file holding:
 #   AndroidManifest.xml   what the app is (binary XML, made by aapt2), and res/: its icon
@@ -75,9 +75,9 @@ EOF
 KEY=$A/debug.keystore
 if [ ! -f "$KEY" ]; then
     keytool -genkeypair -keystore "$KEY" -storepass android -keypass android -alias laarecomp \
-        -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LAARecomp debug" > /dev/null 2>&1
+        -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=ZLAA debug" > /dev/null 2>&1
 fi
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 "$BT/apksigner" sign --ks "$KEY" --ks-pass pass:android --key-pass pass:android \
-    --out "$A/LAARecomp.apk" "$OUT/aligned.apk"
-ls -la "$A/LAARecomp.apk"
+    --out "$A/ZLAA.apk" "$OUT/aligned.apk"
+ls -la "$A/ZLAA.apk"

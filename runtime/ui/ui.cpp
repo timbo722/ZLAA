@@ -70,7 +70,7 @@ const std::vector<Setting> kSettings = {
         { "150%", "4.5" }, { "200%", "6" } }, 4,
       "The volume of the whole game." },
     { "Interface", "Skip Main Menu", "LAA_SKIP_MENU", { { "Off", NULL }, { "On", "1" } }, 0,
-      "Start the game right away when opening LAARecomp. Settings stay in the pause menu." },
+      "Start the game right away when opening ZLAA. Settings stay in the pause menu." },
     { "Interface", "Show Shader Compilation", "LAA_SHADER_OSD", { { "Off", NULL }, { "On", "1" } }, 0,
       "Show an overlay while shaders are being compiled for your device." },
 };
@@ -293,7 +293,7 @@ void use_game_folder(const std::string &dir) {
 void choose_game_files() {
     if (!host_files_access()) {
         picking = 1;
-        note("Allow \u201cAll files access\u201d for LAARecomp in the page that opens, then come back: it reads your game "
+        note("Allow \u201cAll files access\u201d for ZLAA in the page that opens, then come back: it reads your game "
              "files where they are.", false);
         host_request_files_access();
         return;
@@ -438,7 +438,7 @@ void build_settings() {
 #endif
     if (tab == "About")
         rows = "<about>"
-               "<about-head><about-title>LAARecomp</about-title><about-version>Version " LAA_VERSION
+               "<about-head><about-title>ZLAA</about-title><about-version>Version " LAA_VERSION
                " \xC2\xB7 " LAA_COMMIT "</about-version></about-head>"
                "<p>A static recompilation of The Legend of Zelda: Link's Awakening (Nintendo Switch, 2019) for "
                "Android. The game's code was translated ahead of time into native code for this device, and the "
@@ -587,7 +587,7 @@ void free_up_space() {
 
 void show_space_help() {
     settings_doc->GetElementById("help")->SetInnerRML(
-        "<heading>Free Up Space</heading><p>Removes what LAARecomp no longer needs: what is left of a finished or "
+        "<heading>Free Up Space</heading><p>Removes what ZLAA no longer needs: what is left of a finished or "
         "stopped build, the unpacked build tools (unpacked again when needed), and game code from older versions of "
         "the app. Your saves and the game code in use are kept.</p>");
 }

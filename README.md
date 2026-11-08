@@ -1,6 +1,6 @@
-<p align="center"><img src="docs/icon.png" width="128" alt="LAARecomp's icon: a glowing egg on a dark mountain at night"></p>
+<p align="center"><img src="docs/icon.png" width="128" alt="ZLAA's icon: a glowing egg on a dark mountain at night"></p>
 
-# LAARecomp
+# ZLAA
 
 > [!IMPORTANT]
 > **This project was made almost exclusively with AI.** Nearly all of the code, tooling, reverse engineering and
@@ -10,7 +10,7 @@
 > of AI or don't trust code written by AI, that is your right; you may simply ignore this project and its code.
 > As with anything on the internet, you run the code at your own discretion.
 
-**LAARecomp** is a from-scratch static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch,
+**ZLAA** is a from-scratch static recompilation of *The Legend of Zelda: Link's Awakening* (Nintendo Switch,
 2019) for **Android**. The game's ARM64 code is translated into C ahead of time and compiled into a native library
 for the device; a runtime written for this project stands in for the Switch's operating system (Horizon), and its
 graphics API (NVN) is reimplemented on Vulkan, with the game's GPU shaders translated to SPIR-V. **This is not
@@ -28,7 +28,7 @@ emulation**: no instruction is interpreted while the game runs.
 > [Setup](#setup-for-now)). Building it on the device itself, from the start screen, is the next big step.
 
 > [!NOTE]
-> **No game files are included.** LAARecomp needs your own legally obtained copy of the extracted game files of
+> **No game files are included.** ZLAA needs your own legally obtained copy of the extracted game files of
 > *Link's Awakening* **v1.0.0, v1.0.1 or v1.1.0**: the `exefs` and `romfs` folders. Instructions on how to obtain
 > these files will **NOT** be provided. No game code, assets or fonts are included in this repository or in any
 > build, and you are never asked for keys or firmware.
@@ -82,7 +82,7 @@ There is no release yet: build the APK from source ([Building from source](#buil
 
 1. Copy your own game's `exefs` and `romfs` folders (not provided here) into one folder on the device, for example
    `LADump/1.0.0/` in its main storage.
-2. Open LAARecomp, choose **Game Files** and allow **All files access** when Android asks (the 6 GB are read where
+2. Open ZLAA, choose **Game Files** and allow **All files access** when Android asks (the 6 GB are read where
    they are, never copied), then choose that folder.
 3. Choose **Build Game**. The app translates your copy's code and compiles it for the device, once. For now this
    is slow: about an hour and three quarters on the AYN Thor, because it keeps the device only warm (the board
@@ -106,7 +106,7 @@ and the runtime reimplements the parts of the Switch the game talks to (its OS s
 
 #### How is this related to LAS Recomp?
 [LAS Recomp](https://github.com/peiikai/LASRecomp) is an existing recompilation of the same game for Windows,
-macOS and Linux, with its own Android fork. LAARecomp is a separate project written from scratch for Android, mostly
+macOS and Linux, with its own Android fork. ZLAA is a separate project written from scratch for Android, mostly
 to learn how it all works; LAS Recomp was a reference for facts (file layouts, behaviours) when stuck. No code was
 copied from it.
 
@@ -123,7 +123,7 @@ writes its own app folder).
 #### Why does Build Game take so long, and why must it run on my device?
 The game's code (about 150,000 functions) is translated into C and compiled for your device: a lot of work for a
 phone. It can't be downloaded ready-made, because that would mean distributing Nintendo's code. It happens once
-per game version; an update of LAARecomp that changes how the code is translated asks for it again.
+per game version; an update of ZLAA that changes how the code is translated asks for it again.
 
 #### Where are my saves?
 In the app's folder, `/sdcard/Android/data/io.github.laarecomp/files/save/`. Back it up before uninstalling the app:
@@ -216,12 +216,12 @@ each; the fuzzer checks single instructions bit for bit against [Unicorn](https:
 
 ## Legal
 
-LAARecomp is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
+ZLAA is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *The Legend of Zelda*
 and *Link's Awakening* are trademarks of Nintendo. No game files, game code, assets or fonts are included - not in
 this repository and not in any build. You must provide your own legally obtained copy of the game files to play.
 
 ## License
 
-LAARecomp's own code (the recompiler, the runtime, the tools) is open source under the [MIT License](LICENSE).
+ZLAA's own code (the recompiler, the runtime, the tools) is open source under the [MIT License](LICENSE).
 Third-party components keep their own licenses, listed in [THIRD_PARTY.md](THIRD_PARTY.md). The license covers
-LAARecomp's code only - it grants nothing for Nintendo's game, which you must supply yourself.
+ZLAA's code only - it grants nothing for Nintendo's game, which you must supply yourself.

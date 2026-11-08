@@ -1,5 +1,5 @@
 """
-make_icon.py - LAARecomp's app icon, drawn from plain shapes (none of the game's art), in the start screen's look: a
+make_icon.py - ZLAA's app icon, drawn from plain shapes (none of the game's art), in the start screen's look: a
 night sky, a dark mountain with a gold edge, a glowing egg on its top.
 
     python tools/make_icon.py res/android docs/icon.png        (Pillow, NumPy)

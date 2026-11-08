@@ -9,6 +9,6 @@ B=~/laar-build/android/build/game
 out=$(cmake --build $B --target main game 2>&1) || { echo "$out" | grep -E "error|FAILED" | head; exit 1; }
 echo "$out" | grep -E "warning:" | head -5 || true
 tools/android/build_apk.sh > ${LAA_OUT:-$HOME/laar-build/thor-out}/apk.log 2>&1 || { tail -5 ${LAA_OUT:-$HOME/laar-build/thor-out}/apk.log; exit 1; }
-mkdir -p $X/apk; cp ~/laar-build/android/LAARecomp.apk $X/apk/
-$W install -r "$(xa apk/LAARecomp.apk)" | tail -1
+mkdir -p $X/apk; cp ~/laar-build/android/ZLAA.apk $X/apk/
+$W install -r "$(xa apk/ZLAA.apk)" | tail -1
 tools/thor/push_game.sh $B      # the game library (from your own dump; never in the APK)

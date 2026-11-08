@@ -79,7 +79,7 @@ static int create_instance(void) {
     const char *layers[1];
     uint32_t nlayers = 0;
     if (getenv("LAA_VK_VALIDATION")) layers[nlayers++] = "VK_LAYER_KHRONOS_validation";
-    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "LAARecomp",
+    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "ZLAA",
                               .apiVersion = VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                 .enabledExtensionCount = n, .ppEnabledExtensionNames = sdl_ext,

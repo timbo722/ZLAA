@@ -8,7 +8,7 @@
  * /storage/emulated/0/Android/data/<package>/files ("the app folder", adb can push to it):
  *   exefs/, romfs/   the player's own dump
  *   env.txt          KEY=VALUE lines, set as environment variables (LAA_* options)
- *   log.txt          everything the runtime prints (also sent to logcat, tag LAARecomp)
+ *   log.txt          everything the runtime prints (also sent to logcat, tag ZLAA)
  *   save/            the game's saves
  * Reserves guest memory, loads the game's modules from the player's own dump, opens a window
  * (SDL3 + Vulkan; --headless: none), then starts the game the way the Switch kernel would.
@@ -273,7 +273,7 @@ static int log_pipe = -1;                            /* (the pump's end) */
 /* Native stdout/stderr go nowhere on Android: they are pointed at a pipe, and this thread
  * copies each line to logcat and to the app folder's log.txt. */
 static void log_line(const char *line) {
-    __android_log_write(ANDROID_LOG_INFO, "LAARecomp", line);
+    __android_log_write(ANDROID_LOG_INFO, "ZLAA", line);
     if (log_file) { fprintf(log_file, "%s\n", line); fflush(log_file); }
 }
 
@@ -568,9 +568,9 @@ int main(int argc, char **argv) {
             /* SDL's activity sets the screen orientation from the window's size, and a 0x0 window
              * isn't wider than tall: without this hint it turns the app to portrait */
             SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
-            window = SDL_CreateWindow("LAARecomp", 0, 0, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
+            window = SDL_CreateWindow("ZLAA", 0, 0, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
 #else
-            window = SDL_CreateWindow("LAARecomp", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+            window = SDL_CreateWindow("ZLAA", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 #endif
             if (!window) fprintf(stderr, "No window: %s\n", SDL_GetError());
             else if (render_init(window) != 0) { SDL_DestroyWindow(window); window = NULL; }
