@@ -11,7 +11,7 @@
 #include "shader.h"
 #include "spirv_builder.h"
 #include "maxwell_ops.h"
-#include "../../../third_party/spirv/GLSL.std.450.h"
+#include "spirv/GLSL.std.450.h"
 #include <stdint.h>
 
 #define RZ 255

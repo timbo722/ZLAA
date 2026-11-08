@@ -11,7 +11,7 @@
 #define SPIRV_BUILDER_H
 
 #include <stdint.h>
-#include "../../../third_party/spirv/spirv.h"
+#include "spirv/spirv.h"
 
 typedef struct {
     uint32_t *w;

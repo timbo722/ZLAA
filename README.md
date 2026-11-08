@@ -142,7 +142,7 @@ python recompiler/recomp.py <your game>/exefs -o ~/zlaa-gen --no-comments
 - [RmlUi](https://github.com/mikke89/RmlUi) and [FreeType](https://freetype.org) for the menus and their text
 - [Nunito](https://github.com/googlefonts/nunito) and [Material Symbols](https://github.com/google/material-design-icons) for the menus' lettering and icons
 - [Python](https://www.python.org) and [Zig](https://ziglang.org), which build the game on your device
-- The [SPIR-V headers](https://github.com/KhronosGroup/SPIRV-Headers) from the Khronos Group (`third_party/spirv`)
+- The [SPIR-V headers](https://github.com/KhronosGroup/SPIRV-Headers) from the Khronos Group (`runtime/render/shader/spirv`)
 - [Capstone](https://www.capstone-engine.org), [Unicorn](https://www.unicorn-engine.org), [pyelftools](https://github.com/eliben/pyelftools) and [python-lz4](https://github.com/python-lz4/python-lz4) in the recompiler and its tests
 - [libvpx](https://chromium.googlesource.com/webm/libvpx) for movies in the desktop build
 
