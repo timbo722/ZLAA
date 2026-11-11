@@ -6,7 +6,8 @@ set -e
 B=${1:-$HOME/laar-build/android/build/game}
 G=$(ls $B/libgame-*.so); N=$(basename $G); S=$X/game/$N
 mkdir -p $X/game
-if [ ! -f $S ] || [ $G -nt $S ]; then
+# (whole seconds: the Windows drive keeps times less exactly than Linux, so "-nt" was true after every copy)
+if [ ! -f $S ] || [ $(stat -c %Y $G) -gt $(stat -c %Y $S) ]; then
   STRIP=$(ls ~/laar-build/android/sdk/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip | head -1)
   $STRIP --strip-debug -o $S.tmp $G && touch -r $G $S.tmp && mv $S.tmp $S
   $W shell mkdir -p $A/game

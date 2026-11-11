@@ -3,7 +3,7 @@
  * without running the game. Dumps come from LAA_DUMP_SHADERS=dir (NAME.code and NAME.ctrl,
  * the shader and its NVN control section).
  *
- *   shader_tool <shader.code> [out.spv]
+ *   shader_tool <shader.code> [out.spv]        (SHADER_TOOL_OPTIONS=n: with these translator options)
  *
  * Prints what the shader uses, or why it couldn't be translated (exit status 1).
  */
@@ -41,7 +41,9 @@ int main(int argc, char **argv) {
     }
     if (c_off > size || c_size > size - c_off) c_off = c_size = 0;
     ShaderInfo info;
-    if (shader_translate(code, size, stage, code + c_off, c_size, have_control ? control : NULL, SHADER_GL_DEPTH, 0, 0, &info) != 0) {
+    /* SHADER_TOOL_OPTIONS=n: extra translator options (shader.h's SHADER_* bits), to check their SPIR-V too */
+    int options = SHADER_GL_DEPTH | (getenv("SHADER_TOOL_OPTIONS") ? (int)strtol(getenv("SHADER_TOOL_OPTIONS"), NULL, 0) : 0);
+    if (shader_translate(code, size, stage, code + c_off, c_size, have_control ? control : NULL, options, 0, 0, &info) != 0) {
         printf("%s: FAIL (%s)\n", argv[1], info.error);
         return 1;
     }
