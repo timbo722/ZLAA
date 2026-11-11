@@ -57,6 +57,11 @@ static VkBuffer guard_buffer;
 static volatile uint32_t *guard_ptr;
 
 void render_guard_init(void) {                       /* (before any shader is translated) */
+    if (getenv("LAA_DISPATCH_LIMIT")) {              /* (another jump limit for the dispatch loop: changes the SPIR-V) */
+        shader_dispatch_limit = (uint32_t)strtoul(getenv("LAA_DISPATCH_LIMIT"), NULL, 0);
+        if (shader_dispatch_limit < 16) shader_dispatch_limit = 16;
+        fprintf(stderr, "render: LAA_DISPATCH_LIMIT: shaders end after %u jumps\n", shader_dispatch_limit);
+    }
     if (!getenv("LAA_SHADER_GUARD")) return;
     guard_ptr = debug_buffer(16 * SHADER_GUARD_SLOTS, &guard_buffer, &shader_guard_address);
     memset((void *)guard_ptr, 0, 16 * SHADER_GUARD_SLOTS);
@@ -71,7 +76,7 @@ void render_guard_check(uint64_t frame) {
         uint64_t id = e[0] | (uint64_t)e[1] << 32;
         fprintf(stderr, "render: frame %llu: shader %#llx hit the dispatch guard: %s\n", (unsigned long long)frame,
                 (unsigned long long)id, e[2] == SHADER_GUARD_NO_BLOCK ? "jump to no block" : e[2] == SHADER_GUARD_JUMPS ? "too many jumps (a loop that never ends)"
-                                                     : "4096 jumps in one invocation (a loop running long)");
+                                                     : "many jumps in one invocation (a loop running long)");
         e[2] = 0;
     }
 }
@@ -126,6 +131,13 @@ static HostShader *make_shader(uint64_t code, uint64_t control, int stage, uint3
         if (!ahead && debug_fs && (strtoull(debug_fs, NULL, 0) == code || (!strcmp(debug_fs, "all") && stage == SHADER_FRAGMENT))) {
             options |= SHADER_DEBUG_CONST;
             if (getenv("LAA_DEBUG_FS_INPUT")) options |= ((int)strtol(getenv("LAA_DEBUG_FS_INPUT"), NULL, 0) + 1) << 8;
+        }
+        /* LAA_STUCK_FS=address (+ LAA_STUCK_EVERY=n, a power of two, default 256): in that fragment shader the pixels
+         * at multiples of n spin in the dispatch loop until the guard: what a never-ending loop costs the GPU */
+        const char *stuck = getenv("LAA_STUCK_FS");
+        if (stuck && stage == SHADER_FRAGMENT && strtoull(stuck, NULL, 16) == code) {
+            if (getenv("LAA_STUCK_EVERY")) shader_stuck_every = (uint32_t)strtoul(getenv("LAA_STUCK_EVERY"), NULL, 0);
+            options |= SHADER_DEBUG_STUCK;
         }
         int ok = shader_translate(p, avail, stage, p + c_off, c_size, control ? gptr(control) : NULL, options, extra_outputs, code, &s->info) == 0;
         if (ok && s->info.ntextures > RENDER_LAYOUT_TEXTURES) {   /* (not in the set layout: never seen so far) */

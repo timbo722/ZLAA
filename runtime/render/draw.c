@@ -1076,6 +1076,17 @@ static struct {
 
 static void forget_bound(void) { bound.serial = 0; }
 
+/* Is this shader address in a list "addr,addr" (hexadecimal)? (LAA_SKIP_FS, LAA_REPEAT_FS) */
+static int fs_listed(const char *list, uint64_t code) {
+    for (const char *s = list; *s;) {
+        char *end;
+        if (strtoull(s, &end, 16) == code) return 1;
+        if (end == s) break;
+        s = *end == ',' ? end + 1 : end;
+    }
+    return 0;
+}
+
 static void draw(const Cmd *r, int indexed) {
     submit_early();
     frame_draws++;
@@ -1097,16 +1108,17 @@ static void draw(const Cmd *r, int indexed) {
         if (!vs->module) { stats.failed_shader++; return; }
     }
     stats.other++;                                   /* (until it is done, below) */
-    static const char *skip_fs = (const char *)-1;   /* LAA_SKIP_FS=addr,addr: leave out the draws of these fragment shaders */
-    if (skip_fs == (const char *)-1) skip_fs = getenv("LAA_SKIP_FS");
-    if (skip_fs) {
-        for (const char *s = skip_fs; *s;) {
-            char *end;
-            if (strtoull(s, &end, 16) == fs->code) return;
-            if (end == s) break;
-            s = *end == ',' ? end + 1 : end;
-        }
+    /* LAA_SKIP_FS=addr,addr: leave out the draws of these fragment shaders; LAA_REPEAT_FS=addr,addr (+ LAA_REPEAT=n,
+     * default 8): draw theirs n times (a GPU hang that comes from one of them shows up n times as often) */
+    static const char *skip_fs = (const char *)-1, *repeat_fs;
+    static int repeat_n = 8;
+    if (skip_fs == (const char *)-1) {
+        skip_fs = getenv("LAA_SKIP_FS");
+        repeat_fs = getenv("LAA_REPEAT_FS");
+        if (getenv("LAA_REPEAT")) repeat_n = atoi(getenv("LAA_REPEAT"));
     }
+    if (skip_fs && fs_listed(skip_fs, fs->code)) return;
+    int times = repeat_fs && fs_listed(repeat_fs, fs->code) ? repeat_n : 1;
     if (r->a[0] == 7 || r->a[0] == 8 || r->a[0] == 9 || r->a[0] == 2) { warn_once("quads/polygons/line loops", r->a[0]); return; }
 
     if (render_tracing()) {                          /* one line per draw: shaders, targets, storage buffers */
@@ -1272,9 +1284,11 @@ static void draw(const Cmd *r, int indexed) {
             vkCmdBindIndexBuffer(cmd, b, off, type);
             bound.ib = b; bound.ioff = off; bound.itype = type;
         }
-        vkCmdDrawIndexed(cmd, (uint32_t)r->a[2], (uint32_t)r->a[6], 0, (int32_t)r->a[4], (uint32_t)r->a[5]);
+        for (int k = 0; k < times; k++)
+            vkCmdDrawIndexed(cmd, (uint32_t)r->a[2], (uint32_t)r->a[6], 0, (int32_t)r->a[4], (uint32_t)r->a[5]);
     } else {
-        vkCmdDraw(cmd, (uint32_t)r->a[2], (uint32_t)r->a[4], (uint32_t)r->a[1], (uint32_t)r->a[3]);
+        for (int k = 0; k < times; k++)
+            vkCmdDraw(cmd, (uint32_t)r->a[2], (uint32_t)r->a[4], (uint32_t)r->a[1], (uint32_t)r->a[3]);
     }
     if (!pass_fs) pass_fs = st.program.code[STAGE_FRAGMENT];
     pass_ndraws++;

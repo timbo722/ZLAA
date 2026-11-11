@@ -59,8 +59,11 @@ enum { SHADER_GL_DEPTH = 1,         /* vertex: clip-space z is -w..w (OpenGL/NVN
                                       * each vertex at shader_capture_address (slot instance * 4 +
                                       * vertex % 4, 8 floats each, 256 slots) */
        SHADER_FULL_HALF = 16,        /* packed-half arithmetic in full 32-bit precision (not RelaxedPrecision) */
-       SHADER_GUARD_REPORT = 32 };   /* (debugging) a shader that ends at the dispatch guard (translate.c)
+       SHADER_GUARD_REPORT = 32,     /* (debugging) a shader that ends at the dispatch guard (translate.c)
                                       * writes id and why in its slot at shader_guard_address */
+       SHADER_DEBUG_STUCK = 64 };    /* fragment (debugging): the pixels whose x and y are multiples of
+                                      * shader_stuck_every never leave the dispatch loop (until the guard ends
+                                      * them): what a loop that never ends costs the GPU */
 extern uint64_t shader_capture_address;   /* a GPU address (buffer device address) */
 /* SHADER_GUARD_REPORT: SHADER_GUARD_SLOTS slots of 4 words (id low, id high, reason, 0); a shader's
  * slot is shader_guard_slot(id); reason SHADER_GUARD_NO_BLOCK, _JUMPS (ended) or _LONG (4096 jumps: warned) */
@@ -68,6 +71,8 @@ extern uint64_t shader_capture_address;   /* a GPU address (buffer device addres
 enum { SHADER_GUARD_NO_BLOCK = 1, SHADER_GUARD_JUMPS = 2, SHADER_GUARD_LONG = 3 };
 static inline uint32_t shader_guard_slot(uint64_t id) { return (uint32_t)((id >> 4) * 0x9E3779B1u >> 22) & (SHADER_GUARD_SLOTS - 1); }
 extern uint64_t shader_guard_address;
+extern uint32_t shader_stuck_every;      /* (SHADER_DEBUG_STUCK; a power of two) */
+extern uint32_t shader_dispatch_limit;   /* jumps one invocation may make before the shader is ended (translate.c) */
 /* id: the shader's address (what SHADER_GUARD_REPORT writes) */
 int shader_translate(const uint8_t *code, size_t size, int stage, const uint8_t *constants,
                      uint32_t constants_size, const uint8_t *control, int options, uint32_t extra_outputs,

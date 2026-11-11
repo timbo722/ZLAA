@@ -854,6 +854,8 @@ static void emit_predicated(T *t, const Inst *in, uint32_t next_block) {
 #define DISPATCH_WARN 4096                           /* (SHADER_GUARD_REPORT: reported, not stopped) */
 
 uint64_t shader_guard_address;
+uint32_t shader_stuck_every = 256;
+uint32_t shader_dispatch_limit = DISPATCH_LIMIT;     /* (LAA_DISPATCH_LIMIT: another limit, to see what it changes) */
 
 /* SHADER_GUARD_REPORT: write id and reason in this shader's slot (shader.h); the runtime reads
  * and clears it (render_guard_check). Every invocation that gets here writes the same words. */
@@ -890,12 +892,27 @@ static void emit_program(T *t) {
         /* report a loop early (DISPATCH_WARN jumps): a wrong loop over a whole screen of pixels gets
          * the GPU reset long before any pixel reaches DISPATCH_LIMIT, and its reports with it */
         uint32_t warn = spv_id(&t->s), go_on = spv_id(&t->s);
-        uint32_t cond = op2(t, SpvOpIEqual, t->t_bool, load(t, t->t_u32, jumps_var), cu(t, DISPATCH_WARN));
+        uint32_t warn_at = shader_dispatch_limit > DISPATCH_WARN ? DISPATCH_WARN : shader_dispatch_limit / 2;
+        uint32_t cond = op2(t, SpvOpIEqual, t->t_bool, load(t, t->t_u32, jumps_var), cu(t, warn_at));
         spv_op(&t->s, SEC_BODY, SpvOpSelectionMerge, 2, go_on, SpvSelectionControlMaskNone);
         spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, cond, warn, go_on);
         label(t, warn);
         report_guard(t, SHADER_GUARD_LONG);
         branch(t, go_on);
+        label(t, go_on);
+    }
+    if ((t->options & SHADER_DEBUG_STUCK) && t->stage == SHADER_FRAGMENT) {
+        /* some pixels go round and round without running any block: "continue" until the guard ends them */
+        uint32_t go_on = spv_id(&t->s), spin = spv_id(&t->s), mask = cu(t, shader_stuck_every - 1), cond = 0;
+        for (uint32_t k = 0; k < 2; k++) {
+            uint32_t v = op1(t, SpvOpConvertFToU, t->t_u32, load(t, t->t_f32, component_ptr(t, SpvStorageClassInput, frag_coord(t), k)));
+            uint32_t zero = op2(t, SpvOpIEqual, t->t_bool, op2(t, SpvOpBitwiseAnd, t->t_u32, v, mask), cu(t, 0));
+            cond = k ? op2(t, SpvOpLogicalAnd, t->t_bool, cond, zero) : zero;
+        }
+        spv_op(&t->s, SEC_BODY, SpvOpSelectionMerge, 2, go_on, SpvSelectionControlMaskNone);
+        spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, cond, spin, go_on);
+        label(t, spin);
+        branch(t, t->loop_continue);
         label(t, go_on);
     }
     uint32_t pc = load(t, t->t_u32, t->pc_var);
@@ -934,7 +951,7 @@ static void emit_program(T *t) {
     label(t, t->loop_continue);                      /* jumps++; on to the next block, or out after too many */
     uint32_t jumps = op2(t, SpvOpIAdd, t->t_u32, load(t, t->t_u32, jumps_var), cu(t, 1));
     store(t, jumps_var, jumps);
-    spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, op2(t, SpvOpULessThan, t->t_bool, jumps, cu(t, DISPATCH_LIMIT)), header, merge);
+    spv_op(&t->s, SEC_BODY, SpvOpBranchConditional, 3, op2(t, SpvOpULessThan, t->t_bool, jumps, cu(t, shader_dispatch_limit)), header, merge);
     label(t, merge);
     report_guard(t, SHADER_GUARD_JUMPS);
     emit_outputs_at_exit(t);
