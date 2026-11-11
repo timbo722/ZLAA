@@ -29,7 +29,8 @@ extern "C" {               /* (the menus, runtime/ui, are C++) */
     X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkEnumerateDeviceExtensionProperties) \
     X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
-    X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceExternalBufferProperties)
+    X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceExternalBufferProperties) \
+    X(vkGetPhysicalDeviceFeatures2)
 
 /* loaded with vkGetDeviceProcAddr(device, ...) */
 #define VK_DEVICE_FUNCTIONS(X) \
@@ -72,6 +73,8 @@ typedef struct {
     VkInstance instance;
     VkPhysicalDevice gpu;
     VkPhysicalDeviceMemoryProperties memory_props;
+    char gpu_name[256];              /* as the driver names it ("Adreno (TM) 740") */
+    uint32_t api_version;            /* the Vulkan version the driver implements */
     VkDevice device;
     uint32_t queue_family;
     VkQueue queue;
@@ -100,7 +103,9 @@ int vk_find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want);   /* -1
 const char *vk_result_name(VkResult r);
 void vk_save_pipeline_cache(void);
 #define VK_CHECK(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) vk_fail(#call, r_); } while (0)
-void vk_fail(const char *what, VkResult r);   /* prints and exits */
+void vk_fail(const char *what, VkResult r);   /* prints, tells the player (vk_fatal_hook) and exits */
+extern char vk_error[400];                    /* why vk_init returned -1, in words for the player */
+extern void (*vk_fatal_hook)(const char *message);
 
 #ifdef __cplusplus
 }

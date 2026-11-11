@@ -7,8 +7,12 @@
 #include <stdint.h>
 #include "nvn/nvn.h"
 
-/* Set up Vulkan for an SDL window. 0 on success; otherwise the game runs without a screen. */
+/* Set up Vulkan for an SDL window. 0 on success; otherwise the game runs without a screen, and render_error()
+ * says why in words for the player (a device whose graphics driver lacks something ZLAA needs). */
 int render_init(void *sdl_window);
+const char *render_error(void);
+/* `show` is called with a message when a graphics error is about to close the app (from any thread) */
+void render_on_fatal(void (*show)(const char *message));
 int render_active(void);
 /* Show this NVNtexture (guest address) in the window, the part `crop` (x, y, width, height;
  * width 0: all of it) scaled to fill it. Waits for the display (vsync). */

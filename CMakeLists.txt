@@ -144,13 +144,13 @@ target_compile_options(recomp_runtime PRIVATE ${RECOMP_FLAGS} -Wall -Wextra)
 
 # The menus (runtime/ui, C++): RmlUi + FreeType, static libraries made by tools/build_ui_deps.sh.
 # Without them the program starts the game straight away, as before. Their files: res/ (LAA_RES_DIR).
+add_custom_target(laa_build_info                       # (the commit, at every build: tools/cmake/build_info.cmake)
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/laa_build_info.h
+            -P ${CMAKE_SOURCE_DIR}/tools/cmake/build_info.cmake
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/laa_build_info.h)
 find_package(RmlUi CONFIG QUIET)
 if(SDL3_FOUND AND RmlUi_FOUND)
     enable_language(CXX)
-    add_custom_target(laa_build_info                   # (the commit, at every build: tools/cmake/build_info.cmake)
-        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/laa_build_info.h
-                -P ${CMAKE_SOURCE_DIR}/tools/cmake/build_info.cmake
-        BYPRODUCTS ${CMAKE_BINARY_DIR}/laa_build_info.h)
     add_library(laa_ui STATIC runtime/ui/ui.cpp runtime/ui/ui_render.cpp runtime/ui/game_art.cpp)
     add_dependencies(laa_ui laa_build_info)
     target_include_directories(laa_ui PRIVATE runtime ${CMAKE_BINARY_DIR})
@@ -214,7 +214,10 @@ if(ANDROID)
     add_library(main SHARED host/main.c host/builder.c)   # (builder.c: the game code built on the device)
     # the whole runtime, also what only the game library calls (recomp_bad_jump, recomp_aes, ...)
     target_link_libraries(main PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_runtime>" ${LAA_UI} m log android SDL3::SDL3)
-    target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1> RECOMP_ABI="${RECOMP_ABI}")
+    target_compile_definitions(main PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1> RECOMP_ABI="${RECOMP_ABI}"
+                               LAA_VERSION="${PROJECT_VERSION}")
+    add_dependencies(main laa_build_info)            # (the log's first line: version and commit)
+    target_include_directories(main PRIVATE ${CMAKE_BINARY_DIR})
     target_compile_options(main PRIVATE -Wall)
     # Calls between the runtime's own functions go straight to them, not through the PLT: in a
     # shared library every global function could be replaced from outside, so each call took a
@@ -230,7 +233,9 @@ else()
     # ENABLE_EXPORTS (-rdynamic): the game library finds the runtime's functions in laa_host.
     add_executable(laa_host host/main.c)
     target_link_libraries(laa_host PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_runtime>" m)
-    add_dependencies(laa_host game)              # (built together; opened from next to laa_host)
+    add_dependencies(laa_host game laa_build_info)   # (game: built together; opened from next to laa_host)
+    target_include_directories(laa_host PRIVATE ${CMAKE_BINARY_DIR})
+    target_compile_definitions(laa_host PRIVATE LAA_VERSION="${PROJECT_VERSION}")
     if(SDL3_FOUND)
         target_link_libraries(laa_host PRIVATE SDL3::SDL3 ${LAA_UI})
         target_compile_definitions(laa_host PRIVATE LAA_HAVE_SDL=1 $<$<BOOL:${LAA_UI}>:LAA_HAVE_UI=1>

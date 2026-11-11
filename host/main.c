@@ -36,6 +36,15 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "input.h"
+#ifndef LAA_VERSION
+#define LAA_VERSION "dev"
+#endif
+#if __has_include("laa_build_info.h")
+#include "laa_build_info.h"                          /* (LAA_COMMIT, made at every build) */
+#endif
+#ifndef LAA_COMMIT
+#define LAA_COMMIT "unknown"
+#endif
 #ifdef LAA_HAVE_SDL
 #include <SDL3/SDL.h>
 #include "render/render.h"
@@ -261,6 +270,7 @@ static void read_input(void) {
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 #include <dirent.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
@@ -376,6 +386,20 @@ static void android_setup(const char **exefs, const char **romfs) {
         pthread_t t;
         pthread_create(&t, NULL, log_pump, (void *)(intptr_t)p[0]);
     }
+    /* the log's first lines: which ZLAA, on what (a bug report from another device starts here) */
+    char maker[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "", release[PROP_VALUE_MAX] = "", sdk[PROP_VALUE_MAX] = "",
+         soc_maker[PROP_VALUE_MAX] = "", soc[PROP_VALUE_MAX] = "", board[PROP_VALUE_MAX] = "";
+    __system_property_get("ro.product.manufacturer", maker);
+    __system_property_get("ro.product.model", model);
+    __system_property_get("ro.build.version.release", release);
+    __system_property_get("ro.build.version.sdk", sdk);
+    __system_property_get("ro.soc.manufacturer", soc_maker);
+    __system_property_get("ro.soc.model", soc);
+    __system_property_get("ro.board.platform", board);
+    printf("ZLAA %s (build %s)\n", LAA_VERSION, LAA_COMMIT);
+    printf("device: %s %s, Android %s (API %s), chip %s %s (%s), %ld cores, %ld MB of memory\n", maker, model, release, sdk,
+           soc_maker, soc, board, sysconf(_SC_NPROCESSORS_CONF),
+           (long)((long long)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE) >> 20));
     snprintf(path, sizeof path, "%s/env.txt", base);
     FILE *env = fopen(path, "r");
     char line[8192];
@@ -553,10 +577,21 @@ static void move_old_folders(void) {
 }
 #endif
 
+#ifdef __ANDROID__
+/* Something the app can't go on after: tell the player in a dialog (the log has the details). From any thread. */
+static void fatal_message(const char *text) {
+    char all[900];
+    snprintf(all, sizeof all, "%s\n\nThe details are in log.txt, in the app's folder (Android/data/io.github.zlaa/files). "
+             "Please include that file if you report this.", text);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "ZLAA", all, NULL);
+}
+#endif
+
 int main(int argc, char **argv) {
     const char *exefs = NULL, *romfs = NULL, *dump = NULL;
 #ifndef __ANDROID__
     move_old_folders();
+    printf("ZLAA %s (build %s)\n", LAA_VERSION, LAA_COMMIT);
 #endif
     int headless = 0;
     for (int k = 1; k < argc; k++) {
@@ -587,6 +622,7 @@ int main(int argc, char **argv) {
             /* SDL's activity sets the screen orientation from the window's size, and a 0x0 window
              * isn't wider than tall: without this hint it turns the app to portrait */
             SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+            render_on_fatal(fatal_message);
             window = SDL_CreateWindow("ZLAA", 0, 0, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
 #else
             window = SDL_CreateWindow("ZLAA", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
@@ -595,6 +631,18 @@ int main(int argc, char **argv) {
             else if (render_init(window) != 0) { SDL_DestroyWindow(window); window = NULL; }
             else SDL_AddEventWatch(lifecycle, NULL);
         }
+#ifdef __ANDROID__
+        /* No screen on Android means nothing to see or do: say why and close (a device whose graphics driver
+         * lacks what ZLAA needs, mostly), instead of running the game unseen */
+        if (!window) {
+            char text[600];
+            snprintf(text, sizeof text, "ZLAA can't run on this device yet.\n\n%s",
+                     render_error()[0] ? render_error() : "It couldn't open its window.");
+            fatal_message(text);
+            fflush(NULL);
+            _exit(1);
+        }
+#endif
     }
 #else
     (void)headless;

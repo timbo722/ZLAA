@@ -13,6 +13,7 @@
 #include "kernel.h"                          /* (host_thread_init) */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,9 +50,33 @@ const char *vk_result_name(VkResult r) {
     }
 }
 
+/* Why Vulkan couldn't start, in words for the player (render_error); and what the host shows them when a Vulkan
+ * call fails for good (Android: a dialog; without a hook only the log has it) */
+char vk_error[400];
+void (*vk_fatal_hook)(const char *message);
+
+static int cant_start(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(vk_error, sizeof vk_error, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "vulkan: %s\n", vk_error);
+    return -1;
+}
+
+const char *render_error(void) { return vk_error; }
+void render_on_fatal(void (*show)(const char *message)) { vk_fatal_hook = show; }
+
 void vk_fail(const char *what, VkResult r) {
+    static int failing;
     fprintf(stderr, "vulkan: %s failed: %s (%d)\n", what, vk_result_name(r), (int)r);
     fflush(NULL);
+    if (__atomic_exchange_n(&failing, 1, __ATOMIC_SEQ_CST)) for (;;) pause();   /* (another thread is already closing the app) */
+    if (vk_fatal_hook) {
+        char text[400];
+        snprintf(text, sizeof text, "A graphics error closed ZLAA:\n%.200s failed: %s", what, vk_result_name(r));
+        vk_fatal_hook(text);
+    }
     _exit(1);           /* (exit() would tear down the driver's state under the game's running threads) */
 }
 
@@ -65,12 +90,13 @@ uint32_t vk_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
     int i = vk_find_memory_type(type_bits, want);
     if (i >= 0) return (uint32_t)i;
     fprintf(stderr, "vulkan: no memory type with flags %#x\n", want);
-    exit(1);
+    vk_fail("finding a memory type", VK_ERROR_FEATURE_NOT_PRESENT);
+    return 0;
 }
 
 static int create_instance(void) {
     PFN_vkGetInstanceProcAddr get = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
-    if (!get) { fprintf(stderr, "vulkan: no Vulkan loader (%s)\n", SDL_GetError()); return -1; }
+    if (!get) return cant_start("This device has no Vulkan graphics driver (%s).", SDL_GetError());
 #define VK_LOAD_GLOBAL(name) name = (PFN_##name)get(NULL, #name);
     VK_GLOBAL_FUNCTIONS(VK_LOAD_GLOBAL)
 
@@ -84,7 +110,8 @@ static int create_instance(void) {
     VkInstanceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                 .enabledExtensionCount = n, .ppEnabledExtensionNames = sdl_ext,
                                 .enabledLayerCount = nlayers, .ppEnabledLayerNames = layers };
-    VK_CHECK(vkCreateInstance(&ci, NULL, &vk.instance));
+    VkResult r = vkCreateInstance(&ci, NULL, &vk.instance);
+    if (r != VK_SUCCESS) return cant_start("Vulkan couldn't start on this device (%s).", vk_result_name(r));
 #define VK_LOAD_INSTANCE(name) name = (PFN_##name)get(vk.instance, #name);
     VK_INSTANCE_FUNCTIONS(VK_LOAD_INSTANCE)
     return 0;
@@ -113,15 +140,23 @@ static int pick_gpu(void) {
             break;
         }
     }
-    if (best < 0) { fprintf(stderr, "vulkan: no GPU can draw to this window\n"); return -1; }
+    if (best < 0) return cant_start("No graphics processor here can draw to the screen with Vulkan.");
     vk.gpu = gpus[best];
     vk.queue_family = best_family;
     VkPhysicalDeviceProperties p;
     vkGetPhysicalDeviceProperties(vk.gpu, &p);
     vkGetPhysicalDeviceMemoryProperties(vk.gpu, &vk.memory_props);
     vk.cpu_renderer = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
-    fprintf(stderr, "vulkan: using %s (Vulkan %u.%u)\n", p.deviceName,
-            VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion));
+    /* the driver's own name and version (Vulkan 1.2's driver properties; older drivers leave them empty): bug
+     * reports from other devices need them */
+    VkPhysicalDeviceDriverProperties driver = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+    VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &driver };
+    if (p.apiVersion >= VK_API_VERSION_1_1) vkGetPhysicalDeviceProperties2(vk.gpu, &p2);
+    fprintf(stderr, "vulkan: using %s (Vulkan %u.%u.%u; driver %s %s, version %#x)\n", p.deviceName,
+            VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion),
+            driver.driverName, driver.driverInfo, p.driverVersion);
+    snprintf(vk.gpu_name, sizeof vk.gpu_name, "%s", p.deviceName);
+    vk.api_version = p.apiVersion;
     return 0;
 }
 
@@ -149,6 +184,29 @@ static int create_device(void) {
                 l->maxPerStageDescriptorSampledImages, (unsigned long long)l->minUniformBufferOffsetAlignment, push.maxPushDescriptors);
     }
 
+    /* What ZLAA can't do without, checked before the device is made: a clear sentence for the player instead of a
+     * failed vkCreateDevice. (LAA_VK_FAIL=1 pretends something is missing: to see the message.) */
+    if (vk.api_version < VK_API_VERSION_1_3 || getenv("LAA_VK_FAIL"))
+        return cant_start("ZLAA needs Vulkan 1.3. This device's graphics driver (%s) offers Vulkan %u.%u.", vk.gpu_name,
+                          VK_API_VERSION_MAJOR(vk.api_version), VK_API_VERSION_MINOR(vk.api_version));
+    {
+        VkPhysicalDeviceVulkan13Features h13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+        VkPhysicalDeviceVulkan12Features h12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &h13 };
+        VkPhysicalDeviceVulkan11Features h11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &h12 };
+        VkPhysicalDeviceFeatures2 have = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &h11 };
+        vkGetPhysicalDeviceFeatures2(vk.gpu, &have);
+        char missing[200] = "";
+        const struct { VkBool32 has; const char *name; } needs[] = {
+            { h13.dynamicRendering, "dynamic rendering" }, { h11.shaderDrawParameters, "shader draw parameters" },
+            { h12.bufferDeviceAddress, "buffer device addresses" }, { h12.timelineSemaphore, "timeline semaphores" },
+            { has_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) || has_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME),
+              "shared memory (external memory)" },
+        };
+        for (size_t i = 0; i < sizeof needs / sizeof *needs; i++)
+            if (!needs[i].has) snprintf(missing + strlen(missing), sizeof missing - strlen(missing), "%s%s", missing[0] ? ", " : "", needs[i].name);
+        if (missing[0])
+            return cant_start("This device's graphics driver (%s) lacks Vulkan features ZLAA needs: %s.", vk.gpu_name, missing);
+    }
     float priority = 1.0f;
     VkDeviceQueueCreateInfo q = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                   .queueFamilyIndex = vk.queue_family, .queueCount = 1,
@@ -183,7 +241,13 @@ static int create_device(void) {
     VkDeviceCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
                               .queueCreateInfoCount = 1, .pQueueCreateInfos = &q,
                               .enabledExtensionCount = next, .ppEnabledExtensionNames = ext };
-    VK_CHECK(vkCreateDevice(vk.gpu, &ci, NULL, &vk.device));
+    VkResult made = vkCreateDevice(vk.gpu, &ci, NULL, &vk.device);
+    if (made != VK_SUCCESS)
+        return cant_start("This device's graphics driver (%s) refused to start (%s).", vk.gpu_name, vk_result_name(made));
+    /* compressed textures the GPU can't sample: ASTC is decoded on the CPU (astc.c); BC has no decoder yet */
+    fprintf(stderr, "vulkan: compressed textures: BC %s, ASTC %s\n",
+            supported.textureCompressionBC ? "native" : "NOT SUPPORTED (those textures will be missing)",
+            supported.textureCompressionASTC_LDR ? "native" : "decoded on the CPU");
 #define VK_LOAD_DEVICE(name) name = (PFN_##name)vkGetDeviceProcAddr(vk.device, #name);
     VK_DEVICE_FUNCTIONS(VK_LOAD_DEVICE)
     vkGetDeviceQueue(vk.device, vk.queue_family, 0, &vk.queue);
