@@ -436,8 +436,9 @@ static void copy_texture(const ImageRef *src_ref, const ImageRef *dst_ref, uint3
         render_debug_dump(src, path);
     }
     if (render_tracing())
-        fprintf(stderr, "render: copy %ux%u fmt %d -> %ux%u fmt %d, flags %#x, regions %d,%d %dx%d -> %d,%d %dx%d, views %#x %#x\n",
-                src->width, src->height, src->format, dst->width, dst->height, dst->format, flags, src_ref->region[0],
+        fprintf(stderr, "render: copy %ux%u fmt %d @%#llx -> %ux%u fmt %d @%#llx, flags %#x, regions %d,%d %dx%d -> %d,%d %dx%d, views %#x %#x\n",
+                src->width, src->height, src->format, (unsigned long long)src->address, dst->width, dst->height, dst->format,
+                (unsigned long long)dst->address, flags, src_ref->region[0],
                 src_ref->region[1], src_ref->region[3], src_ref->region[4], dst_ref->region[0], dst_ref->region[1],
                 dst_ref->region[3], dst_ref->region[4], src_ref->view.set, dst_ref->view.set);
     render_end_rendering();
@@ -1096,6 +1097,16 @@ static void draw(const Cmd *r, int indexed) {
         if (!vs->module) { stats.failed_shader++; return; }
     }
     stats.other++;                                   /* (until it is done, below) */
+    static const char *skip_fs = (const char *)-1;   /* LAA_SKIP_FS=addr,addr: leave out the draws of these fragment shaders */
+    if (skip_fs == (const char *)-1) skip_fs = getenv("LAA_SKIP_FS");
+    if (skip_fs) {
+        for (const char *s = skip_fs; *s;) {
+            char *end;
+            if (strtoull(s, &end, 16) == fs->code) return;
+            if (end == s) break;
+            s = *end == ',' ? end + 1 : end;
+        }
+    }
     if (r->a[0] == 7 || r->a[0] == 8 || r->a[0] == 9 || r->a[0] == 2) { warn_once("quads/polygons/line loops", r->a[0]); return; }
 
     if (render_tracing()) {                          /* one line per draw: shaders, targets, storage buffers */
@@ -1103,7 +1114,7 @@ static void draw(const Cmd *r, int indexed) {
         for (uint32_t i = 0; i < st.rt.count; i++)
             if (st.color[i]) fprintf(stderr, " rt%u %ux%u fmt %d @%#llx", i, st.color[i]->width, st.color[i]->height, st.color[i]->format,
                                      (unsigned long long)st.color[i]->address);
-        if (st.depth) fprintf(stderr, " depth %ux%u", st.depth->width, st.depth->height);
+        if (st.depth) fprintf(stderr, " depth %ux%u @%#llx", st.depth->width, st.depth->height, (unsigned long long)st.depth->address);
         fprintf(stderr, " vp %g,%g %gx%g sc %d,%d %dx%d", st.viewport[0], st.viewport[1], st.viewport[2], st.viewport[3],
                 st.scissor[0], st.scissor[1], st.scissor[2], st.scissor[3]);
         fprintf(stderr, " n %llu x%llu", (unsigned long long)r->a[2], (unsigned long long)(indexed ? r->a[6] : r->a[4]));
