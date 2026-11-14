@@ -9,7 +9,7 @@
 # program (laa_host, or libmain.so on Android) opens at start-up (runtime/game_lib.c): no
 # build of the program itself contains any of the game's code.
 cmake_minimum_required(VERSION 3.20)
-project(ZLAA VERSION 0.1.0 LANGUAGES C)
+project(ZLAA VERSION 0.1.1 LANGUAGES C)
 
 set(GAME_GEN_DIR "" CACHE PATH "Folder written by recomp.py -o (chunked generated C)")
 if(NOT EXISTS "${GAME_GEN_DIR}/sources.cmake")
