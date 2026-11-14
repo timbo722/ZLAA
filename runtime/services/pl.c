@@ -5,7 +5,10 @@
  * never ships them. The font for each of the 6 slots comes from, in order:
  *   1. the player's own dump of that system font, in $LAA_FONT_DIR or
  *      ~/.local/share/ZLAA/fonts (the .bfttf files from the console's system data)
- *   2. a font already installed on the host: $LAA_HOST_FONT, or DejaVu Sans on Linux, or
+ *   2. for the slot the game's language needs (Chinese, Korean; Japanese: the standard slot), a
+ *      free Noto Sans font that comes with ZLAA ($LAA_RES_DIR/fonts, tools/make_cjk_fonts.py):
+ *      the host fonts below have no CJK characters (the text would be white squares)
+ *   3. a font already installed on the host: $LAA_HOST_FONT, or DejaVu Sans on Linux, or
  *      Noto Serif on Android. It must have U+25A1 (white square): the game puts that glyph
  *      in its cache at startup and crashes if the font lacks it. Roboto doesn't have it.
  *
@@ -19,6 +22,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef LAA_HAVE_SDL
+#include <SDL3/SDL.h>
+#endif
 
 #define SHARED_FONT_MEMORY_SIZE 0x1100000
 #define FONT_TYPES 6
@@ -42,7 +48,30 @@ static const char *host_fonts[] = {
 static KSharedMemory *font_shm;
 static uint32_t font_offset[FONT_TYPES], font_size[FONT_TYPES];   /* offset: of the TrueType data */
 
+/* The free stand-in a slot gets when the game's language needs it (only that language's: ~3-5 MB each) */
+static const char *cjk_font(int type) {
+    const char *lang = set_language_name();
+    if (type == 0 && strcmp(lang, "ja") == 0) return "NotoSansJP-Regular.ttf";
+    if ((type == 1 || type == 2) && (strcmp(lang, "zh-Hans") == 0 || strcmp(lang, "zh-CN") == 0))
+        return "NotoSansSC-Regular.ttf";
+    if (type == 3 && (strcmp(lang, "zh-Hant") == 0 || strcmp(lang, "zh-TW") == 0)) return "NotoSansTC-Regular.ttf";
+    if (type == 4 && strcmp(lang, "ko") == 0) return "NotoSansKR-Regular.ttf";
+    return NULL;
+}
+
 static uint8_t *read_all(const char *path, size_t *len) {
+#ifdef LAA_HAVE_SDL
+    /* through SDL: on Android a relative path is a file in the APK's assets (res/fonts) */
+    if (path[0] != '/') {
+        size_t n = 0;
+        void *data = SDL_LoadFile(path, &n);
+        uint8_t *buf = data && n ? malloc(n) : NULL;
+        if (buf) memcpy(buf, data, n);
+        SDL_free(data);
+        *len = buf ? n : 0;
+        return buf;
+    }
+#endif
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
@@ -95,6 +124,21 @@ static void load_fonts(void) {
         snprintf(path, sizeof path, "%s/%s", dir, bfttf_names[t]);
         uint8_t *buf = read_all(path, &len);
         if (buf) size = decode_bfttf(buf, len);
+        const char *cjk = size ? NULL : cjk_font(t);
+        if (cjk && t == 2 && cjk_font(1) == cjk && font_size[1]) {   /* (Chinese: one font for both slots) */
+            free(buf);
+            font_offset[t] = font_offset[1];
+            font_size[t] = font_size[1];
+            continue;
+        }
+        if (cjk) {
+            free(buf);
+            const char *res = getenv("LAA_RES_DIR");
+            snprintf(path, sizeof path, "%s/fonts/%s", res ? res : "res", cjk);
+            buf = read_all(path, &len);
+            size = buf ? len : 0;
+            if (!size) fprintf(stderr, "pl: %s missing: the text will be white squares\n", path);
+        }
         if (!size) {
             free(buf);
             buf = NULL;

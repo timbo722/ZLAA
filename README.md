@@ -64,6 +64,7 @@ ZLAA is young. The first areas of the game (Mabe Village, Toronbo Shores, Myster
 - Handheld mode at 720p, or docked at 1080p.
 - Press Home and the game pauses like a Switch would; come back and the pause menu is waiting.
 - Movies play through Android's own video decoder.
+- Every language the game has, including Japanese, Chinese and Korean (Settings › Interface › Game Language).
 - Shaders are kept between sessions, so places you've been don't stutter again.
 
 **Menus**
@@ -141,6 +142,7 @@ python recompiler/recomp.py <your game>/exefs -o ~/zlaa-gen --no-comments
 - [SDL 3](https://libsdl.org) for the window, controller and sound
 - [RmlUi](https://github.com/mikke89/RmlUi) and [FreeType](https://freetype.org) for the menus and their text
 - [Nunito](https://github.com/googlefonts/nunito) and [Material Symbols](https://github.com/google/material-design-icons) for the menus' lettering and icons
+- [Noto Sans CJK](https://github.com/notofonts/noto-cjk) (SC, TC, KR, JP) for the game's Chinese, Korean and Japanese text
 - [Python](https://www.python.org) and [Zig](https://ziglang.org), which build the game on your device
 - The [SPIR-V headers](https://github.com/KhronosGroup/SPIRV-Headers) from the Khronos Group (`runtime/render/shader/spirv`)
 - [Capstone](https://www.capstone-engine.org), [Unicorn](https://www.unicorn-engine.org), [pyelftools](https://github.com/eliben/pyelftools) and [python-lz4](https://github.com/python-lz4/python-lz4) in the recompiler and its tests

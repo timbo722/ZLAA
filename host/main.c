@@ -662,6 +662,11 @@ int main(int argc, char **argv) {
     }
 
 #ifdef LAA_HAVE_UI
+#ifdef __ANDROID__
+    setenv("LAA_RES_DIR", "res", 0);                 /* (the APK's assets; pl.c's fonts read it even without menus) */
+#elif defined(LAA_RES_DIR)
+    setenv("LAA_RES_DIR", LAA_RES_DIR, 0);
+#endif
     menu = window && menu_wanted();
     if (menu) {
         char config[4096], res[4096];
